@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>把白昼送回去 · 视觉评审</title>
+    <style>
+      :root { color-scheme: dark; background: #0a1219; color: #e0edf0; font: 15px/1.5 system-ui, sans-serif; }
+      * { box-sizing: border-box; }
+      body { margin: 0; padding: clamp(12px, 3vw, 32px); }
+      main { max-width: 1280px; margin: auto; }
+      h1 { font-size: 20px; margin: 0 0 12px; }
+      form { display: flex; align-items: end; flex-wrap: wrap; gap: 10px; }
+      [hidden] { display: none !important; }
+      label { display: grid; gap: 4px; color: #a5bcc5; }
+      select, button { min-height: 44px; padding: 0 10px; border: 1px solid #36515d; border-radius: 4px; background: #142630; color: #e0edf0; font: inherit; }
+      button { cursor: pointer; }
+      :focus-visible { outline: 2px solid #ffd58c; outline-offset: 2px; }
+      #stage { max-width: 100%; width: max-content; margin: 14px auto 0; overflow: hidden; box-shadow: 0 0 0 1px #29404b; }
+      iframe { display: block; border: 0; transform-origin: top left; background: #101b24; }
+      p { color: #a5bcc5; margin: 12px 0 0; }
+      code { color: #ffd58c; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>视觉评审</h1>
+      <p id="startup">在项目目录运行 <code>npm run review:visual</code>，打开本地服务下的 <code>/docs/factory-controls.html</code>。</p>
+      <form id="controls" hidden>
+        <label>战役场景
+          <select id="scene">
+            <option value="opening">开场手采</option>
+            <option value="miner">第一台采矿机出料</option>
+            <option value="first-light">曙港首照失败</option>
+            <option value="three-cities">三城验收前</option>
+          </select>
+        </label>
+        <label>参考视口
+          <select id="viewport">
+            <option value="1280x800">桌面 · 1280 × 800</option>
+            <option value="390x844">手机竖屏 · 390 × 844</option>
+            <option value="844x390">手机横屏 · 844 × 390</option>
+          </select>
+        </label>
+        <button type="button" id="reset">重载场景</button>
+      </form>
+      <p id="scene-note" hidden role="status"></p>
+      <div id="stage" hidden><iframe id="game" title="游戏当前界面"></iframe></div>
+    </main>
+    <script type="module">
+      if (import.meta.env?.DEV && import.meta.env.MODE === 'visual-review') {
+        const main = document.querySelector('main');
+        const scene = document.getElementById('scene');
+        const viewport = document.getElementById('viewport');
+        const note = document.getElementById('scene-note');
+        const stage = document.getElementById('stage');
+        const game = document.getElementById('game');
+        const instructions = {
+          opening: '按住矿点旁的「长按采集」，观察进度条和首份铁矿入手后的制作目标。',
+          miner: '把机旁出料槽的铁矿拖到顶部的铁矿槽。悬停或点按机器可看采集进度。',
+          'first-light': '切到「轨道」查看失败原因，再点「查看电网」和「预览蓄电池」。',
+          'three-cities': '切到「轨道」，比较三座城市的供货、备料和照明入口。',
+        };
+        const params = new URLSearchParams(location.search);
+        scene.value = [...scene.options].find(option => option.value === params.get('scene'))?.value ?? 'opening';
+        viewport.value = [...viewport.options].find(option => option.value === params.get('viewport'))?.value ?? '1280x800';
+        document.getElementById('startup').hidden = true;
+        document.getElementById('controls').hidden = stage.hidden = note.hidden = false;
+
+        function updateAddress() {
+          const url = new URL(location.href);
+          url.searchParams.set('scene', scene.value);
+          url.searchParams.set('viewport', viewport.value);
+          history.replaceState(null, '', url);
+        }
+
+        function resize() {
+          const [width, height] = viewport.value.split('x').map(Number);
+          const scale = Math.min(1, main.clientWidth / width);
+          game.style.width = width + 'px';
+          game.style.height = height + 'px';
+          game.style.transform = 'scale(' + scale + ')';
+          stage.style.width = width * scale + 'px';
+          stage.style.height = height * scale + 'px';
+        }
+
+        function load() {
+          updateAddress();
+          note.textContent = instructions[scene.value];
+          const url = new URL('../', location.href);
+          url.searchParams.set('review', scene.value);
+          game.src = url;
+        }
+
+        new ResizeObserver(resize).observe(main);
+        scene.addEventListener('change', load);
+        viewport.addEventListener('change', () => { updateAddress(); resize(); });
+        document.getElementById('reset').addEventListener('click', load);
+        resize();
+        load();
+      }
+    </script>
+  </body>
+</html>

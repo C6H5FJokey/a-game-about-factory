@@ -3,7 +3,8 @@ pub const H: usize = 34;
 pub const N: usize = W * H;
 pub const HZ: u32 = 20;
 pub const BELT_TICKS: u32 = 5;
-pub const ITEMS: usize = 9;
+pub const MATERIAL_ITEMS: usize = 9;
+pub const ITEMS: usize = MATERIAL_ITEMS + 1;
 pub const BELT: u8 = 1;
 pub const IRON_DRILL: u8 = 2;
 pub const SILICA_DRILL: u8 = 3;
@@ -23,6 +24,22 @@ pub const KILN: u8 = 16;
 pub const SIMPLE_MINER: u8 = 17;
 pub const BENCH: u8 = 18;
 pub const FREIGHT_YARD: u8 = 19;
+pub const INDUSTRIAL_MINER: u8 = 20;
+pub const CABLE: u8 = 21;
+pub const FAST_BELT: u8 = 22;
+pub const MERGER: u8 = 23;
+pub const CROSSING: u8 = 24;
+pub const DEVELOPMENT_HUB: u8 = 25;
+pub const EXPRESS_BELT: u8 = 26;
+pub const REINFORCED_IRON_DRILL: u8 = 27;
+pub const REINFORCED_SILICA_DRILL: u8 = 28;
+pub const REINFORCED_FUEL_DRILL: u8 = 29;
+pub const REINFORCED_MINER: u8 = 30;
+pub const MAX_KIND: u8 = REINFORCED_MINER;
+pub const CABLE_SPAN: u32 = 3;
+pub const GENERATOR_POWER: u16 = 108;
+pub const SOLAR_POWER: u16 = 55;
+pub const LAUNCH_POWER: u16 = 85;
 pub const MINER_COST: u32 = 5;
 pub const MINER_TICKS: u16 = 3 * HZ as u16;
 pub const MINER_CAPACITY: u16 = 8;
@@ -36,6 +53,7 @@ pub const LENS: u8 = 5;
 pub const CORE: u8 = 6;
 pub const MIRROR: u8 = 7;
 pub const KIT: u8 = 8;
+pub const SPEED_MODULE: u8 = 9;
 
 pub const STATION_POS: usize = index(33, 15);
 pub const STATIONS: [usize; 3] = [STATION_POS, index(48, 29), index(9, 29)];
@@ -65,20 +83,112 @@ pub fn neighbor(i: usize, dir: u8) -> Option<usize> {
 }
 
 pub fn is_belt(kind: u8) -> bool {
-    matches!(kind, BELT | SPLITTER)
+    plain_belt(kind) || matches!(kind, SPLITTER | MERGER | CROSSING)
 }
 
-pub fn cost(kind: u8) -> Option<u32> {
-    Some(match kind {
-        BENCH => 2,
-        STATION => 8,
-        BELT => 1,
-        IRON_DRILL | SILICA_DRILL | FUEL_DRILL | DEPOT => 4,
-        SMELTER | GRINDER | CALIBRATOR | SPLITTER | KIT_PRESS => 5,
-        BATTERY | SOLAR => 6,
-        GENERATOR | ASSEMBLER | KILN => 8,
+pub fn plain_belt(kind: u8) -> bool {
+    matches!(kind, BELT | FAST_BELT | EXPRESS_BELT)
+}
+
+pub fn belt_interval(kind: u8) -> u32 {
+    match kind {
+        FAST_BELT => 2,
+        EXPRESS_BELT => 1,
+        _ => BELT_TICKS,
+    }
+}
+
+pub fn belt_lanes(kind: u8) -> usize {
+    if kind == CROSSING {
+        2
+    } else if is_belt(kind) {
+        1
+    } else {
+        0
+    }
+}
+
+// Directions describe the flow of the item, including on entry.
+pub fn belt_outputs(kind: u8, dir: u8, lane: usize) -> [Option<u8>; 2] {
+    [
+        Some((dir + lane as u8) % 4),
+        (kind == SPLITTER).then_some((dir + 1) % 4),
+    ]
+}
+
+pub fn belt_input(kind: u8, dir: u8, flow: u8) -> Option<usize> {
+    if kind == CROSSING {
+        return if flow == dir {
+            Some(0)
+        } else if flow == (dir + 1) % 4 {
+            Some(1)
+        } else {
+            None
+        };
+    }
+    (is_belt(kind) && flow != (dir + 2) % 4 && (kind != SPLITTER || flow != (dir + 3) % 4))
+        .then_some(0)
+}
+
+pub fn materials(kind: u8) -> &'static [(u8, u32)] {
+    match kind {
+        SIMPLE_MINER => &[(IRON, MINER_COST)],
+        BELT | CABLE => &[(PLATE, 1)],
+        BENCH | FAST_BELT => &[(PLATE, 2)],
+        MERGER => &[(PLATE, 5)],
+        CROSSING => &[(PLATE, 6)],
+        EXPRESS_BELT => &[(PLATE, 3)],
+        REINFORCED_IRON_DRILL..=REINFORCED_MINER => &[(PLATE, 8)],
+        DEVELOPMENT_HUB => &[(PLATE, 8)],
+        IRON_DRILL | SILICA_DRILL | FUEL_DRILL | INDUSTRIAL_MINER | DEPOT => &[(PLATE, 4)],
+        SMELTER | GRINDER | CALIBRATOR | SPLITTER | KIT_PRESS => &[(PLATE, 5)],
+        BATTERY | SOLAR => &[(PLATE, 6)],
+        GENERATOR | ASSEMBLER | KILN | STATION => &[(PLATE, 8)],
+        FREIGHT_YARD => &[(PLATE, crate::regions::LINE_COST)],
+        _ => &[],
+    }
+}
+
+pub fn drill_kind(layout: u8, ore: u8) -> Option<u8> {
+    let first = match layout {
+        INDUSTRIAL_MINER => IRON_DRILL,
+        REINFORCED_MINER => REINFORCED_IRON_DRILL,
         _ => return None,
-    })
+    };
+    (IRON..=FUEL).contains(&ore).then(|| first + ore - IRON)
+}
+
+pub fn drill_ore(kind: u8) -> Option<u8> {
+    match kind {
+        IRON_DRILL..=FUEL_DRILL => Some(kind - IRON_DRILL + IRON),
+        REINFORCED_IRON_DRILL..=REINFORCED_FUEL_DRILL => Some(kind - REINFORCED_IRON_DRILL + IRON),
+        _ => None,
+    }
+}
+
+pub fn miner_grade(kind: u8) -> u8 {
+    match kind {
+        SIMPLE_MINER => 1,
+        IRON_DRILL..=FUEL_DRILL | INDUSTRIAL_MINER => 2,
+        REINFORCED_IRON_DRILL..=REINFORCED_MINER => 3,
+        _ => 0,
+    }
+}
+
+pub fn layout_kind(kind: u8) -> u8 {
+    match miner_grade(kind) {
+        2 => INDUSTRIAL_MINER,
+        3 => REINFORCED_MINER,
+        _ => kind,
+    }
+}
+
+pub fn output_capacity(kind: u8) -> u16 {
+    if kind == SIMPLE_MINER {
+        MINER_CAPACITY
+    } else {
+        5
+    }
 }
 
 pub struct Recipe {
@@ -96,6 +206,9 @@ pub fn recipe(kind: u8) -> Option<Recipe> {
         IRON_DRILL => ([(0, 0), (0, 0)], IRON, 1, 12, 10),
         SILICA_DRILL => ([(0, 0), (0, 0)], SILICA, 1, 10, 10),
         FUEL_DRILL => ([(0, 0), (0, 0)], FUEL, 1, 8, 10),
+        REINFORCED_IRON_DRILL => ([(0, 0), (0, 0)], IRON, 1, 8, 16),
+        REINFORCED_SILICA_DRILL => ([(0, 0), (0, 0)], SILICA, 1, 7, 16),
+        REINFORCED_FUEL_DRILL => ([(0, 0), (0, 0)], FUEL, 1, 6, 16),
         SMELTER => ([(IRON, 1), (0, 0)], PLATE, 1, 14, 13),
         GRINDER => ([(SILICA, 2), (0, 0)], LENS, 1, 23, 14),
         CALIBRATOR => ([(SILICA, 1), (0, 0)], CORE, 1, 14, 12),
@@ -152,5 +265,5 @@ pub fn permitted(kind: u8, pos: usize) -> bool {
     if kind == SIMPLE_MINER {
         return terrain(pos) == IRON;
     }
-    !matches!(kind, IRON_DRILL..=FUEL_DRILL) || terrain(pos) == kind - 1
+    drill_ore(kind).is_none_or(|ore| terrain(pos) == ore)
 }

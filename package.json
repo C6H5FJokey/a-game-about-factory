@@ -6,6 +6,7 @@
   "scripts": {
     "wasm": "node scripts/build-wasm.mjs",
     "dev": "npm run wasm && vite --host 127.0.0.1",
+    "review:visual": "npm run wasm && node scripts/smoke-sim.mjs --capture-visual-review && vite --mode visual-review --host 127.0.0.1",
     "typecheck": "tsc --noEmit",
     "test:sim": "node scripts/smoke-sim.mjs",
     "build": "npm run wasm && npm run typecheck && vite build --base=./",

@@ -1,15 +1,18 @@
-import type { Command } from './model';
+import { Op, type Command } from './model';
 
 type Kernel = WebAssembly.Exports & {
   memory: WebAssembly.Memory;
-  input_ptr():number; output_ptr():number; snapshot():number;
-  reset():void; step(ticks:number):void;
+  reserve_input(length:number):number; output_ptr():number; snapshot():number;
+  directory():number; blueprints():number;
+  preview_transports(len:number):number;
+  reset():void; step(ticks:number):void; max_speed():number;
   command(op:number,a:number,b:number,c:number,len:number):number;
   save():number; restore(len:number):number;
 };
-type Message = { type:'init'; url:string; save?:unknown } | { type:'command'; data:Command } |
+type Message = { type:'init'; url:string; save?:unknown; legacy?:number[] } | { type:'command'; data:Command } |
   { type:'speed'; speed:number } | { type:'recycle'; buffer:ArrayBuffer } |
-  { type:'restore'; buffer:ArrayBuffer } | { type:'reset' } | { type:'save' };
+  { type:'restore'; buffer:ArrayBuffer } | { type:'reset' } | { type:'save' } |
+  { type:'transport-preview'; request:number; words:number[] };
 
 const worker = self as unknown as {
   onmessage: ((event:MessageEvent<Message>)=>void) | null;
@@ -22,10 +25,17 @@ let budget = 0;
 const buffers:ArrayBuffer[] = [];
 
 function input(words:Int32Array | number[]) {
-  if (!kernel || words.length > 48_000) return false;
-  const pointer = kernel.input_ptr();
+  if (!kernel) return false;
+  const pointer = kernel.reserve_input(words.length);
+  if (!pointer) return false;
   new Int32Array(kernel.memory.buffer,pointer,words.length).set(words);
   return true;
+}
+
+function publishBlueprints() {
+  if (!kernel) return;
+  const buffer=copyOutput(kernel.blueprints());
+  worker.postMessage({type:'blueprints',buffer},[buffer]);
 }
 
 function copyOutput(length:number, reusable = false) {
@@ -47,7 +57,7 @@ function restoreSave(buffer:unknown) {
   return input(words) && kernel.restore(words.length)>0;
 }
 
-async function boot(url:string, save?:unknown) {
+async function boot(url:string, save?:unknown, legacy?:number[]) {
   try {
     const file = await fetch(url);
     if (!file.ok) throw new Error(`模拟文件加载失败 (${file.status})`);
@@ -56,6 +66,12 @@ async function boot(url:string, save?:unknown) {
     if (save!==undefined && !restoreSave(save)) {
       worker.postMessage({type:'invalid-save',startup:true});
     }
+    if (legacy && input(legacy) && kernel.command(Op.MigrateBlueprint,0,0,0,legacy.length)>0) {
+      worker.postMessage({type:'legacy-imported'});
+    }
+    const catalog=copyOutput(kernel.directory());
+    worker.postMessage({type:'directory',buffer:catalog},[catalog]);
+    publishBlueprints();
     snapshot();
     previous = performance.now();
     setInterval(() => {
@@ -73,14 +89,26 @@ async function boot(url:string, save?:unknown) {
 
 worker.onmessage = event => {
   const message = event.data;
-  if (message.type === 'init') { void boot(message.url,message.save); return; }
-  if (message.type === 'speed') { speed = message.speed; budget = 0; return; }
+  if (message.type === 'init') { void boot(message.url,message.save,message.legacy); return; }
   if (!kernel) return;
   switch (message.type) {
+    case 'speed': {
+      const requested = message.speed;
+      if ([0,1,2,4].includes(requested)) speed = Math.min(requested,kernel.max_speed());
+      budget=0;
+      return;
+    }
+    case 'transport-preview': {
+      if (!input(message.words)) return;
+      const result=copyOutput(kernel.preview_transports(message.words.length));
+      worker.postMessage({type:'transport-preview',request:message.request,result},[result]);
+      return;
+    }
     case 'recycle': if (buffers.length < 3) buffers.push(message.buffer); return;
     case 'command': {
       const { op,a=0,b=0,c=0,words=[] } = message.data;
       const status = input(words) ? kernel.command(op,a,b,c,words.length) : -1;
+      if (status>0 && op>=Op.CaptureBlueprint && op<=Op.MigrateBlueprint) publishBlueprints();
       snapshot();
       worker.postMessage({type:'command-result',status});
       return;
@@ -93,9 +121,9 @@ worker.onmessage = event => {
     case 'restore': {
       const ok = restoreSave(message.buffer);
       worker.postMessage({type:ok ? 'restored' : 'invalid-save'});
-      if (ok) snapshot(true);
+      if (ok) { speed=Math.min(speed,kernel.max_speed()); publishBlueprints(); snapshot(true); }
       return;
     }
-    case 'reset': kernel.reset(); snapshot(true); return;
+    case 'reset': kernel.reset(); speed=Math.min(speed,kernel.max_speed()); publishBlueprints(); snapshot(true); return;
   }
 };

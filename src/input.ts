@@ -5,45 +5,55 @@ type Point = {x:number; y:number};
 
 export function bindMapInput(canvas:HTMLCanvasElement,camera:Camera, actions:{
   tap(tile:number):void; route(from:number,to:number):void; canDragRoute():boolean;
+  inspect(tile:number):void;
+  canRotateDraft():boolean; rotateDraft(tile:number,step:number):void;
+  startHarvest(tile:number,pointer:number):void; stopHarvest():void;
 }) {
   const pointers = new Map<number,Point>();
   let start:Point | undefined;
   let moved=false, multitouch=false, draw=false, startTile=-1;
+  let leftHeld=false, rotating=false, rotationDelta=0;
   const local=(event:PointerEvent | WheelEvent)=>{
     const bounds=canvas.getBoundingClientRect();
     return {x:event.clientX-bounds.left,y:event.clientY-bounds.top};
   };
-  const tileAt=(point:Point)=>{
-    const [x,y]=camera.toWorld(point.x,point.y);
-    return at(Math.floor(x),Math.floor(y));
-  };
+  const tileAt=(point:Point)=>camera.tileAt(point.x,point.y);
   const distance=(a:Point,b:Point)=>Math.hypot(a.x-b.x,a.y-b.y);
 
   canvas.addEventListener('pointerdown',event=>{
-    if (event.button!==0 && event.button!==2) return;
+    if (event.button!==0 && event.button!==1 && event.button!==2) return;
+    if (event.button===1) event.preventDefault();
+    actions.inspect(-1);
     const point=local(event);
     canvas.setPointerCapture(event.pointerId);
     pointers.set(event.pointerId,point);
     if (pointers.size===1) {
       start=point; moved=false; multitouch=false;
+      leftHeld=event.pointerType==='mouse' && event.button===0;
+      rotating=false; rotationDelta=0;
       draw=event.pointerType==='mouse' && event.button===0 && actions.canDragRoute();
       startTile=tileAt(point);
-    } else { multitouch=true; draw=false; }
+      if (event.button===0 && !draw && startTile>=0) actions.startHarvest(startTile,event.pointerId);
+    } else { multitouch=true; draw=false; actions.stopHarvest(); }
   });
 
   canvas.addEventListener('pointermove',event=>{
     const past=pointers.get(event.pointerId);
-    if (!past) return;
     const point=local(event);
+    if (!past) {
+      if (!pointers.size && event.pointerType==='mouse') actions.inspect(tileAt(point));
+      return;
+    }
     if (pointers.size===2) {
       const other=Array.from(pointers.entries()).find(([id])=>id!==event.pointerId)?.[1];
       if (other) {
         camera.pan((point.x-past.x)/2,(point.y-past.y)/2);
         camera.scale((point.x+other.x)/2,(point.y+other.y)/2,distance(point,other)/Math.max(2,distance(past,other)));
       }
-    } else if (pointers.size===1) {
+    } else if (pointers.size===1 && !rotating) {
       if (start && distance(point,start)>6) moved=true;
       if (moved || multitouch) {
+        actions.stopHarvest();
         if (draw && startTile>=0) {
           const end=tileAt(point);
           if (end>=0) actions.route(startTile,end);
@@ -55,8 +65,11 @@ export function bindMapInput(canvas:HTMLCanvasElement,camera:Camera, actions:{
 
   function end(event:PointerEvent,allowTap:boolean) {
     if (!pointers.has(event.pointerId)) return;
+    actions.stopHarvest();
     pointers.delete(event.pointerId);
-    if (pointers.size===0 && allowTap && !moved && !multitouch && event.button===0) {
+    if (pointers.size) return;
+    leftHeld=false;
+    if (allowTap && !moved && !multitouch && !rotating && event.button===0) {
       const tile=tileAt(local(event));
       if (tile>=0) actions.tap(tile);
     }
@@ -64,9 +77,23 @@ export function bindMapInput(canvas:HTMLCanvasElement,camera:Camera, actions:{
   canvas.addEventListener('pointerup',event=>end(event,true));
   canvas.addEventListener('pointercancel',event=>end(event,false));
   canvas.addEventListener('lostpointercapture',event=>end(event,false));
+  canvas.addEventListener('pointerleave',()=>actions.inspect(-1));
+  canvas.addEventListener('auxclick',event=>{ if (event.button===1) event.preventDefault(); });
   canvas.addEventListener('contextmenu',event=>event.preventDefault());
   canvas.addEventListener('wheel',event=>{
     event.preventDefault();
+    actions.inspect(-1);
+    if (leftHeld && !multitouch && actions.canRotateDraft()) {
+      rotating=true;
+      const delta=event.deltaY*(event.deltaMode===1?18:event.deltaMode===2?48:1);
+      if (rotationDelta*delta<0) rotationDelta=0;
+      rotationDelta+=delta;
+      if (Math.abs(rotationDelta)>=40) {
+        actions.rotateDraft(startTile,Math.sign(rotationDelta));
+        rotationDelta=0;
+      }
+      return;
+    }
     const {x,y}=local(event);
     camera.scale(x,y,Math.exp(-event.deltaY*(event.deltaMode===1?.028:.0015)));
   },{passive:false});

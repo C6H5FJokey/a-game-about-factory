@@ -1,0 +1,216 @@
+use crate::belts::{node, Cargo};
+use crate::catalog::*;
+use crate::world::{Cell, World};
+use crate::{Runtime, RUNTIME};
+
+struct Replacement {
+    tile: usize,
+    kind: u8,
+    dir: u8,
+    cargo: [Cargo; 2],
+}
+
+struct Plan {
+    replacements: Vec<Replacement>,
+    cost: [u32; ITEMS],
+}
+
+impl Plan {
+    fn affordable(&self, world: &World) -> bool {
+        self.cost
+            .iter()
+            .zip(world.stock)
+            .all(|(&cost, stock)| cost <= stock)
+    }
+}
+
+fn has_output(kind: u8, dir: u8, flow: u8) -> bool {
+    (0..belt_lanes(kind)).any(|lane| belt_outputs(kind, dir, lane).contains(&Some(flow)))
+}
+
+impl World {
+    fn transport_plan(&mut self, words: &[i32]) -> Result<Plan, (i32, i32)> {
+        if words.is_empty() || words.len() % 3 != 0 || words.len() / 3 > N {
+            return Err((-1, -1));
+        }
+        self.materialize();
+        let mut entries = vec![None; N];
+        let mut replacements = Vec::new();
+        let mut cost = [0; ITEMS];
+        for &[tile, kind, dir] in words.as_chunks::<3>().0 {
+            if !(0..N as i32).contains(&tile)
+                || !(0..4).contains(&dir)
+                || !(0..=MAX_KIND as i32).contains(&kind)
+                || !is_belt(kind as u8)
+            {
+                return Err((-1, tile));
+            }
+            let (tile, kind, dir) = (tile as usize, kind as u8, dir as u8);
+            if entries[tile].replace((kind, dir)).is_some() {
+                return Err((-1, tile as i32));
+            }
+            let old = &self.cells[tile];
+            if !self.unlocked(kind) {
+                return Err((-6, tile as i32));
+            }
+            if !self.progression.contains(tile) || !permitted(kind, tile) {
+                return Err((-3, tile as i32));
+            }
+            if old.kind != 0 && !is_belt(old.kind) {
+                return Err((-2, tile as i32));
+            }
+            if (kind, dir) == (old.kind, old.dir) {
+                continue;
+            }
+            let mut cargo = [Cargo::default(); 2];
+            for lane in 0..belt_lanes(old.kind) {
+                let old_cargo = self.cargo[node(tile, lane)];
+                if old_cargo.item == 0 {
+                    continue;
+                }
+                let old_flow = (old.dir + lane as u8) % 4;
+                let Some(target) = (0..belt_lanes(kind))
+                    .find(|&lane| belt_outputs(kind, dir, lane).contains(&Some(old_flow)))
+                else {
+                    return Err((-20, tile as i32));
+                };
+                if cargo[target].item != 0 {
+                    return Err((-21, tile as i32));
+                }
+                let location = node(tile, target) as u16;
+                cargo[target] = Cargo {
+                    from: location,
+                    since: self.tick,
+                    ready: self.tick + belt_interval(kind),
+                    blocked: false,
+                    ..old_cargo
+                };
+            }
+            if old.kind != kind {
+                for &(item, count) in materials(kind) {
+                    cost[item as usize] += count;
+                }
+            }
+            replacements.push(Replacement {
+                tile,
+                kind,
+                dir,
+                cargo,
+            });
+        }
+
+        for replacement in &replacements {
+            let tile = replacement.tile;
+            let old = &self.cells[tile];
+            if !is_belt(old.kind) || old.kind == replacement.kind {
+                continue;
+            }
+            // Preserve live links to the surrounding network on an upgrade.
+            // Connections between cells in the same plan are evaluated together.
+            for flow in 0..4 {
+                let inbound = neighbor(tile, (flow + 2) % 4).is_some_and(|other| {
+                    let inlet = &self.cells[other];
+                    let (new_kind, new_dir) = entries[other].unwrap_or((inlet.kind, inlet.dir));
+                    has_output(inlet.kind, inlet.dir, flow) && has_output(new_kind, new_dir, flow)
+                        || inlet.dir == flow
+                            && (recipe(inlet.kind).is_some()
+                                || inlet.kind == DEPOT && inlet.cfg != 0
+                                || inlet.kind == FREIGHT_YARD && RECEIVERS.contains(&other))
+                });
+                if inbound
+                    && belt_input(old.kind, old.dir, flow).is_some()
+                    && belt_input(replacement.kind, replacement.dir, flow).is_none()
+                {
+                    return Err((-20, tile as i32));
+                }
+                let mut was_output = has_output(old.kind, old.dir, flow);
+                was_output &= neighbor(tile, flow).is_some_and(|other| {
+                    let outlet = &self.cells[other];
+                    let (new_kind, new_dir) = entries[other].unwrap_or((outlet.kind, outlet.dir));
+                    if is_belt(outlet.kind) {
+                        return belt_input(outlet.kind, outlet.dir, flow).is_some()
+                            && belt_input(new_kind, new_dir, flow).is_some();
+                    }
+                    matches!(outlet.kind, GENERATOR | DEPOT | STATION | FREIGHT_YARD)
+                        || recipe(outlet.kind).is_some_and(|r| r.input[0].1 > 0)
+                });
+                if was_output && !has_output(replacement.kind, replacement.dir, flow) {
+                    return Err((-20, tile as i32));
+                }
+            }
+        }
+        Ok(Plan { replacements, cost })
+    }
+
+    pub fn build_transports(&mut self, revision: i32, words: &[i32]) -> i32 {
+        if self.layout_revision != revision {
+            return -23;
+        }
+        let plan = match self.transport_plan(words) {
+            Ok(plan) => plan,
+            Err((error, _)) => return error,
+        };
+        if !plan.affordable(self) {
+            return -4;
+        }
+        for (item, count) in plan.cost.into_iter().enumerate() {
+            self.stock[item] -= count;
+        }
+        if plan.replacements.is_empty() {
+            return 1;
+        }
+        for part in plan.replacements {
+            let old = &self.cells[part.tile];
+            let same_kind = old.kind == part.kind;
+            self.install(
+                part.tile,
+                Cell {
+                    kind: part.kind,
+                    dir: part.dir,
+                    wire: old.wire,
+                    cfg: if same_kind { old.cfg } else { 0 },
+                    split_turn: same_kind && old.split_turn,
+                    ..Cell::default()
+                },
+            );
+            for (lane, cargo) in part.cargo.into_iter().enumerate() {
+                self.cargo[node(part.tile, lane)] = cargo;
+            }
+        }
+        self.rebuild();
+        1
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn preview_transports(len: usize) -> usize {
+    RUNTIME.with(|runtime| {
+        let mut runtime = runtime.borrow_mut();
+        let Runtime {
+            world,
+            input,
+            output,
+        } = &mut *runtime;
+        output.clear();
+        let result = input
+            .get(..len)
+            .ok_or((-1, -1))
+            .and_then(|words| world.transport_plan(words));
+        match result {
+            Ok(plan) => {
+                output.extend([
+                    if plan.affordable(world) { 1 } else { -4 },
+                    -1,
+                    world.layout_revision,
+                ]);
+                for (item, count) in plan.cost.into_iter().enumerate() {
+                    if count > 0 {
+                        output.extend([item as i32, count as i32]);
+                    }
+                }
+            }
+            Err((error, tile)) => output.extend([error, tile, world.layout_revision]),
+        }
+        output.len()
+    })
+}

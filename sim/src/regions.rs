@@ -13,12 +13,12 @@ pub const WINDOW_GAP: [u32; 3] = [8 * HZ, 3 * HZ, 12 * HZ];
 pub const SOLO: u8 = 0;
 pub const ADJACENT: u8 = 1;
 pub const CAMPAIGN: u8 = 2;
-pub const ROUTE_WORDS: usize = 2 + ITEMS;
+pub const ROUTE_WORDS: usize = 2 + MATERIAL_ITEMS;
 
 #[derive(Clone, Copy, Default)]
 pub struct Route {
     pub arrival: u32,
-    pub crate_stock: [u16; ITEMS],
+    pub crate_stock: [u16; MATERIAL_ITEMS],
     pub delivered: u32,
 }
 
@@ -27,7 +27,7 @@ pub fn reserve(city: usize) -> (u16, u32) {
     let ticks = WINDOW_LENGTH[city] / 4;
     (
         (ticks / HZ) as u16,
-        ticks * TRACKING_POWER[city].saturating_sub(108),
+        ticks * TRACKING_POWER[city].saturating_sub(GENERATOR_POWER.into()),
     )
 }
 
@@ -59,19 +59,21 @@ impl World {
         {
             return -2;
         }
-        if self.stock[PLATE as usize] < LINE_COST {
+        if !self.spend(materials(FREIGHT_YARD), 1) {
             return -4;
         }
         self.materialize();
-        self.stock[PLATE as usize] -= LINE_COST;
         for tile in [SENDERS[i], RECEIVERS[i]] {
-            self.cells[tile] = Cell {
-                kind: FREIGHT_YARD,
-                wire: self.cells[tile].wire,
-                ..Default::default()
-            };
+            self.install(
+                tile,
+                Cell {
+                    kind: FREIGHT_YARD,
+                    wire: self.cells[tile].wire,
+                    ..Default::default()
+                },
+            );
         }
-        self.rebuild(false);
+        self.rebuild();
         1
     }
 

@@ -1,11 +1,14 @@
-use crate::belts::{Belts, Cargo};
+use crate::belts::{Belts, Cargo, NODES};
+use crate::blueprints::Library;
 use crate::campaign::Stage;
 use crate::catalog::*;
+use crate::progression::{cycle_ticks, Progression};
 use crate::regions::*;
 
 #[derive(Clone, Copy, Default)]
 pub struct Cell {
     pub kind: u8,
+    pub identity: i32,
     pub dir: u8,
     pub wire: bool,
     pub cfg: u8,
@@ -16,6 +19,16 @@ pub struct Cell {
     pub inv: [u16; ITEMS],
     pub last_kit_delivery: u32,
     pub split_turn: bool,
+    pub power: DevicePower,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct DevicePower {
+    pub demand: u16,
+    pub used: u16,
+    pub generated: u16,
+    pub charged: u16,
+    pub discharged: u16,
 }
 
 impl Cell {
@@ -62,6 +75,7 @@ pub struct Orbit {
 pub struct World {
     pub tick: u32,
     pub stage: Stage,
+    pub progression: Progression,
     pub packed_miners: u16,
     pub stock: [u32; ITEMS],
     pub delivered: u32,
@@ -73,16 +87,21 @@ pub struct World {
     pub machines: Vec<usize>,
     pub orbit: Orbit,
     pub routes: [Route; 2],
+    pub next_device_id: i32,
+    pub blueprints: Library,
+    pub next_cargo_id: i32,
+    pub layout_revision: i32,
 }
 
 impl World {
     pub fn empty() -> Self {
         let cells = vec![Cell::default(); N];
-        let cargo = vec![Cargo::default(); N];
-        let belt = Belts::rebuild(&cells, &cargo, 0, false);
+        let cargo = vec![Cargo::default(); NODES];
+        let belt = Belts::rebuild(&cells, &cargo, None);
         Self {
             tick: 0,
             stage: Stage::Gather,
+            progression: Progression::default(),
             packed_miners: 0,
             stock: [0; ITEMS],
             delivered: 0,
@@ -94,6 +113,10 @@ impl World {
             machines: Vec::new(),
             orbit: Orbit::default(),
             routes: [Route::default(); 2],
+            next_device_id: 1,
+            blueprints: Library::default(),
+            next_cargo_id: 1,
+            layout_revision: 0,
         }
     }
 
@@ -103,13 +126,30 @@ impl World {
         w
     }
 
-    pub fn rebuild(&mut self, preserve_ready: bool) {
-        self.belt = Belts::rebuild(
-            &self.cells,
-            &self.cargo,
-            self.tick / BELT_TICKS,
-            preserve_ready,
-        );
+    pub fn install(&mut self, tile: usize, mut cell: Cell) {
+        if cell.kind != 0 {
+            cell.identity = self.next_device_id;
+            self.next_device_id += 1;
+        }
+        self.cells[tile] = cell;
+    }
+
+    pub fn spend(&mut self, materials: &[(u8, u32)], copies: u32) -> bool {
+        if materials
+            .iter()
+            .any(|&(item, count)| self.stock[item as usize] < count * copies)
+        {
+            return false;
+        }
+        for &(item, count) in materials {
+            self.stock[item as usize] -= count * copies;
+        }
+        true
+    }
+
+    pub fn rebuild(&mut self) {
+        self.belt = Belts::rebuild(&self.cells, &self.cargo, Some(&self.belt));
+        self.layout_revision = self.layout_revision.wrapping_add(1);
         self.update_grids();
     }
 
@@ -119,6 +159,7 @@ impl World {
         self.machines.clear();
         for (i, cell) in self.cells.iter_mut().enumerate() {
             cell.group = 0;
+            cell.power = DevicePower::default();
             if cell.kind != 0 && !is_belt(cell.kind) {
                 self.machines.push(i);
             }
@@ -147,8 +188,7 @@ impl World {
     }
 
     pub fn materialize(&mut self) {
-        self.belt
-            .materialize(self.tick / BELT_TICKS, &mut self.cargo);
+        self.belt.materialize(&mut self.cargo);
     }
 
     pub fn active_blocks(&self) -> usize {
@@ -158,159 +198,12 @@ impl World {
             .count()
     }
 
-    pub(crate) fn transfer_in(&mut self, i: usize, cargo: Cargo, pulse: u32) -> bool {
-        let kind = self.cells[i].kind;
-        if is_belt(kind) {
-            return self.belt.entry[i]
-                .is_some_and(|entry| self.belt.segments[entry].push(cargo, pulse));
-        }
-        let item = cargo.item as usize;
-        if kind == DEPOT {
-            if self.cells[i].cfg != 0 {
-                return false;
-            }
-            self.stock[item] = self.stock[item].saturating_add(1);
-            if item == PLATE as usize && cargo.source != 0 {
-                self.delivered = self.delivered.saturating_add(1);
-            }
-            if item == KIT as usize && cargo.source != 0 {
-                self.kit_total = self.kit_total.saturating_add(1);
-                if let Some(press) = self.cells.get_mut(usize::from(cargo.source) - 1) {
-                    press.last_kit_delivery = self.tick;
-                }
-            }
-            return true;
-        }
-        if kind == FREIGHT_YARD && SENDERS.contains(&i) {
-            if self.cells[i].inv.iter().sum::<u16>() >= YARD_CAPACITY {
-                return false;
-            }
-            self.cells[i].inv[item] += 1;
-            return true;
-        }
-        let cap = match kind {
-            STATION if item == CORE as usize => 16,
-            STATION if item == MIRROR as usize => 6,
-            STATION if item == FUEL as usize => 12,
-            GENERATOR if item == FUEL as usize => 8,
-            _ if recipe(kind).is_some_and(|r| {
-                r.input
-                    .iter()
-                    .any(|&(id, count)| id as usize == item && count > 0)
-            }) =>
-            {
-                10
-            }
-            _ => 0,
-        };
-        if self.cells[i].inv[item] >= cap {
-            return false;
-        }
-        self.cells[i].inv[item] += 1;
-        true
-    }
-
-    fn move_cargo(&mut self) {
-        let pulse = self.tick / BELT_TICKS;
-        for order in 0..self.belt.downstream_first.len() {
-            let id = self.belt.downstream_first[order];
-            let segment = &self.belt.segments[id];
-            let Some(cargo) = segment
-                .queue
-                .front()
-                .copied()
-                .filter(|cargo| cargo.ready <= pulse)
-            else {
-                continue;
-            };
-            let tail = *segment.tiles.last().unwrap();
-            let mut outputs = segment.exits;
-            if self.cells[tail].kind == SPLITTER
-                && self.cells[tail].cfg == 0
-                && self.cells[tail].split_turn
-            {
-                outputs.swap(0, 1);
-            }
-            if outputs.into_iter().flatten().any(|next| {
-                if !self.transfer_in(next, cargo, pulse) {
-                    return false;
-                }
-                if self.stage == Stage::Belt && self.cells[next].kind == BENCH && cargo.item == IRON
-                {
-                    self.stage = Stage::BeltFed;
-                }
-                true
-            }) {
-                self.belt.segments[id].queue.pop_front();
-                self.cells[tail].split_turn = !self.cells[tail].split_turn;
-            }
-        }
-        for order in 0..self.machines.len() {
-            let i = self.machines[order];
-            let c = self.cells[i];
-            let Some(next) = neighbor(i, c.dir) else {
-                continue;
-            };
-            if c.kind == FREIGHT_YARD {
-                if let Some(line) = RECEIVERS.iter().position(|&tile| tile == i) {
-                    if let Some(item) = c.inv.iter().position(|&count| count > 0) {
-                        let cargo = Cargo {
-                            item: item as u8,
-                            ..Default::default()
-                        };
-                        if self.transfer_in(next, cargo, pulse) {
-                            self.cells[i].inv[item] -= 1;
-                            self.routes[line].delivered =
-                                self.routes[line].delivered.saturating_add(1);
-                        }
-                    }
-                }
-            } else if c.kind == DEPOT && c.cfg > 0 {
-                let item = c.cfg as usize;
-                let cargo = Cargo {
-                    item: c.cfg,
-                    ..Cargo::default()
-                };
-                if self.stock[item] > 0
-                    && self.cells[next].kind != DEPOT
-                    && self.transfer_in(next, cargo, pulse)
-                {
-                    self.stock[item] -= 1;
-                }
-            } else if let Some(r) = recipe(c.kind) {
-                let cargo = Cargo {
-                    item: r.output,
-                    source: if matches!(r.output, KIT | PLATE) {
-                        i as u16 + 1
-                    } else {
-                        0
-                    },
-                    ..Cargo::default()
-                };
-                if self.stage >= Stage::Belt
-                    && c.inv[r.output as usize] > 0
-                    && self.transfer_in(next, cargo, pulse)
-                {
-                    self.cells[i].inv[r.output as usize] -= 1;
-                    if self.stage == Stage::Belt
-                        && c.kind == SIMPLE_MINER
-                        && self.cells[next].kind == BENCH
-                    {
-                        self.stage = Stage::BeltFed;
-                    }
-                }
-            }
-        }
-    }
-
     pub fn step(&mut self) {
         self.tick += 1;
         if self.stage >= Stage::Valley {
             self.run_freight();
         }
-        if self.tick % BELT_TICKS == 0 {
-            self.move_cargo();
-        }
+        self.move_cargo();
         if self.orbit.next_window > 0
             && self.tick >= self.orbit.next_window
             && self.orbit.launch_left == 0
@@ -327,6 +220,7 @@ impl World {
             let cell = &mut self.cells[i];
             let grid = &mut self.grids[cell.group as usize];
             cell.status = 0;
+            cell.power = DevicePower::default();
             match cell.kind {
                 GENERATOR => {
                     if cell.progress == 0 && cell.group != 0 && cell.inv[FUEL as usize] > 0 {
@@ -335,7 +229,8 @@ impl World {
                     }
                     if cell.progress > 0 && cell.group != 0 {
                         cell.progress -= 1;
-                        grid.generation += 108;
+                        cell.power.generated = GENERATOR_POWER;
+                        grid.generation += u32::from(cell.power.generated);
                         cell.status = 1;
                     } else {
                         cell.status = if cell.group == 0 { 3 } else { 2 };
@@ -346,7 +241,8 @@ impl World {
                         && ((i % W) as i32 * 100 + 50 - beam).abs() <= 450
                         && cell.group != 0 =>
                 {
-                    grid.generation += 55;
+                    cell.power.generated = SOLAR_POWER;
+                    grid.generation += u32::from(cell.power.generated);
                     cell.status = 1;
                 }
                 SOLAR => {
@@ -372,14 +268,16 @@ impl World {
                 if c.kind == STATION {
                     let city = self.orbit.target as usize;
                     let need = if self.orbit.mode == 2 && i == STATIONS[city] {
-                        TRACKING_POWER[city]
+                        TRACKING_POWER[city] as u16
                     } else if self.orbit.launch_left > 0 && i == STATION_POS {
-                        85
+                        LAUNCH_POWER
                     } else {
                         0
                     };
                     if need != 0 {
-                        c.status = if take_power(grid, c.group, need) {
+                        c.power.demand = need;
+                        c.status = if take_power(grid, c.group, need.into()) {
+                            c.power.used = need;
                             1
                         } else {
                             3
@@ -394,33 +292,34 @@ impl World {
                     c.status = 5;
                     continue;
                 }
-                let cap = if c.kind == SIMPLE_MINER {
-                    MINER_CAPACITY
-                } else {
-                    5
-                };
+                let cap = output_capacity(c.kind);
                 if c.inv[r.output as usize] + r.amount > cap {
                     c.status = 4;
                     continue;
                 }
-                if r.input
-                    .iter()
-                    .any(|&(id, count)| c.inv[id as usize] < count)
+                if c.progress == 0
+                    && r.input
+                        .iter()
+                        .any(|&(id, count)| c.inv[id as usize] < count)
                 {
                     c.status = 2;
                     continue;
                 }
+                c.power.demand = r.power;
                 if r.power > 0 && !take_power(grid, c.group, u32::from(r.power)) {
                     c.status = 3;
                     continue;
                 }
                 c.status = 1;
-                c.progress += 1;
-                if c.progress < r.ticks {
-                    continue;
+                c.power.used = r.power;
+                if c.progress == 0 {
+                    for (id, count) in r.input {
+                        c.inv[id as usize] -= count;
+                    }
                 }
-                for (id, count) in r.input {
-                    c.inv[id as usize] -= count;
+                c.progress += 1;
+                if c.progress < cycle_ticks(r.ticks, c.inv[SPEED_MODULE as usize]) {
+                    continue;
                 }
                 c.inv[r.output as usize] += r.amount;
                 c.progress = 0;
@@ -439,12 +338,14 @@ impl World {
             if changes < 0 {
                 let delta = (-changes as u32).min(BATTERY_POWER as u32).min(c.energy);
                 c.energy -= delta;
+                c.power.discharged = delta as u16;
                 grid.discharged += delta;
             } else {
                 let delta = (changes as u32)
                     .min(BATTERY_POWER as u32)
                     .min(BATTERY_CAPACITY - c.energy);
                 c.energy += delta;
+                c.power.charged = delta as u16;
                 // Charge only from unspent generation, after all machine loads.
                 grid.charged += delta;
             }

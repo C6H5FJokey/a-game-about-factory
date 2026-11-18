@@ -11,18 +11,13 @@
     <div id="app" class="shell" data-opening="true" aria-busy="true">
       <header class="masthead">
         <div class="brand"><span class="sunmark" aria-hidden="true"></span><h1>把白昼送回去</h1></div>
-        <div class="balances" aria-label="持有物资">
-          <div class="balance" id="iron-balance" hidden><span class="resource" aria-hidden="true"></span><span>铁矿</span><strong id="iron-count">0</strong></div>
-          <div class="balance" id="plate-balance" hidden><span class="resource plate" aria-hidden="true"></span><span>结构件</span><strong id="plate-count">0</strong></div>
-          <div class="balance" id="kit-balance" hidden><span class="resource kit" aria-hidden="true"></span><span>套件</span><strong id="kit-count">0</strong></div>
-        </div>
+        <div id="balances" class="balances" aria-label="持有物资"></div>
         <button class="button quiet archive" type="button" data-action="archive">档案</button>
       </header>
 
       <main class="workbench" aria-label="工厂控制台">
         <section id="map" class="map" aria-label="工厂地图">
-          <canvas id="world" aria-label="曙港矿区的可编辑工厂地图"></canvas>
-          <div class="map-heading"><div class="sector"><span></span> 曙港矿区</div><div id="map-layer" class="map-layer">货流视图</div></div>
+          <canvas id="world" aria-label="可编辑工厂地图"></canvas>
           <div id="map-labels" class="map-labels" aria-hidden="true"></div>
           <button id="ore-action" type="button" class="button local-action" data-action="ore-action" hidden></button>
           <span id="ore-gain" class="ore-gain" aria-live="polite" hidden></span>
@@ -33,28 +28,28 @@
             <button class="button square" type="button" data-action="zoom-out" aria-label="缩小地图">−</button>
             <button class="button square" type="button" data-action="zoom-in" aria-label="放大地图">+</button>
           </div>
-          <div id="palette" class="palette" aria-label="建筑目录" hidden>
-            <div class="palette-header"><strong>建筑目录</strong><button class="button quiet" type="button" data-action="close-palette">收起</button></div>
-            <div id="tools" class="tool-grid"></div>
-          </div>
           <div id="draft" class="draft" aria-label="施工草稿" hidden></div>
           <div id="loading" class="loading" role="status"><span class="sunmark" aria-hidden="true"></span><p>正在接入曙港矿区…</p></div>
         </section>
 
         <aside id="panel" class="panel" data-expanded="false" aria-label="工厂检查器">
-          <div class="panel-heading">
-            <div><span class="panel-tag" id="panel-tag">任务通讯</span><h2 id="panel-title">矿站启动</h2></div>
-            <button id="panel-toggle" class="button quiet panel-toggle" type="button" data-action="toggle-panel" aria-expanded="false">展开</button>
+          <button id="panel-toggle" class="panel-toggle" type="button" data-action="toggle-panel" aria-label="工厂面板" aria-controls="panel-surface" aria-expanded="false"><span aria-hidden="true">•••</span></button>
+          <div class="panel-surface" id="panel-surface" inert>
+            <div class="panel-heading"><div><span class="panel-tag" id="panel-tag">任务通讯</span><h2 id="panel-title">矿站启动</h2></div><div id="panel-tools"></div></div>
+            <nav class="modes drawer-modes" aria-label="工厂页面">
+              <button type="button" class="mode" data-mode="task" aria-pressed="true">任务</button>
+              <button type="button" class="mode" data-mode="view" aria-pressed="false">操作</button>
+              <button type="button" class="mode" data-mode="build" aria-pressed="false">建造</button>
+              <button type="button" class="mode" data-mode="power" aria-pressed="false">电网</button>
+            </nav>
+            <nav id="panel-tabs" class="panel-tabs" aria-label="建造栏目" hidden></nav>
+            <div class="panel-body" id="panel-body"></div>
           </div>
-          <div class="panel-body" id="panel-body"></div>
         </aside>
       </main>
 
       <footer class="console">
-        <nav class="modes" aria-label="操作模式">
-          <button type="button" class="mode" data-mode="view" aria-pressed="true"><span aria-hidden="true">⌖</span>查看</button>
-          <button type="button" class="mode" data-mode="build" aria-pressed="false"><span aria-hidden="true">▧</span>建造</button>
-          <button type="button" class="mode" data-mode="power" aria-pressed="false"><span aria-hidden="true">ϟ</span>电网</button>
+        <nav class="modes" aria-label="轨道入口">
           <button type="button" class="mode" data-mode="orbit" aria-pressed="false"><span aria-hidden="true">◔</span>轨道</button>
         </nav>
         <div class="run-state" aria-label="模拟时间">
@@ -63,15 +58,33 @@
         </div>
       </footer>
     </div>
+    <div id="quick-info" class="quick-info" hidden></div>
+    <div id="item-drag" class="item-drag" aria-hidden="true" hidden></div>
 
     <dialog id="archive-dialog" class="dialog" aria-labelledby="archive-title">
       <div class="dialog-head"><h2 id="archive-title">矿站档案</h2><button class="button quiet" type="button" data-action="close-dialog">关闭</button></div>
-      <p>测试版更新不考虑存档继承。</p>
+      <p>存档包含本局蓝图库及发展阶段，可读取第 4 至 7 版战役存档。</p>
       <p id="save-status" role="status">当前战役会自动保存到此浏览器。</p>
       <div class="dialog-actions"><button class="button" type="button" data-action="save">立即保存</button><button class="button" type="button" data-action="export">导出存档</button><button class="button" type="button" data-action="import">导入存档</button></div>
       <input id="save-file" type="file" accept=".dawn,application/octet-stream" hidden />
       <div class="dialog-actions"><button class="button" type="button" data-action="pause">暂停模拟</button><button class="button danger" type="button" data-action="reset-confirm">新战役</button></div>
       <p id="reset-warning" hidden>开始新战役将替换当前本地进度。<button class="button danger" type="button" data-action="reset">确认重新开始</button></p>
+    </dialog>
+    <dialog id="blueprint-dialog" class="dialog" aria-labelledby="blueprint-dialog-title">
+      <form id="blueprint-form">
+        <h2 id="blueprint-dialog-title">保存蓝图</h2>
+        <label id="blueprint-label">蓝图名称 <input id="blueprint-name" type="text" maxlength="64" /></label>
+        <p id="blueprint-delete-text" hidden></p>
+        <p id="blueprint-error" class="dialog-error" role="alert" hidden></p>
+        <div class="dialog-actions"><button type="button" class="button" data-action="dismiss-blueprint">取消</button><button type="submit" class="button primary" id="blueprint-submit">保存</button></div>
+      </form>
+    </dialog>
+    <dialog id="transfer-dialog" class="dialog" aria-labelledby="transfer-title">
+      <form id="transfer-form">
+        <h2 id="transfer-title">指定转移数量</h2>
+        <label>件数 <input id="transfer-quantity" type="number" min="1" step="1" required inputmode="numeric" /></label>
+        <div class="dialog-actions"><button type="button" class="button" data-action="dismiss-quantity">取消</button><button type="submit" class="button primary">应用</button></div>
+      </form>
     </dialog>
     <script type="module" src="/src/main.ts"></script>
   </body>

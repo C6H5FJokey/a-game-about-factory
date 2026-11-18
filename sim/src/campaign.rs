@@ -1,4 +1,5 @@
 use crate::catalog::*;
+use crate::inventory::STOCK_TILE;
 use crate::world::World;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -56,15 +57,20 @@ impl Stage {
     }
 
     pub fn allows(self, kind: u8) -> bool {
+        Self::required_for(kind).is_some_and(|required| self >= required)
+    }
+
+    pub fn required_for(kind: u8) -> Option<Self> {
         use Stage::*;
-        self >= match kind {
+        Some(match kind {
             SIMPLE_MINER => PlaceMiner,
             BENCH => Bench,
             BELT => Belt,
-            IRON_DRILL | DEPOT => Expand,
-            FUEL_DRILL | GENERATOR => Power,
+            IRON_DRILL | INDUSTRIAL_MINER | DEPOT => Expand,
+            FUEL_DRILL | GENERATOR | CABLE => Power,
             SMELTER => Silica,
-            SPLITTER => Assemble,
+            SPLITTER | MERGER | CROSSING => Assemble,
+            FAST_BELT => Sunlight,
             SILICA_DRILL => Silica,
             GRINDER => Optics,
             ASSEMBLER => Assemble,
@@ -72,15 +78,25 @@ impl Stage {
             CALIBRATOR | BATTERY => Tracking,
             SOLAR | KIT_PRESS | KILN => Sunlight,
             FREIGHT_YARD => Valley,
-            _ => return false,
-        }
+            DEVELOPMENT_HUB | EXPRESS_BELT | REINFORCED_IRON_DRILL..=REINFORCED_MINER => Expand,
+            _ => return None,
+        })
     }
 }
 
 impl World {
     pub fn unlocked(&self, kind: u8) -> bool {
+        if matches!(kind, INDUSTRIAL_MINER | REINFORCED_MINER) {
+            return (IRON..=FUEL).any(|ore| self.unlocked(drill_kind(kind, ore).unwrap()));
+        }
+        if kind == CABLE {
+            return self.stage >= Stage::Power;
+        }
         self.stage.allows(kind)
             && match kind {
+                EXPRESS_BELT | REINFORCED_IRON_DRILL..=REINFORCED_FUEL_DRILL => {
+                    self.progression.tier >= 1
+                }
                 IRON_DRILL => self.delivered > 0,
                 FUEL_DRILL if self.stage == Stage::Power => self
                     .machines
@@ -116,8 +132,11 @@ impl World {
 
     pub fn gather(&mut self, tile: usize) -> i32 {
         let item = self.known_ore(tile);
-        if item == 0 {
+        if item == 0 || !self.progression.contains(tile) {
             return -3;
+        }
+        if self.stock_room(item) == 0 {
+            return -24;
         }
         self.stock[item as usize] += 1;
         if self.stage == Stage::Gather {
@@ -133,10 +152,9 @@ impl World {
         if self.packed_miners != 0 || !(self.stage == Stage::Craft || self.stage >= Stage::Expand) {
             return -6;
         }
-        if self.stock[IRON as usize] < MINER_COST {
+        if !self.spend(materials(SIMPLE_MINER), 1) {
             return -8;
         }
-        self.stock[IRON as usize] -= MINER_COST;
         self.packed_miners = 1;
         if self.stage == Stage::Craft {
             self.stage = Stage::PlaceMiner;
@@ -151,8 +169,13 @@ impl World {
         if self.stock[IRON as usize] == 0 {
             return -8;
         }
-        self.stock[IRON as usize] -= 1;
-        self.stock[PLATE as usize] += 1;
+        let mut next = self.stock;
+        next[IRON as usize] -= 1;
+        next[PLATE as usize] += 1;
+        if !self.fits_stock(&next) {
+            return -24;
+        }
+        self.stock = next;
         if self.stage == Stage::Handwork {
             self.stage = Stage::Bench;
         }
@@ -160,52 +183,33 @@ impl World {
     }
 
     pub fn collect(&mut self, tile: usize) -> i32 {
-        let cell = &mut self.cells[tile];
+        let cell = self.cells[tile];
         let Some(r) = recipe(cell.kind) else {
             return -1;
         };
-        let count = std::mem::take(&mut cell.inv[r.output as usize]);
-        if count == 0 {
-            return -9;
-        }
-        self.stock[r.output as usize] += u32::from(count);
-        if self.stage == Stage::Collect && cell.kind == SIMPLE_MINER {
-            self.stage = Stage::Handwork;
-        }
-        1
+        legacy_result(self.transfer(
+            tile as i32,
+            STOCK_TILE,
+            r.output as i32,
+            &[i32::MAX, cell.identity, 0],
+        ))
     }
 
     pub fn hand_feed(&mut self, tile: usize, item: u8) -> i32 {
-        if STATIONS[1..].contains(&tile) {
-            return -6;
-        }
-        if self.stage < Stage::Feed || item == 0 || item as usize >= ITEMS {
-            return -6;
-        }
-        let mut count = 0;
-        while self.stock[item as usize] > 0
-            && self.cells[tile].kind != DEPOT
-            && !is_belt(self.cells[tile].kind)
-            && self.transfer_in(
-                tile,
-                crate::belts::Cargo {
-                    item,
-                    ..Default::default()
-                },
-                self.tick / BELT_TICKS,
-            )
-        {
-            self.stock[item as usize] -= 1;
-            count += 1;
-            if self.stage == Stage::Feed && self.cells[tile].kind == BENCH {
-                self.stage = Stage::Working;
-                break;
-            }
-        }
-        if count > 0 {
-            1
-        } else {
-            -9
-        }
+        legacy_result(self.transfer(
+            STOCK_TILE,
+            tile as i32,
+            item as i32,
+            &[i32::MAX, 0, self.cells[tile].identity],
+        ))
+    }
+}
+
+fn legacy_result(moved: i32) -> i32 {
+    match moved {
+        n if n > 0 => 1,
+        -12 => -6,
+        -13 | -14 => -9,
+        error => error,
     }
 }

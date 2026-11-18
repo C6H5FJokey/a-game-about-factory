@@ -1,4 +1,5 @@
-import { CityField, Field, H, Kind, Meta, Stage, STEP, W, at, cell, cityValue, xy, type Mode, type PreviewCell } from './model';
+import { CityField, Field, H, Kind, Meta, Stage, STEP, W, at, cell, cityValue, inBounds, isTransport, xy, type MapLimits, type Mode, type PreviewCell } from './model';
+import { cargoIndex, design, transportPorts } from './sim-data';
 
 type Color = [number,number,number,number];
 const rgba = (r:number,g:number,b:number,a=1):Color => [r/255,g/255,b/255,a];
@@ -6,6 +7,7 @@ const ink = rgba(12,21,29), frame = rgba(59,84,95), line = rgba(39,60,68), amber
 const cyan = rgba(119,225,213), red = rgba(255,145,117), grey = rgba(131,157,168);
 const mineral = [ink,rgba(180,135,112),rgba(133,169,217),rgba(228,157,86),rgba(194,205,207),rgba(167,184,249),rgba(125,222,209),amber,rgba(221,199,152)];
 const shapeForItem = [0,0,3,4,0,3,1,4,1];
+const machinesWithoutOutput = new Set<Kind>([Kind.Generator,Kind.Solar,Kind.Battery,Kind.Station,Kind.DevelopmentHub]);
 
 const vertex = `#version 300 es
 layout(location=0) in vec2 corner;
@@ -48,20 +50,36 @@ void main(){
 
 export class Camera {
   x=19.7; y=17.2; zoom=26; width=1; height=1;
+  bounds:MapLimits={left:0,top:0,right:W,bottom:H,minZoom:9,maxZoom:48};
   toScreen(x:number,y:number) { return [(x-this.x)*this.zoom+this.width/2,(y-this.y)*this.zoom+this.height/2]; }
   toWorld(x:number,y:number) { return [this.x+(x-this.width/2)/this.zoom,this.y+(y-this.height/2)/this.zoom]; }
   pan(dx:number,dy:number) { this.x-=dx/this.zoom; this.y-=dy/this.zoom; this.limit(); }
   scale(atX:number,atY:number,factor:number) {
     const [x,y] = this.toWorld(atX,atY);
-    this.zoom=Math.max(7,Math.min(64,this.zoom*factor));
+    this.zoom=Math.max(this.bounds.minZoom,Math.min(this.bounds.maxZoom,this.zoom*factor));
     const [nextX,nextY]=this.toWorld(atX,atY);
     this.x+=x-nextX; this.y+=y-nextY; this.limit();
   }
-  focus(tile:number) { const [x,y]=xy(tile); this.x=x+.5; this.y=y+.5; }
-  private limit() { this.x=Math.max(0,Math.min(W,this.x)); this.y=Math.max(0,Math.min(H,this.y)); }
+  focus(tile:number) { const [x,y]=xy(tile); this.aim(x+.5,y+.5); }
+  aim(x:number,y:number,zoom=this.zoom) {
+    this.x=x; this.y=y;
+    this.zoom=Math.max(this.bounds.minZoom,Math.min(this.bounds.maxZoom,zoom));
+    this.limit();
+  }
+  tileAt(px:number,py:number) {
+    const [x,y]=this.toWorld(px,py);
+    return inBounds(this.bounds,x,y)?at(Math.floor(x),Math.floor(y)):-1;
+  }
+  private limit() {
+    const {left,right,top,bottom}=this.bounds;
+    const halfX=Math.min((right-left)/2,this.width/this.zoom/2);
+    const halfY=Math.min((bottom-top)/2,this.height/this.zoom/2);
+    this.x=Math.max(left+halfX,Math.min(right-halfX,this.x));
+    this.y=Math.max(top+halfY,Math.min(bottom-halfY,this.y));
+  }
 }
 
-type Scene = { data:Int32Array; mode:Mode; preview:PreviewCell[]; selected:number; focus:number; trace:number[]; now:number; snapshotAt:number; speed:number; chip:number; };
+type Scene = { data:Int32Array; mode:Mode; preview:PreviewCell[]; selected:number; focus:number; trace:[number,number][]; now:number; tick:number; chip:number; };
 
 export class Renderer {
   readonly camera = new Camera();
@@ -128,10 +146,9 @@ export class Renderer {
     if (!w || !h) return;
     this.camera.width=w; this.camera.height=h;
     this.small=matchMedia('(pointer: coarse)').matches || w<580;
-    if (first) {
-      this.camera.zoom=this.small ? Math.max(13,Math.min(24,w/24)) : Math.max(18,Math.min(34,w/36));
-      if (this.small) { this.camera.x=13; this.camera.y=16.2; }
-    }
+    const cam=this.camera;
+    const initial=this.small?Math.max(13,Math.min(24,w/24)):Math.max(18,Math.min(34,w/36));
+    cam.aim(cam.x,cam.y,first?initial:cam.zoom);
     this.dirty=true;
   }
 
@@ -166,6 +183,9 @@ export class Renderer {
         B(0,0,.63,.63,rgba(112,91,58),2); B(0,0,.53,.53,ink,2);
         B(0,0,.37,.37,mark,2); B(.02,-.015,.27,.27,ink,2);
         B(.07,-.05,.39,.045,mark,0,-.74); B(.16,-.12,.08,.08,mark,2); break;
+      case Kind.DevelopmentHub:
+        B(0,0,.67,.67,mark,2); B(0,0,.52,.52,ink,2);
+        B(0,0,.20,.42,amber,1); B(0,-.14,.29,.23,amber,5,-Math.PI/2); break;
       case Kind.Generator:
         B(0,0,.58,.58,mark,2); B(0,0,.48,.48,ink,2);
         B(.025,-.025,.32,.13,mark,5,-1.05); B(-.035,.08,.27,.13,mark,5,Math.PI-1.05); break;
@@ -186,16 +206,63 @@ export class Renderer {
         B(0,.12,.73,.13,grey); B(-.2,-.07,.24,.24,amber,1); B(.12,-.07,.24,.24,amber,1); break;
       case Kind.Bench: case Kind.Smelter:
         B(0,.19,.57,.1,mark,1); B(0,-.19,.57,.1,mark,1); B(0,0,.19,.31,mark,1); break;
+      case Kind.ReinforcedIronDrill: case Kind.ReinforcedSilicaDrill: case Kind.ReinforcedFuelDrill:
+        B(0,0,.64,.57,mark,1); B(0,0,.54,.47,ink,1);
+        B(-.12,0,.18,.40,mark,1); B(.11,0,.20,.33,mark,1); B(.25,-.25,.13,.13,amber,3); break;
       default:
         B(-.12,0,.24,.42,mark,1); B(.15,-.06,.22,.37,mark,0,-.3); B(.25,.22,.13,.09,mark); break;
     }
-    if (![Kind.Generator,Kind.Solar,Kind.Battery,Kind.Station].includes(kind)) {
+    if (!machinesWithoutOutput.has(kind)) {
       const [dx,dy]=STEP[direction];
       B(dx*.4,dy*.4,.18,.15,mark,5,direction*Math.PI/2);
     }
     if (status===1) B(-.29,-.29,.10,.10,cyan,2);
     if (status===3) B(.33,-.34,.21,.21,red,3);
     if (status===4) B(.33,-.34,.17,.15,amber,0);
+  }
+
+  private transport(kind:number,x:number,y:number,dir:number,detail:boolean,preview?:Color) {
+    const tier=design(kind)?.beltTier ?? 0;
+    const style=preview ?? (tier===3?amber:tier===2?cyan:frame);
+    const lanes=design(kind)?.lanes ?? 1;
+    for (let lane=lanes-1;lane>=0;lane--) {
+      const angle=(dir+lane)%4*Math.PI/2;
+      const width=lanes===2?.46:.72;
+      this.box(x,y,.98,width,style,1,angle);
+      this.box(x,y,.97,width-.12,rgba(24,43,53),1,angle);
+      if (lanes===2 && lane===0) this.box(x,y,.42,width+.02,style,1,angle);
+    }
+    for (let lane=0;lane<lanes;lane++) {
+      const {incoming,outgoing}=transportPorts(kind,dir,lane);
+      if (kind===Kind.Merger || kind===Kind.Splitter) {
+        const ports=kind===Kind.Merger?incoming:outgoing;
+        const reach=kind===Kind.Merger?-.42:.42;
+        for (let flow=0;flow<4;flow++) {
+          if (!(ports&(1<<flow))) continue;
+          const [dx,dy]=STEP[flow];
+          this.stroke(x,y,x+dx*reach,y+dy*reach,.065,style);
+        }
+        this.box(x,y,.19,.19,style,kind===Kind.Merger?2:3);
+      }
+      for (let flow=0;flow<4;flow++) {
+        const [dx,dy]=STEP[flow];
+        const direction=flow*Math.PI/2;
+        if (outgoing&(1<<flow)) {
+          const dist=tier>1?.29:.33;
+          this.box(x+dx*dist,y+dy*dist,.22,.20,preview ?? grey,5,direction);
+          if (tier>1) this.box(x+dx*.08,y+dy*.08,.17,.18,style,5,direction);
+          if (tier===3) this.box(x-dx*.13,y-dy*.13,.17,.18,style,5,direction);
+        }
+        if (detail && incoming&(1<<flow)) this.box(x-dx*.42,y-dy*.42,.10,.13,preview ?? style,5,direction);
+      }
+    }
+  }
+
+  private cargoCenter(data:Int32Array,location:number):[number,number] {
+    const tile=Math.floor(location/2), [x,y]=xy(tile);
+    if (cell(data,tile,Field.Kind)!==Kind.Crossing) return [x+.5,y+.5];
+    const [dx,dy]=STEP[(cell(data,tile,Field.Direction)+location%2)%4];
+    return [x+.5-dy*.18,y+.5+dx*.18];
   }
 
   render(scene:Scene) {
@@ -217,20 +284,23 @@ export class Renderer {
     }
     const {data,mode,preview,selected,focus}=scene;
     const [lx,ty]=c.toWorld(0,0), [rx,by]=c.toWorld(c.width,c.height);
-    const left=Math.max(0,Math.floor(lx)-1), top=Math.max(0,Math.floor(ty)-1);
-    const right=Math.min(W,Math.ceil(rx)+1), bottom=Math.min(H,Math.ceil(by)+1);
+    const bounds=c.bounds;
+    const left=Math.max(bounds.left,Math.floor(lx)-1), top=Math.max(bounds.top,Math.floor(ty)-1);
+    const right=Math.min(bounds.right,Math.ceil(rx)+1), bottom=Math.min(bounds.bottom,Math.ceil(by)+1);
     this.length=0;
     const sun=data[Meta.Sun], orbit=mode==='orbit';
-    this.box(W/2,H/2,W,H,rgba(14,26,35));
+    this.box((bounds.left+bounds.right)/2,(bounds.top+bounds.bottom)/2,bounds.right-bounds.left,bounds.bottom-bounds.top,rgba(14,26,35));
     if (sun || orbit) {
       const x=sun ? data[Meta.BeamX100]/100 : 45;
       for (let i=10;i>=0;i--) this.box(x,16,3+i*.6,60,rgba(250,173,75,sun?.026:.01));
     }
-    for (let x=left;x<=right;x++) this.stroke(x,top,x,bottom,x%5===0?.044:.025,x%5===0?frame:line);
-    for (let y=top;y<=bottom;y++) this.stroke(left,y,right,y,y%5===0?.044:.025,y%5===0?frame:line);
+    for (let x=left;x<=right;x++) this.stroke(x,top,x,bottom,x%5===0?.044:.025,
+      x===bounds.left || x===bounds.right?grey:x%5===0?frame:line);
+    for (let y=top;y<=bottom;y++) this.stroke(left,y,right,y,y%5===0?.044:.025,
+      y===bounds.top || y===bounds.bottom?grey:y%5===0?frame:line);
     for (let i=0;i<25;i++) {
       const x=(i*107%499)/10+2.4,y=(i*41%311)/10+1.2;
-      this.box(x,y,1.4+i%3*.5,.6,rgba(91,126,133,.12),3,i%2*.54);
+      if (inBounds(bounds,x,y)) this.box(x,y,1.4+i%3*.5,.6,rgba(91,126,133,.12),3,i%2*.54);
     }
     if (data[Meta.Stage]>=Stage.Launch) this.drawCity(Boolean(data[Meta.FirstLight]),Boolean(sun),orbit);
     const finale=data[Meta.VictoryTicks];
@@ -258,7 +328,6 @@ export class Renderer {
     for (let y=top;y<bottom;y++) for (let x=left;x<right;x++) {
       const tile=y*W+x, kind=cell(data,tile,Field.Kind), ore=cell(data,tile,Field.Ore);
       const dir=cell(data,tile,Field.Direction);
-      const [dx,dy]=STEP[dir];
       if (ore) {
         const color=mineral[ore];
         this.box(x+.5,y+.5,1.42,1.35,[color[0],color[1],color[2],.20],4,-.25);
@@ -276,15 +345,8 @@ export class Renderer {
           }
         }
       }
-      if (kind===Kind.Belt || kind===Kind.Splitter) {
-        this.box(x+.5,y+.5,.97,.74,frame,1,dir*Math.PI/2);
-        this.box(x+.5,y+.5,.97,.56,rgba(28,46,55),1,dir*Math.PI/2);
-        if (kind===Kind.Splitter) {
-          const [sx,sy]=STEP[(dir+1)%4];
-          this.stroke(x+.5,y+.5,x+.5+sx*.49,y+.5+sy*.49,.33,frame);
-          this.box(x+.5+sx*.32,y+.5+sy*.32,.20,.21,grey,5,(dir+1)*Math.PI/2);
-        }
-        if (c.zoom>=12 || x%3===0 || y%3===0) this.box(x+.5+dx*.20,y+.5+dy*.20,.22,.31,grey,5,dir*Math.PI/2);
+      if (isTransport(kind)) {
+        this.transport(kind,x+.5,y+.5,dir,c.zoom>=12);
       } else if (kind) {
         this.machine(kind,x+.5,y+.5,dir,cell(data,tile,Field.Status));
         if (kind===Kind.SimpleMiner) {
@@ -314,32 +376,45 @@ export class Renderer {
         this.stroke(x+.5+dx*.59,y+.5+dy*.59,x+.5+dx*.88,y+.5+dy*.88,.067,color);
       }
     }
-    if (c.zoom>=15 && mode!=='power') {
-      const phase=(data[Meta.Tick]%5+Math.min(2,(scene.now-scene.snapshotAt)*scene.speed/50))/5;
+    if (c.zoom>=9) {
+      const tracks=cargoIndex(data);
+      const size=Math.max(.30,3/c.zoom);
       for (let y=top;y<bottom;y++) for (let x=left;x<right;x++) {
-        const tile=y*W+x, cargo=cell(data,tile,Field.Cargo);
-        if (!cargo) continue;
-        const [dx,dy]=STEP[cell(data,tile,Field.Direction)];
-        const next=at(x+dx,y+dy);
-        const move=next>=0 && cell(data,next,Field.Kind)===Kind.Belt && !cell(data,next,Field.Cargo) ? Math.min(.34,phase*.32) : 0;
-        this.box(x+.47+dx*move,y+.47+dy*move,.30,.28,mineral[cargo],shapeForItem[cargo]);
+        const tile=y*W+x;
+        for (let lane=1;lane>=0;lane--) {
+          const loc=tile*2+lane, row=tracks.get(loc);
+          if (row===undefined) continue;
+          const item=data[row+2], from=data[row+4], since=data[row+5], until=data[row+6];
+          const [tx,ty]=this.cargoCenter(data,loc);
+          const [fx,fy]=this.cargoCenter(data,from);
+          const phase=data[row+7]?1:Math.max(0,Math.min(1,(scene.tick-since)/Math.max(1,until-since)));
+          const px=fx+(tx-fx)*phase, py=fy+(ty-fy)*phase;
+          this.box(px,py,size+.08,size+.08,ink,shapeForItem[item]);
+          this.box(px,py,size,size,mineral[item],shapeForItem[item]);
+        }
       }
     }
 
     if (focus>=0) this.marker(focus,rgba(255,173,111,.82),1.22);
-    for (const tile of scene.trace) {
+    for (const [tile,flow] of scene.trace) {
       const [x,y]=xy(tile);
       if (x<left || x>=right || y<top || y>=bottom) continue;
-      const [dx,dy]=STEP[cell(data,tile,Field.Direction)];
-      this.box(x+.5-dy*.42,y+.5+dx*.42,.87,.07,cyan,0,cell(data,tile,Field.Direction)*Math.PI/2);
+      const [dx,dy]=STEP[flow];
+      this.box(x+.5-dy*.42,y+.5+dx*.42,.87,.07,cyan,0,flow*Math.PI/2);
     }
     if (selected>=0) this.marker(selected,cyan,1.06);
     for (const part of preview) {
       if (part.tile<0) continue;
       const [x,y]=xy(part.tile), color=part.conflict?red:amber;
       this.box(x+.5,y+.5,.95,.95,[...color.slice(0,3),.24] as Color,1);
-      if (part.kind===Kind.Belt) this.box(x+.5,y+.5,.42,.53,color,5,part.dir*Math.PI/2);
-      else if (part.kind>0) this.machine(part.kind,x+.5,y+.5,part.dir,0);
+      if (isTransport(part.kind)) this.transport(part.kind,x+.5,y+.5,part.dir,true,color);
+      else if (part.kind>0) {
+        this.machine(part.kind,x+.5,y+.5,part.dir,0);
+        if (machinesWithoutOutput.has(part.kind)) {
+          const [dx,dy]=STEP[part.dir];
+          this.box(x+.5+dx*.38,y+.5+dy*.38,.18,.17,color,5,part.dir*Math.PI/2);
+        }
+      }
       if (part.wire) this.box(x+.5,y+.5,.32,.32,color,3);
       this.marker(part.tile,color,.9);
     }

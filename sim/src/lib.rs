@@ -1,12 +1,21 @@
 mod belts;
+mod blueprints;
 mod campaign;
 mod catalog;
+mod construction;
+mod interface;
+mod inventory;
+mod progression;
 mod regions;
+mod transport;
+mod transport_save;
+#[cfg(test)]
+mod transport_tests;
 mod world;
 
 use std::cell::RefCell;
 
-use belts::{Cargo, RETIRED_SOURCE};
+use belts::{node, RETIRED_SOURCE};
 use campaign::Stage;
 use catalog::*;
 use regions::*;
@@ -16,8 +25,9 @@ const HEADER: usize = 54 + 3 * 14 + 2;
 const SAVE_HEADER: usize = 32 + 2 * ROUTE_WORDS;
 const SAVE_CELL_WORDS: usize = 19;
 const SAVE_WORDS: usize = SAVE_HEADER + N * SAVE_CELL_WORDS;
-const SAVE_VERSION: i32 = 4;
+const SAVE_VERSION: i32 = 7;
 const BUFFER: usize = 48_000;
+const MAX_INPUT: usize = 1_000_000;
 
 struct Runtime {
     world: World,
@@ -42,6 +52,20 @@ pub extern "C" fn input_ptr() -> *mut i32 {
 }
 
 #[no_mangle]
+pub extern "C" fn reserve_input(len: usize) -> *mut i32 {
+    if len > MAX_INPUT {
+        return std::ptr::null_mut();
+    }
+    RUNTIME.with(|r| {
+        let mut r = r.borrow_mut();
+        if len > r.input.len() {
+            r.input.resize(len, 0);
+        }
+        r.input.as_mut_ptr()
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn output_ptr() -> *const i32 {
     RUNTIME.with(|r| r.borrow().output.as_ptr())
 }
@@ -54,6 +78,11 @@ pub extern "C" fn step(ticks: u32) {
             world.step();
         }
     });
+}
+
+#[no_mangle]
+pub extern "C" fn max_speed() -> u32 {
+    RUNTIME.with(|r| r.borrow().world.progression.limits().speed)
 }
 
 #[no_mangle]
@@ -72,14 +101,26 @@ pub extern "C" fn command(op: i32, a: i32, b: i32, c: i32, len: usize) -> i32 {
             4 if tile < N => world.configure(tile, b),
             5 => world.launch(),
             6 if (0..=2).contains(&b) => world.regional_window(tile, b as u8),
-            7 if tile < N => world.blueprint(tile, words),
+            7 => match words {
+                &[turns] => world.deploy_blueprint(tile, b, c, turns),
+                _ => -1,
+            },
             8 if tile < N => world.rotate(tile),
             9 if tile < N => world.gather(tile),
             10 => world.craft_miner(),
             11 if tile < N => world.collect(tile),
             12 => world.handwork(),
-            13 if tile < N && (1..ITEMS as i32).contains(&b) => world.hand_feed(tile, b as u8),
+            13 if tile < N && (1..MATERIAL_ITEMS as i32).contains(&b) => {
+                world.hand_feed(tile, b as u8)
+            }
             14 => world.open_line(tile),
+            15 => world.transfer(a, b, c, words),
+            16 => world.capture_blueprint(tile, b as usize, words),
+            17 => world.blueprints.rename(a, words),
+            18 => world.blueprints.delete(a),
+            19 => world.blueprints.import_legacy(words),
+            20 => world.build_transports(a, words),
+            21 => world.take_cargo(tile, b as usize, c, words),
             _ => -1,
         }
     })
@@ -130,12 +171,12 @@ pub extern "C" fn snapshot() -> usize {
             MINER_COST as i32,
             MINER_TICKS as i32,
             MINER_CAPACITY as i32,
-            (1..=FREIGHT_YARD)
+            (1..=MAX_KIND)
                 .filter(|&kind| world.unlocked(kind))
                 .fold(0, |mask, kind| mask | (1 << kind)),
             FIRST_ORE as i32,
         ]);
-        output.extend(world.stock[1..].iter().map(|&v| v as i32));
+        output.extend(world.stock[1..MATERIAL_ITEMS].iter().map(|&v| v as i32));
         output.extend([
             o.modules as i32,
             o.target as i32,
@@ -191,11 +232,13 @@ pub extern "C" fn snapshot() -> usize {
             },
         ]);
         debug_assert_eq!(HEADER, output.len());
-        let pulse = world.tick / BELT_TICKS;
         for (i, c) in world.cells.iter().enumerate() {
-            let cargo = world.cargo[i];
+            let cargo = [world.cargo[node(i, 0)], world.cargo[node(i, 1)]]
+                .into_iter()
+                .find(|c| c.item > 0)
+                .unwrap_or_default();
             let status = if cargo.item > 0 && is_belt(c.kind) {
-                if cargo.ready < pulse {
+                if cargo.blocked {
                     4
                 } else {
                     1
@@ -215,7 +258,7 @@ pub extern "C" fn snapshot() -> usize {
                 c.progress as i32,
                 c.energy as i32,
             ]);
-            output.extend(c.inv[1..].iter().map(|&n| n as i32));
+            output.extend(c.inv[1..MATERIAL_ITEMS].iter().map(|&n| n as i32));
             output.push(c.delivering_kits(world.tick) as i32);
         }
         for g in &world.grids {
@@ -226,6 +269,9 @@ pub extern "C" fn snapshot() -> usize {
                 g.stored as i32,
             ]);
         }
+        world.write_progression(output);
+        world.write_transport_projection(output);
+        world.write_device_data(output);
         output.len()
     })
 }
@@ -244,7 +290,7 @@ pub extern "C" fn save() -> usize {
             world.delivered as i32,
             world.kit_total as i32,
         ]);
-        output.extend(world.stock.map(|v| v as i32));
+        output.extend(world.stock[..MATERIAL_ITEMS].iter().map(|&v| v as i32));
         output.extend([
             o.orbiting as i32,
             o.launch_left as i32,
@@ -272,7 +318,7 @@ pub extern "C" fn save() -> usize {
         }
         for (i, c) in world.cells.iter().enumerate() {
             output.extend([
-                c.kind as i32,
+                layout_kind(c.kind) as i32,
                 c.dir as i32,
                 c.wire as i32,
                 c.cfg as i32,
@@ -280,13 +326,17 @@ pub extern "C" fn save() -> usize {
                 c.energy as i32,
                 c.last_kit_delivery as i32,
                 c.split_turn as i32,
-                world.cargo[i].item as i32,
-                world.cargo[i].ready as i32,
+                world.cargo[node(i, 0)].item as i32,
+                world.cargo[node(i, 0)].ready as i32,
             ]);
-            output.extend(c.inv[1..].iter().map(|&n| n as i32));
-            output.push(world.cargo[i].source as i32);
+            output.extend(c.inv[1..MATERIAL_ITEMS].iter().map(|&n| n as i32));
+            output.push(world.cargo[node(i, 0)].source as i32);
         }
         debug_assert_eq!(output.len(), SAVE_WORDS);
+        world.write_transport_save(output);
+        world.write_progression_save(output);
+        world.write_saved_devices(output);
+        world.blueprints.write_save(output);
         output.len()
     })
 }
@@ -295,10 +345,10 @@ pub extern "C" fn save() -> usize {
 pub extern "C" fn restore(len: usize) -> i32 {
     RUNTIME.with(|rt| {
         let mut runtime = rt.borrow_mut();
-        if len != SAVE_WORDS {
+        let Some(words) = runtime.input.get(..len) else {
             return -1;
-        }
-        match World::from_save(&runtime.input[..len]) {
+        };
+        match World::from_save(words) {
             Some(world) => {
                 runtime.world = world;
                 1
@@ -309,28 +359,54 @@ pub extern "C" fn restore(len: usize) -> i32 {
 }
 
 impl World {
+    fn drill_at(&self, tile: usize, layout: u8) -> Result<u8, i32> {
+        let Some(kind) = drill_kind(layout, terrain(tile)) else {
+            return Err(-3);
+        };
+        if self.known_ore(tile) == 0 || !self.unlocked(kind) {
+            return Err(-19);
+        }
+        Ok(kind)
+    }
+
     fn place(&mut self, tile: usize, kind: i32, dir: i32) -> i32 {
-        if !(0..4).contains(&dir) || !(0..=BENCH as i32).contains(&kind) {
+        if !(0..4).contains(&dir)
+            || !(0..=MAX_KIND as i32).contains(&kind)
+            || kind == i32::from(CABLE)
+        {
             return -1;
         }
         let kind = kind as u8;
-        if !self.unlocked(kind) {
-            return -6;
+        if is_belt(kind) {
+            return self.build_transports(self.layout_revision, &[tile as i32, kind.into(), dir]);
         }
-        let price = if kind == SIMPLE_MINER {
-            if self.packed_miners == 0 {
-                return -6;
-            }
-            0
-        } else if let Some(cost) = cost(kind) {
-            cost
-        } else {
-            return -1;
-        };
         if self.cells[tile].kind != 0 {
             return -2;
         }
-        if !permitted(kind, tile)
+        let kind = if matches!(kind, INDUSTRIAL_MINER | REINFORCED_MINER) {
+            match self.drill_at(tile, kind) {
+                Ok(kind) => kind,
+                Err(error) => return error,
+            }
+        } else {
+            kind
+        };
+        if !self.unlocked(kind) {
+            return -6;
+        }
+        let materials = if kind == SIMPLE_MINER {
+            if self.packed_miners == 0 {
+                return -6;
+            }
+            &[][..]
+        } else {
+            if kind == FREIGHT_YARD || materials(kind).is_empty() {
+                return -1;
+            }
+            materials(kind)
+        };
+        if !self.progression.contains(tile)
+            || !permitted(kind, tile)
             || (kind == STATION
                 && !STATIONS
                     .iter()
@@ -343,11 +419,10 @@ impl World {
         if kind == KILN && !self.orbit.first_light {
             return -6;
         }
-        if self.stock[PLATE as usize] < price {
+        if !self.spend(materials, 1) {
             return -4;
         }
         self.materialize();
-        self.stock[PLATE as usize] -= price;
         if kind == SIMPLE_MINER {
             self.packed_miners -= 1;
         }
@@ -357,61 +432,53 @@ impl World {
             (Stage::Expand, IRON_DRILL) => Stage::Power,
             (stage, _) => stage,
         };
-        self.cells[tile] = Cell {
-            kind,
-            dir: dir as u8,
-            cfg: if kind == STATION { 2 } else { 0 },
-            wire: self.cells[tile].wire,
-            ..Cell::default()
-        };
-        self.rebuild(false);
+        self.install(
+            tile,
+            Cell {
+                kind,
+                dir: dir as u8,
+                cfg: if kind == STATION { 2 } else { 0 },
+                wire: self.cells[tile].wire,
+                ..Cell::default()
+            },
+        );
+        self.rebuild();
         1
     }
 
     fn route(&mut self, wire: bool, words: &[i32]) -> i32 {
-        if self.stage < if wire { Stage::Power } else { Stage::Belt } {
-            return -6;
-        }
         if words.is_empty() || words.len() % 2 != 0 || words.len() > 2 * N {
             return -1;
         }
+        if !wire {
+            let plan: Vec<_> = words
+                .chunks_exact(2)
+                .flat_map(|p| [p[0], i32::from(BELT), p[1]])
+                .collect();
+            return self.build_transports(self.layout_revision, &plan);
+        }
+        if self.stage < Stage::Power {
+            return -6;
+        }
         let mut seen = vec![false; N];
-        let mut price = 0;
-        for pair in words.chunks_exact(2) {
-            let tile = pair[0] as usize;
-            if tile >= N || seen[tile] || !(0..4).contains(&pair[1]) {
+        let mut new_tiles = 0u32;
+        for p in words.chunks_exact(2) {
+            let tile = p[0] as usize;
+            if tile >= N || std::mem::replace(&mut seen[tile], true) || !(0..4).contains(&p[1]) {
                 return -1;
             }
-            seen[tile] = true;
-            let c = self.cells[tile];
-            if !wire && (!permitted(BELT, tile) || c.kind != 0 && c.kind != BELT) {
-                return -2;
+            if !self.progression.contains(tile) {
+                return -3;
             }
-            if wire && !c.wire || !wire && c.kind == 0 {
-                price += 1;
-            }
+            new_tiles += u32::from(!self.cells[tile].wire);
         }
-        if wire {
-            price = (price + 2) / 3;
-        };
-        if self.stock[PLATE as usize] < price {
+        if !self.spend(materials(CABLE), new_tiles.div_ceil(CABLE_SPAN)) {
             return -4;
         }
-        self.stock[PLATE as usize] -= price;
-        if wire {
-            for pair in words.chunks_exact(2) {
-                self.cells[pair[0] as usize].wire = true;
-            }
-            self.update_grids();
-        } else {
-            self.materialize();
-            for pair in words.chunks_exact(2) {
-                let c = &mut self.cells[pair[0] as usize];
-                c.kind = BELT;
-                c.dir = pair[1] as u8;
-            }
-            self.rebuild(false);
+        for p in words.chunks_exact(2) {
+            self.cells[p[0] as usize].wire = true;
         }
+        self.update_grids();
         1
     }
 
@@ -432,13 +499,29 @@ impl World {
             return -6;
         }
         self.materialize();
-        let cargo = &mut self.cargo[tile];
-        if cargo.item > 0 {
-            self.stock[cargo.item as usize] += 1;
-            *cargo = Cargo::default();
+        let mut returned = self.stock;
+        for lane in 0..belt_lanes(c.kind) {
+            let cargo = self.cargo[node(tile, lane)];
+            if cargo.item > 0 {
+                returned[cargo.item as usize] += 1;
+            }
+        }
+        if c.progress > 0 {
+            if let Some(recipe) = recipe(c.kind) {
+                for (item, count) in recipe.input {
+                    returned[item as usize] += u32::from(count);
+                }
+            }
         }
         for (i, &count) in c.inv.iter().enumerate() {
-            self.stock[i] += u32::from(count);
+            returned[i] += u32::from(count);
+        }
+        if !self.fits_stock(&returned) {
+            return -24;
+        }
+        self.stock = returned;
+        for lane in 0..belt_lanes(c.kind) {
+            self.cargo[node(tile, lane)] = belts::Cargo::default();
         }
         if c.kind == SIMPLE_MINER {
             self.packed_miners += 1;
@@ -456,7 +539,7 @@ impl World {
             wire: c.wire,
             ..Cell::default()
         };
-        self.rebuild(false);
+        self.rebuild();
         1
     }
 
@@ -489,89 +572,29 @@ impl World {
         if c.kind == 0 || c.kind == STATION {
             return -1;
         }
+        if is_belt(c.kind) {
+            return self.build_transports(
+                self.layout_revision,
+                &[tile as i32, c.kind.into(), ((c.dir + 1) % 4).into()],
+            );
+        }
         self.materialize();
         self.cells[tile].dir = (c.dir + 1) % 4;
-        self.rebuild(false);
-        1
-    }
-
-    fn blueprint(&mut self, anchor: usize, words: &[i32]) -> i32 {
-        if words.is_empty() || words.len() % 6 != 0 || words.len() > 6 * 250 {
-            return -1;
-        }
-        let mut seen = vec![false; N];
-        let mut placed = Vec::new();
-        let mut pieces = 0;
-        for part in words.chunks_exact(6) {
-            let x = anchor as i32 % W as i32 + part[0];
-            let y = anchor as i32 / W as i32 + part[1];
-            if !(0..W as i32).contains(&x) || !(0..H as i32).contains(&y) {
-                return -1;
-            }
-            let tile = index(x as usize, y as usize);
-            if seen[tile]
-                || !(0..=BENCH as i32).contains(&part[2])
-                || !(0..4).contains(&part[3])
-                || !(0..=1).contains(&part[4])
-            {
-                return -1;
-            }
-            seen[tile] = true;
-            let kind = part[2] as u8;
-            if kind != 0
-                && (kind == STATION
-                    || !self.stage.allows(kind)
-                    || cost(kind).is_none()
-                    || self.cells[tile].kind != 0)
-            {
-                return -2;
-            }
-            if !permitted(kind, tile) {
-                return -3;
-            }
-            let cfg = part[5].clamp(
-                0,
-                match kind {
-                    DEPOT => 8,
-                    SPLITTER => 1,
-                    _ => 2,
-                },
-            ) as u8;
-            if kind != 0 {
-                pieces += 1;
-            }
-            placed.push((tile, kind, part[3] as u8, part[4] == 1, cfg));
-        }
-        let price = (pieces as u32).div_ceil(2).max(2);
-        if !self.orbit.first_light {
-            return -6;
-        }
-        if self.stock[KIT as usize] < price {
-            return -5;
-        }
-        self.stock[KIT as usize] -= price;
-        self.materialize();
-        for (tile, kind, dir, wire, cfg) in placed {
-            let cell = &mut self.cells[tile];
-            if kind != 0 {
-                *cell = Cell {
-                    kind,
-                    dir,
-                    cfg,
-                    wire: cell.wire,
-                    ..Cell::default()
-                };
-            }
-            cell.wire |= wire;
-        }
-        self.rebuild(false);
+        self.rebuild();
         1
     }
 
     fn from_save(data: &[i32]) -> Option<Self> {
+        let max_kind = match data.first().copied()? {
+            4 if data.len() == SAVE_WORDS => FREIGHT_YARD,
+            5 if data.len() > SAVE_WORDS => INDUSTRIAL_MINER,
+            6 if data.len() > SAVE_WORDS => CROSSING,
+            SAVE_VERSION if data.len() > SAVE_WORDS => MAX_KIND,
+            _ => return None,
+        };
         let sane = |x: i32| (0..1_000_000_000).contains(&x);
         let flag = |x| matches!(x, 0 | 1);
-        if data[0] != SAVE_VERSION || data[1..13].iter().any(|&x| !sane(x)) {
+        if data[1..13].iter().any(|&x| !sane(x)) {
             return None;
         }
         if !flag(data[13])
@@ -640,18 +663,18 @@ impl World {
                 }
             }
         }
-        for (i, s) in data[SAVE_HEADER..]
+        for (i, s) in data[SAVE_HEADER..SAVE_WORDS]
             .chunks_exact(SAVE_CELL_WORDS)
             .enumerate()
         {
-            if !(0..=FREIGHT_YARD as i32).contains(&s[0])
+            if !(0..=i32::from(max_kind)).contains(&s[0])
                 || !(0..4).contains(&s[1])
                 || !flag(s[2])
                 || !flag(s[7])
                 || !(0..=59).contains(&s[4])
                 || !(0..=BATTERY_CAPACITY as i32).contains(&s[5])
                 || !(0..=data[1]).contains(&s[6])
-                || !(0..ITEMS as i32).contains(&s[8])
+                || !(0..MATERIAL_ITEMS as i32).contains(&s[8])
                 || !sane(s[9])
                 || s[10..18]
                     .iter()
@@ -661,9 +684,15 @@ impl World {
                 return None;
             }
             let kind = s[0] as u8;
+            let kind = if matches!(kind, INDUSTRIAL_MINER | REINFORCED_MINER) {
+                drill_kind(kind, terrain(i))?
+            } else {
+                kind
+            };
             let max = match kind {
                 DEPOT => 8,
                 SPLITTER => 1,
+                MERGER => 3,
                 _ => 2,
             };
             if !(0..=max).contains(&s[3])
@@ -675,39 +704,73 @@ impl World {
                 return None;
             }
             let mut inv = [0; ITEMS];
-            for (slot, &value) in inv[1..].iter_mut().zip(&s[10..18]) {
+            for (slot, &value) in inv[1..MATERIAL_ITEMS].iter_mut().zip(&s[10..18]) {
                 *slot = value as u16;
             }
-            w.cells[i] = Cell {
-                kind,
-                dir: s[1] as u8,
-                wire: s[2] == 1,
-                cfg: s[3] as u8,
-                progress: s[4] as u16,
-                energy: s[5] as u32,
-                last_kit_delivery: s[6] as u32,
-                split_turn: s[7] == 1,
-                inv,
-                ..Cell::default()
-            };
-            w.cargo[i] = Cargo {
-                item: s[8] as u8,
-                ready: s[9] as u32,
-                source: s[18] as u16,
-            };
-        }
-        for cargo in &w.cargo {
-            if cargo.source != 0 && cargo.source != RETIRED_SOURCE {
-                let producer = w.cells[usize::from(cargo.source) - 1].kind;
-                if !matches!(
-                    (cargo.item, producer),
-                    (KIT, KIT_PRESS) | (PLATE, SMELTER | BENCH)
-                ) {
-                    return None;
+            if data[0] < 6 && s[4] > 0 {
+                if let Some(r) = recipe(kind) {
+                    for (item, count) in r.input {
+                        inv[item as usize] = inv[item as usize].checked_sub(count)?;
+                    }
                 }
             }
+            w.install(
+                i,
+                Cell {
+                    kind,
+                    dir: s[1] as u8,
+                    wire: s[2] == 1,
+                    cfg: s[3] as u8,
+                    progress: s[4] as u16,
+                    energy: s[5] as u32,
+                    last_kit_delivery: s[6] as u32,
+                    split_turn: s[7] == 1,
+                    inv,
+                    ..Cell::default()
+                },
+            );
+            if data[0] < 6 {
+                w.add_legacy_cargo(i, s[8] as u8, s[18] as u16)?;
+            }
         }
-        w.rebuild(true);
+        if data[0] < SAVE_VERSION {
+            w.progression.legacy_full_bounds = w
+                .cells
+                .iter()
+                .enumerate()
+                .any(|(tile, c)| (c.kind != 0 || c.wire) && !w.progression.contains(tile));
+        }
+        if data[0] >= 6 {
+            let rest = w.read_transport_save(&data[SAVE_WORDS..])?;
+            let rest = if data[0] == SAVE_VERSION {
+                w.read_progression_save(rest)?
+            } else {
+                rest
+            };
+            if w.cells.iter().enumerate().any(|(tile, c)| {
+                (c.kind != 0 || c.wire)
+                    && (!w.progression.contains(tile)
+                        || w.progression.tier == 0
+                            && matches!(
+                                c.kind,
+                                EXPRESS_BELT | REINFORCED_IRON_DRILL..=REINFORCED_FUEL_DRILL
+                            ))
+            }) {
+                return None;
+            }
+            let rest = w.read_saved_devices(rest, true)?;
+            w.blueprints = blueprints::Library::read_save(rest)?;
+            w.update_grids();
+        } else {
+            for &cargo in &w.cargo {
+                w.valid_source(cargo)?;
+            }
+            w.rebuild();
+            if data[0] == 5 {
+                let rest = w.read_saved_devices(&data[SAVE_WORDS..], false)?;
+                w.blueprints = blueprints::Library::read_save(rest)?;
+            }
+        }
         Some(w)
     }
 }
