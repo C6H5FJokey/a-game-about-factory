@@ -5,6 +5,19 @@ use crate::catalog::*;
 use crate::world::World;
 
 impl World {
+    pub fn transport_save_length(&self, data: &[i32]) -> Option<usize> {
+        let &[_, _, count, segments] = data.get(..4)? else {
+            return None;
+        };
+        let count = usize::try_from(count).ok()?;
+        let segments = usize::try_from(segments).ok()?;
+        if count > NODES || segments > NODES {
+            return None;
+        }
+        let length = 4 + count * 8 + segments * 3;
+        (length <= data.len()).then_some(length)
+    }
+
     pub fn write_transport_projection(&self, out: &mut Vec<i32>) {
         let start = out.len();
         out.push(self.layout_revision);
@@ -86,7 +99,7 @@ impl World {
                 || !(0..=RETIRED_SOURCE.into()).contains(&source)
                 || !(0..NODES as i32).contains(&from)
                 || !(0..=self.tick as i32).contains(&since)
-                || !(since..=self.tick as i32 + BELT_TICKS as i32).contains(&ready)
+                || !(since..=self.tick as i32 + MAX_BELT_INTERVAL as i32).contains(&ready)
                 || !matches!(blocked, 0 | 1)
             {
                 return None;
@@ -105,7 +118,8 @@ impl World {
             self.cargo[loc] = cargo;
             previous = Some(loc);
         }
-        self.belt = Belts::rebuild(&self.cells, &self.cargo, None);
+        self.rebuild_footprints()?;
+        self.belt = Belts::rebuild(&self.cells, &self.cargo, None, &self.footprints.outlets);
         if self.belt.segments.len() != segments {
             return None;
         }
@@ -115,7 +129,7 @@ impl World {
             .iter_mut()
             .zip(gate_words.chunks_exact(3))
         {
-            let max = self.tick as i32 + BELT_TICKS as i32;
+            let max = self.tick as i32 + MAX_BELT_INTERVAL as i32;
             if segment.nodes[0] as i32 != words[0]
                 || !(0..=max).contains(&words[1])
                 || !(0..=max).contains(&words[2])

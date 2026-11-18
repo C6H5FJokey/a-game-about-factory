@@ -9,7 +9,6 @@ pub struct Progression {
 
 pub struct Limits {
     pub slots: u32,
-    pub stack: u32,
     pub speed: u32,
     pub min_zoom: u32,
     pub max_zoom: u32,
@@ -18,14 +17,12 @@ pub struct Limits {
 const LIMITS: [Limits; 2] = [
     Limits {
         slots: 16,
-        stack: 100,
         speed: 2,
         min_zoom: 9,
         max_zoom: 48,
     },
     Limits {
         slots: 24,
-        stack: 150,
         speed: 4,
         min_zoom: 6,
         max_zoom: 64,
@@ -35,6 +32,10 @@ const LIMITS: [Limits; 2] = [
 impl Progression {
     pub fn limits(&self) -> &'static Limits {
         &LIMITS[self.tier as usize]
+    }
+
+    fn stack_limits(&self) -> &'static [u32; ITEMS] {
+        &STACK_LIMITS[self.tier as usize]
     }
 
     pub fn bounds(&self) -> [usize; 4] {
@@ -59,24 +60,31 @@ pub fn cycle_ticks(base: u16, installed: u16) -> u16 {
     if installed == 0 {
         base
     } else {
-        (base * 2).div_ceil(3)
+        (u32::from(base) * 2).div_ceil(3) as u16
     }
 }
 
-fn used_slots(stock: &[u32; ITEMS], stack: u32) -> u32 {
-    stock[1..].iter().map(|count| count.div_ceil(stack)).sum()
+fn used_slots(stock: &[u32; ITEMS], stacks: &[u32; ITEMS]) -> u32 {
+    stock[1..]
+        .iter()
+        .zip(&stacks[1..])
+        .filter(|&(&count, _)| count != 0)
+        .map(|(&count, &stack)| count.div_ceil(stack))
+        .fold(0, u32::saturating_add)
 }
 
 impl World {
     pub fn stock_room(&self, item: u8) -> u32 {
         let limits = self.progression.limits();
+        let stacks = self.progression.stack_limits();
+        let stack = stacks[item as usize];
         let actual = self.stock[item as usize];
-        let tail = (limits.stack - actual % limits.stack) % limits.stack;
-        let used = used_slots(&self.stock, limits.stack);
+        let tail = (stack - actual % stack) % stack;
+        let used = used_slots(&self.stock, stacks);
         if used > limits.slots {
             return 0;
         }
-        tail + (limits.slots - used) * limits.stack
+        tail + (limits.slots - used) * stack
     }
 
     pub fn fits_stock(&self, next: &[u32; ITEMS]) -> bool {
@@ -84,8 +92,9 @@ impl World {
             return true;
         }
         let limits = self.progression.limits();
-        let current = used_slots(&self.stock, limits.stack);
-        let next_slots = used_slots(next, limits.stack);
+        let stacks = self.progression.stack_limits();
+        let current = used_slots(&self.stock, stacks);
+        let next_slots = used_slots(next, stacks);
         next_slots <= limits.slots || next_slots < current
     }
 
@@ -95,7 +104,7 @@ impl World {
         out.extend([
             self.progression.tier.into(),
             limits.slots as i32,
-            limits.stack as i32,
+            0,
             limits.speed as i32,
             limits.min_zoom as i32,
             limits.max_zoom as i32,
@@ -103,7 +112,7 @@ impl World {
             top as i32,
             right as i32,
             bottom as i32,
-            used_slots(&self.stock, limits.stack) as i32,
+            used_slots(&self.stock, self.progression.stack_limits()).min(i32::MAX as u32) as i32,
             self.stock[SPEED_MODULE as usize] as i32,
             self.machines
                 .iter()

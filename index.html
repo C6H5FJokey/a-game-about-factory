@@ -8,20 +8,19 @@
     <title>把白昼送回去</title>
   </head>
   <body>
-    <div id="app" class="shell" data-opening="true" aria-busy="true">
+    <div id="app" class="shell" aria-busy="true">
       <header class="masthead">
         <div class="brand"><span class="sunmark" aria-hidden="true"></span><h1>把白昼送回去</h1></div>
-        <div id="balances" class="balances" aria-label="持有物资"></div>
-        <button class="button quiet archive" type="button" data-action="archive">档案</button>
+        <div id="balances" class="balances" aria-label="持有物资" data-i18n-label="ui.stock"></div>
+        <button class="button quiet archive" type="button" data-action="archive" data-i18n="ui.archive">档案</button>
       </header>
 
       <main class="workbench" aria-label="工厂控制台">
         <section id="map" class="map" aria-label="工厂地图">
           <canvas id="world" aria-label="可编辑工厂地图"></canvas>
           <div id="map-labels" class="map-labels" aria-hidden="true"></div>
-          <button id="ore-action" type="button" class="button local-action" data-action="ore-action" hidden></button>
+          <span id="map-harvest" class="map-harvest" aria-hidden="true" hidden><span class="harvest-fill"></span></span>
           <span id="ore-gain" class="ore-gain" aria-live="polite" hidden></span>
-          <div id="lesson" class="lesson" hidden></div>
           <div id="notice" class="notice" role="status" hidden></div>
           <div class="map-controls" aria-label="镜头控制">
             <button class="button square" type="button" data-action="home" aria-label="回到工厂">◎</button>
@@ -37,10 +36,11 @@
           <div class="panel-surface" id="panel-surface" inert>
             <div class="panel-heading"><div><span class="panel-tag" id="panel-tag">任务通讯</span><h2 id="panel-title">矿站启动</h2></div><div id="panel-tools"></div></div>
             <nav class="modes drawer-modes" aria-label="工厂页面">
-              <button type="button" class="mode" data-mode="task" aria-pressed="true">任务</button>
-              <button type="button" class="mode" data-mode="view" aria-pressed="false">操作</button>
-              <button type="button" class="mode" data-mode="build" aria-pressed="false">建造</button>
-              <button type="button" class="mode" data-mode="power" aria-pressed="false">电网</button>
+              <button type="button" class="mode" data-mode="task" data-i18n="ui.tasks" aria-pressed="true">任务</button>
+              <button type="button" class="mode" data-mode="view" data-i18n="ui.operations" aria-pressed="false">操作</button>
+              <button type="button" class="mode" data-mode="build" data-i18n="ui.build" aria-pressed="false">建造</button>
+              <button type="button" class="mode" data-mode="power" data-i18n="ui.grid" aria-pressed="false">电网</button>
+              <button type="button" class="mode" data-mode="guide" data-i18n="ui.guide" aria-pressed="false">手册</button>
             </nav>
             <nav id="panel-tabs" class="panel-tabs" aria-label="建造栏目" hidden></nav>
             <div class="panel-body" id="panel-body"></div>
@@ -50,7 +50,7 @@
 
       <footer class="console">
         <nav class="modes" aria-label="轨道入口">
-          <button type="button" class="mode" data-mode="orbit" aria-pressed="false"><span aria-hidden="true">◔</span>轨道</button>
+          <button type="button" class="mode" data-mode="orbit" aria-pressed="false"><span aria-hidden="true">◔</span><span data-i18n="ui.orbit">轨道</span></button>
         </nav>
         <div class="run-state" aria-label="模拟时间">
           <span id="clock">00:00</span>
@@ -62,9 +62,10 @@
     <div id="item-drag" class="item-drag" aria-hidden="true" hidden></div>
 
     <dialog id="archive-dialog" class="dialog" aria-labelledby="archive-title">
-      <div class="dialog-head"><h2 id="archive-title">矿站档案</h2><button class="button quiet" type="button" data-action="close-dialog">关闭</button></div>
-      <p>存档包含本局蓝图库及发展阶段，可读取第 4 至 7 版战役存档。</p>
-      <p id="save-status" role="status">当前战役会自动保存到此浏览器。</p>
+      <div class="dialog-head"><h2 id="archive-title" data-i18n="ui.archiveTitle">矿站档案</h2><button class="button quiet" type="button" data-action="close-dialog" data-i18n="ui.close">关闭</button></div>
+      <p data-i18n="ui.archiveCompatibility">支持第 4 至 8 版战役存档。第 8 版记录数据集与版本。</p>
+      <label class="language-setting"><span data-i18n="ui.language">语言</span><select id="language-select"></select></label>
+      <p id="save-status" role="status" data-i18n="ui.saveStatus">当前战役会自动保存到此浏览器。</p>
       <div class="dialog-actions"><button class="button" type="button" data-action="save">立即保存</button><button class="button" type="button" data-action="export">导出存档</button><button class="button" type="button" data-action="import">导入存档</button></div>
       <input id="save-file" type="file" accept=".dawn,application/octet-stream" hidden />
       <div class="dialog-actions"><button class="button" type="button" data-action="pause">暂停模拟</button><button class="button danger" type="button" data-action="reset-confirm">新战役</button></div>

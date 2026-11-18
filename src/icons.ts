@@ -1,4 +1,5 @@
 import { Kind } from './model';
+import { content } from './generated-content';
 
 const itemArt = [
   '',
@@ -14,6 +15,7 @@ const itemArt = [
 ];
 
 const machineArt: Record<number,string> = {
+  [Kind.Empty]:'<path d="M4 9h24v14H4z"/>',
   [Kind.Belt]:'<rect x="2" y="9" width="28" height="14" rx="4"/><path d="M8 9v14m16-14v14m-12-7h8m-3-3 3 3-3 3"/>',
   [Kind.FastBelt]:'<rect x="2" y="9" width="28" height="14" rx="4"/><path class="accent cyan" d="m8 12 4 4-4 4m6-8 4 4-4 4m6-8 4 4-4 4"/>',
   [Kind.ExpressBelt]:'<rect x="2" y="7" width="28" height="18" rx="3"/><path class="accent fuel" d="m7 11 4 5-4 5m7-10 4 5-4 5m7-10 4 5-4 5"/>',
@@ -37,14 +39,16 @@ const machineArt: Record<number,string> = {
   [Kind.SimpleMiner]:'<path d="M4 26h23M7 24V8h15v16M7 11h15m-7 0v9m-4-2 4 4 4-4"/><path class="accent iron" d="m11 25 4-2 5 2-4 3Z"/>',
   [Kind.Bench]:'<path d="M4 25h24M7 25V9h18v16M10 12h12m-6 0v6m-7 3h14"/><path class="accent cyan" d="M13 18h6v3h-6z"/>',
   [Kind.Yard]:'<path d="M4 7h24v18H4zm0 7h24M7 20h18m-14 0v5m10-5v5"/><path d="M9 10h4m6 0h4"/>',
+  [Kind.Cable]:'<path d="M5 17h6a5 5 0 0 1 5 5v2m0-2a7 7 0 0 1 7-7h4m-24-2h4v8H3zm18-2h8v8h-8z"/>',
   [Kind.DevelopmentHub]:'<rect x="4" y="4" width="24" height="24" rx="6"/><path class="accent fuel" d="M16 24V9m-6 6 6-6 6 6"/>',
 };
 
 export function itemIcon(item:number) {
-  return `<svg class="item-icon" viewBox="0 0 32 32" aria-hidden="true" fill="none" stroke="#263742" stroke-width="1.3" stroke-linejoin="round">${itemArt[item] ?? ''}</svg>`;
+  return `<svg class="item-icon" viewBox="0 0 32 32" aria-hidden="true" fill="none" stroke="#263742" stroke-width="1.3" stroke-linejoin="round">${itemArt[content.items[item]?.icon ?? 0] ?? ''}</svg>`;
 }
 
 export function machineIcon(kind:number) {
+  kind=content.machines[kind]?.icon ?? kind;
   if (kind===Kind.IndustrialMiner) kind=Kind.IronDrill;
   const reinforced=kind>=Kind.ReinforcedIronDrill && kind<=Kind.ReinforcedMiner;
   if (reinforced) kind=kind===Kind.ReinforcedMiner?Kind.IronDrill:kind-Kind.ReinforcedIronDrill+Kind.IronDrill;

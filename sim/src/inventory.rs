@@ -22,14 +22,14 @@ impl World {
             _ if recipe(cell.kind)
                 .is_some_and(|r| r.input.iter().any(|&(id, n)| id == item && n > 0)) =>
             {
-                10
+                INPUT_CAPACITY[cell.kind as usize]
             }
             _ => return None,
         })
     }
 
     fn manual_input(&self, tile: usize, item: u8) -> bool {
-        self.stage >= Stage::Feed && !STATIONS[1..].contains(&tile) && self.known_item(item)
+        !STATIONS[1..].contains(&tile) && self.known_item(item)
     }
 
     fn manual_input_take(&self, tile: usize, item: u8) -> bool {
@@ -60,6 +60,7 @@ impl World {
         if stock_id != 0 || tile >= N {
             return -1;
         }
+        let tile = self.footprints.owner(tile).unwrap_or(tile);
         let cell = self.cells[tile];
         if id <= 0 || id != cell.identity {
             return -15;
@@ -104,10 +105,7 @@ impl World {
                 return -14;
             }
             let first_feed = self.stage == Stage::Feed && cell.kind == BENCH;
-            let moved = requested
-                .min(room.into())
-                .min(self.stock[slot])
-                .min(if first_feed { 1 } else { u32::MAX });
+            let moved = requested.min(room.into()).min(self.stock[slot]);
             if moved == 0 {
                 return -9;
             }
@@ -145,7 +143,11 @@ impl World {
             self.cells[tile].inv[slot] -= moved as u16;
             self.stock[slot] += moved;
             if role == 2 && self.stage == Stage::Collect && cell.kind == SIMPLE_MINER {
-                self.stage = Stage::Handwork;
+                self.stage = if self.stock[PLATE as usize] > 0 {
+                    Stage::Bench
+                } else {
+                    Stage::Handwork
+                };
             }
             moved as i32
         }

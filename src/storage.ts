@@ -1,11 +1,16 @@
+import { content } from './generated-content';
+
 const reviewScenes = ['opening', 'miner', 'first-light', 'three-cities'];
 const reviewParam = import.meta.env.DEV && import.meta.env.MODE === 'visual-review'
   ? new URLSearchParams(location.search).get('review')
   : null;
 export const reviewScene = reviewParam && reviewScenes.includes(reviewParam) ? reviewParam : null;
 const legacyBlueprintKey = reviewScene ? 'daybreak-review-blueprint' : 'daybreak-blueprint';
+const legacyCampaign = String(content.dataset) === 'campaign' && Number(content.version) === 1;
+const currentSaveKey = 'campaign:'+content.saveIdentity;
 
 export function legacyBlueprint():number[] | undefined {
+  if (!reviewScene && !legacyCampaign) return undefined;
   try {
     const value:unknown=JSON.parse(localStorage.getItem(legacyBlueprintKey) ?? 'null');
     if (Array.isArray(value) && value.length>0 && value.length<=250 && value.every(part=>
@@ -37,8 +42,14 @@ export async function resumeSave():Promise<unknown> {
   }
   const db = await database;
   return new Promise((resolve,reject) => {
-    const request = db.transaction('campaign').objectStore('campaign').get('current');
-    request.onsuccess = () => resolve(request.result);
+    const records = db.transaction('campaign').objectStore('campaign');
+    const request = records.get(currentSaveKey);
+    request.onsuccess = () => {
+      if (request.result !== undefined || !legacyCampaign) { resolve(request.result); return; }
+      const legacy = records.get('current');
+      legacy.onsuccess = () => resolve(legacy.result);
+      legacy.onerror = () => reject(legacy.error);
+    };
     request.onerror = () => reject(request.error);
   });
 }
@@ -47,7 +58,7 @@ export async function persistSave(buffer:ArrayBuffer) {
   const db = await database;
   return new Promise<void>((resolve,reject) => {
     const transaction = db.transaction('campaign','readwrite');
-    transaction.objectStore('campaign').put(buffer,'current');
+    transaction.objectStore('campaign').put(buffer,currentSaveKey);
     transaction.oncomplete = () => resolve();
     transaction.onerror = transaction.onabort = () => reject(transaction.error);
   });

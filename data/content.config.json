@@ -1,0 +1,17 @@
+{
+  "dataset": "campaign",
+  "datasets": {
+    "campaign": {
+      "version": 1,
+      "files": {
+        "items": "items.json",
+        "machines": "machines.json",
+        "recipes": "recipes.json",
+        "locales": {
+          "zh-CN": "locales/zh-CN.json",
+          "en": "locales/en.json"
+        }
+      }
+    }
+  }
+}

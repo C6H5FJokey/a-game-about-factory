@@ -36,13 +36,6 @@ pub const REINFORCED_SILICA_DRILL: u8 = 28;
 pub const REINFORCED_FUEL_DRILL: u8 = 29;
 pub const REINFORCED_MINER: u8 = 30;
 pub const MAX_KIND: u8 = REINFORCED_MINER;
-pub const CABLE_SPAN: u32 = 3;
-pub const GENERATOR_POWER: u16 = 108;
-pub const SOLAR_POWER: u16 = 55;
-pub const LAUNCH_POWER: u16 = 85;
-pub const MINER_COST: u32 = 5;
-pub const MINER_TICKS: u16 = 3 * HZ as u16;
-pub const MINER_CAPACITY: u16 = 8;
 pub const FIRST_ORE: usize = index(19, 16);
 
 pub const IRON: u8 = 1;
@@ -62,8 +55,7 @@ pub const RECEIVERS: [usize; 2] = [index(44, 29), index(5, 29)];
 pub const LAUNCH_TICKS: u32 = HZ * 8;
 pub const COUNTDOWN: u32 = HZ * 5;
 pub const WINDOW: u32 = HZ * 24;
-pub const BATTERY_CAPACITY: u32 = 24_000;
-pub const BATTERY_POWER: u16 = 40;
+pub const MAX_BELT_INTERVAL: u32 = 200;
 pub const DELIVERY_WINDOW: u32 = 20 * HZ;
 pub const REQUIRED_BLOCKS: usize = 4;
 pub const REQUIRED_KITS: u32 = 12;
@@ -91,11 +83,7 @@ pub fn plain_belt(kind: u8) -> bool {
 }
 
 pub fn belt_interval(kind: u8) -> u32 {
-    match kind {
-        FAST_BELT => 2,
-        EXPRESS_BELT => 1,
-        _ => BELT_TICKS,
-    }
+    BELT_INTERVAL[kind as usize]
 }
 
 pub fn belt_lanes(kind: u8) -> usize {
@@ -131,22 +119,10 @@ pub fn belt_input(kind: u8, dir: u8, flow: u8) -> Option<usize> {
 }
 
 pub fn materials(kind: u8) -> &'static [(u8, u32)] {
-    match kind {
-        SIMPLE_MINER => &[(IRON, MINER_COST)],
-        BELT | CABLE => &[(PLATE, 1)],
-        BENCH | FAST_BELT => &[(PLATE, 2)],
-        MERGER => &[(PLATE, 5)],
-        CROSSING => &[(PLATE, 6)],
-        EXPRESS_BELT => &[(PLATE, 3)],
-        REINFORCED_IRON_DRILL..=REINFORCED_MINER => &[(PLATE, 8)],
-        DEVELOPMENT_HUB => &[(PLATE, 8)],
-        IRON_DRILL | SILICA_DRILL | FUEL_DRILL | INDUSTRIAL_MINER | DEPOT => &[(PLATE, 4)],
-        SMELTER | GRINDER | CALIBRATOR | SPLITTER | KIT_PRESS => &[(PLATE, 5)],
-        BATTERY | SOLAR => &[(PLATE, 6)],
-        GENERATOR | ASSEMBLER | KILN | STATION => &[(PLATE, 8)],
-        FREIGHT_YARD => &[(PLATE, crate::regions::LINE_COST)],
-        _ => &[],
-    }
+    BUILD_MATERIALS
+        .get(kind as usize)
+        .copied()
+        .unwrap_or_default()
 }
 
 pub fn drill_kind(layout: u8, ore: u8) -> Option<u8> {
@@ -161,7 +137,9 @@ pub fn drill_kind(layout: u8, ore: u8) -> Option<u8> {
 pub fn drill_ore(kind: u8) -> Option<u8> {
     match kind {
         IRON_DRILL..=FUEL_DRILL => Some(kind - IRON_DRILL + IRON),
-        REINFORCED_IRON_DRILL..=REINFORCED_FUEL_DRILL => Some(kind - REINFORCED_IRON_DRILL + IRON),
+        REINFORCED_IRON_DRILL => Some(IRON),
+        REINFORCED_SILICA_DRILL => Some(SILICA),
+        REINFORCED_FUEL_DRILL => Some(FUEL),
         _ => None,
     }
 }
@@ -184,13 +162,10 @@ pub fn layout_kind(kind: u8) -> u8 {
 }
 
 pub fn output_capacity(kind: u8) -> u16 {
-    if kind == SIMPLE_MINER {
-        MINER_CAPACITY
-    } else {
-        5
-    }
+    OUTPUT_CAPACITY[kind as usize]
 }
 
+#[derive(Clone, Copy)]
 pub struct Recipe {
     pub input: [(u8, u16); 2],
     pub output: u8,
@@ -199,32 +174,18 @@ pub struct Recipe {
     pub power: u16,
 }
 
-pub fn recipe(kind: u8) -> Option<Recipe> {
-    let (input, output, amount, ticks, power) = match kind {
-        SIMPLE_MINER => ([(0, 0), (0, 0)], IRON, 1, MINER_TICKS, 0),
-        BENCH => ([(IRON, 1), (0, 0)], PLATE, 1, 30, 0),
-        IRON_DRILL => ([(0, 0), (0, 0)], IRON, 1, 12, 10),
-        SILICA_DRILL => ([(0, 0), (0, 0)], SILICA, 1, 10, 10),
-        FUEL_DRILL => ([(0, 0), (0, 0)], FUEL, 1, 8, 10),
-        REINFORCED_IRON_DRILL => ([(0, 0), (0, 0)], IRON, 1, 8, 16),
-        REINFORCED_SILICA_DRILL => ([(0, 0), (0, 0)], SILICA, 1, 7, 16),
-        REINFORCED_FUEL_DRILL => ([(0, 0), (0, 0)], FUEL, 1, 6, 16),
-        SMELTER => ([(IRON, 1), (0, 0)], PLATE, 1, 14, 13),
-        GRINDER => ([(SILICA, 2), (0, 0)], LENS, 1, 23, 14),
-        CALIBRATOR => ([(SILICA, 1), (0, 0)], CORE, 1, 14, 12),
-        ASSEMBLER => ([(PLATE, 2), (LENS, 1)], MIRROR, 1, 46, 19),
-        KIT_PRESS => ([(PLATE, 2), (0, 0)], KIT, 1, 22, 12),
-        KILN => ([(SILICA, 4), (0, 0)], LENS, 3, 26, 45),
-        _ => return None,
-    };
-    Some(Recipe {
-        input,
-        output,
-        amount,
-        ticks,
-        power,
-    })
+pub struct Port {
+    pub x: u8,
+    pub y: u8,
+    pub side: u8,
+    pub output: bool,
 }
+
+pub fn recipe(kind: u8) -> Option<Recipe> {
+    RECIPE_DATA.get(kind as usize).copied().flatten()
+}
+
+include!(concat!(env!("OUT_DIR"), "/content.rs"));
 
 pub fn terrain(pos: usize) -> u8 {
     let x = pos % W;

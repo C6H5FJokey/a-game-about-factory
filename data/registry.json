@@ -1,0 +1,291 @@
+{
+  "items": [
+    {
+      "id": "iron",
+      "code": 1,
+      "mineral": true
+    },
+    {
+      "id": "silica",
+      "code": 2,
+      "mineral": true
+    },
+    {
+      "id": "fuel",
+      "code": 3,
+      "mineral": true
+    },
+    {
+      "id": "plate",
+      "code": 4,
+      "mineral": false
+    },
+    {
+      "id": "lens",
+      "code": 5,
+      "mineral": false
+    },
+    {
+      "id": "core",
+      "code": 6,
+      "mineral": false
+    },
+    {
+      "id": "mirror",
+      "code": 7,
+      "mineral": false
+    },
+    {
+      "id": "kit",
+      "code": 8,
+      "mineral": false
+    },
+    {
+      "id": "speed-module",
+      "code": 9,
+      "mineral": false
+    }
+  ],
+  "machines": [
+    {
+      "id": "empty",
+      "code": 0,
+      "behavior": "empty"
+    },
+    {
+      "id": "belt",
+      "code": 1,
+      "behavior": "transport"
+    },
+    {
+      "id": "iron-drill",
+      "code": 2,
+      "behavior": "mining",
+      "legacyRecipe": "mine-iron",
+      "legacyInputs": [],
+      "output": "iron"
+    },
+    {
+      "id": "silica-drill",
+      "code": 3,
+      "behavior": "mining",
+      "legacyRecipe": "mine-silica",
+      "legacyInputs": [],
+      "output": "silica"
+    },
+    {
+      "id": "fuel-drill",
+      "code": 4,
+      "behavior": "mining",
+      "legacyRecipe": "mine-fuel",
+      "legacyInputs": [],
+      "output": "fuel"
+    },
+    {
+      "id": "smelter",
+      "code": 5,
+      "behavior": "processing",
+      "processingClass": "mineral-single",
+      "legacyRecipe": "smelt-plate",
+      "legacyInputs": [
+        {
+          "item": "iron",
+          "amount": 1
+        }
+      ],
+      "output": "plate"
+    },
+    {
+      "id": "grinder",
+      "code": 6,
+      "behavior": "processing",
+      "legacyRecipe": "grind-lens",
+      "legacyInputs": [
+        {
+          "item": "silica",
+          "amount": 2
+        }
+      ],
+      "output": "lens"
+    },
+    {
+      "id": "calibrator",
+      "code": 7,
+      "behavior": "processing",
+      "legacyRecipe": "calibrate-core",
+      "legacyInputs": [
+        {
+          "item": "silica",
+          "amount": 1
+        }
+      ],
+      "output": "core"
+    },
+    {
+      "id": "assembler",
+      "code": 8,
+      "behavior": "processing",
+      "processingClass": "part-double",
+      "legacyRecipe": "assemble-mirror",
+      "legacyInputs": [
+        {
+          "item": "plate",
+          "amount": 2
+        },
+        {
+          "item": "lens",
+          "amount": 1
+        }
+      ],
+      "output": "mirror"
+    },
+    {
+      "id": "generator",
+      "code": 9,
+      "behavior": "generator"
+    },
+    {
+      "id": "battery",
+      "code": 10,
+      "behavior": "battery"
+    },
+    {
+      "id": "solar",
+      "code": 11,
+      "behavior": "solar"
+    },
+    {
+      "id": "depot",
+      "code": 12,
+      "behavior": "depot"
+    },
+    {
+      "id": "station",
+      "code": 13,
+      "behavior": "station"
+    },
+    {
+      "id": "kit-press",
+      "code": 14,
+      "behavior": "processing",
+      "legacyRecipe": "press-kit",
+      "legacyInputs": [
+        {
+          "item": "plate",
+          "amount": 2
+        }
+      ],
+      "output": "kit"
+    },
+    {
+      "id": "splitter",
+      "code": 15,
+      "behavior": "transport"
+    },
+    {
+      "id": "kiln",
+      "code": 16,
+      "behavior": "processing",
+      "processingClass": "mineral-double",
+      "legacyRecipe": "batch-lens",
+      "legacyInputs": [
+        {
+          "item": "silica",
+          "amount": 4
+        }
+      ],
+      "output": "lens"
+    },
+    {
+      "id": "simple-miner",
+      "code": 17,
+      "behavior": "mining",
+      "legacyRecipe": "mine-simple-iron",
+      "legacyInputs": [],
+      "output": "iron"
+    },
+    {
+      "id": "bench",
+      "code": 18,
+      "behavior": "processing",
+      "processingClass": "part-single",
+      "legacyRecipe": "press-plate",
+      "legacyInputs": [
+        {
+          "item": "iron",
+          "amount": 1
+        }
+      ],
+      "output": "plate"
+    },
+    {
+      "id": "freight-yard",
+      "code": 19,
+      "behavior": "freight-yard"
+    },
+    {
+      "id": "industrial-miner",
+      "code": 20,
+      "behavior": "industrial-miner"
+    },
+    {
+      "id": "cable",
+      "code": 21,
+      "behavior": "cable"
+    },
+    {
+      "id": "fast-belt",
+      "code": 22,
+      "behavior": "transport"
+    },
+    {
+      "id": "merger",
+      "code": 23,
+      "behavior": "transport"
+    },
+    {
+      "id": "crossing",
+      "code": 24,
+      "behavior": "transport"
+    },
+    {
+      "id": "development-hub",
+      "code": 25,
+      "behavior": "development-hub"
+    },
+    {
+      "id": "express-belt",
+      "code": 26,
+      "behavior": "transport"
+    },
+    {
+      "id": "reinforced-iron-drill",
+      "code": 27,
+      "behavior": "mining",
+      "legacyRecipe": "mine-reinforced-iron",
+      "legacyInputs": [],
+      "output": "iron"
+    },
+    {
+      "id": "reinforced-silica-drill",
+      "code": 28,
+      "behavior": "mining",
+      "legacyRecipe": "mine-reinforced-silica",
+      "legacyInputs": [],
+      "output": "silica"
+    },
+    {
+      "id": "reinforced-fuel-drill",
+      "code": 29,
+      "behavior": "mining",
+      "legacyRecipe": "mine-reinforced-fuel",
+      "legacyInputs": [],
+      "output": "fuel"
+    },
+    {
+      "id": "reinforced-miner",
+      "code": 30,
+      "behavior": "reinforced-miner"
+    }
+  ]
+}

@@ -1,4 +1,5 @@
 use crate::catalog::*;
+use crate::footprints::{covered, size};
 use crate::world::{Cell, World};
 
 const MAX_TILES: usize = 250;
@@ -16,6 +17,22 @@ struct Part {
     dir: u8,
     wire: bool,
     config: u8,
+}
+
+impl Part {
+    fn turned(mut self, turns: i32) -> Self {
+        for _ in 0..turns {
+            let (_, height) = size(self.kind, self.dir);
+            (self.x, self.y) = (-self.y - (height as i32 - 1), self.x);
+            self.dir = (self.dir + 1) % 4;
+        }
+        self
+    }
+
+    fn extent(self) -> (i32, i32) {
+        let (width, height) = size(self.kind, self.dir);
+        (self.x + width as i32, self.y + height as i32)
+    }
 }
 
 pub struct Blueprint {
@@ -77,6 +94,7 @@ fn read_parts(words: &[i32], legacy: bool) -> Option<Vec<Part>> {
         return None;
     }
     let mut seen = [false; N];
+    let mut occupied = [false; N];
     let mut parts = Vec::with_capacity(words.len() / PART_WORDS);
     let (mut width, mut height) = (0, 0);
     for p in words.chunks_exact(PART_WORDS) {
@@ -97,34 +115,48 @@ fn read_parts(words: &[i32], legacy: bool) -> Option<Vec<Part>> {
         if std::mem::replace(&mut seen[tile], true) {
             return None;
         }
-        width = width.max(p[0] + 1);
-        height = height.max(p[1] + 1);
-        parts.push(Part {
+        let dir = p[3] as u8;
+        if kind != 0 {
+            for tile in covered(tile, kind, dir)? {
+                if std::mem::replace(&mut occupied[tile], true) {
+                    return None;
+                }
+            }
+        }
+        let part = Part {
             x: p[0],
             y: p[1],
             kind,
-            dir: p[3] as u8,
+            dir,
             wire: p[4] == 1,
             config: p[5] as u8,
-        });
+        };
+        let (right, bottom) = part.extent();
+        width = width.max(right);
+        height = height.max(bottom);
+        parts.push(part);
     }
     (width * height <= MAX_TILES as i32).then_some(parts)
 }
 
 impl Blueprint {
     fn standard() -> Self {
-        let parts = [INDUSTRIAL_MINER, BELT, SMELTER, KIT_PRESS, BELT, DEPOT]
-            .into_iter()
-            .enumerate()
-            .map(|(x, kind)| Part {
-                x: x as i32,
-                y: 0,
-                kind,
-                dir: 0,
-                wire: true,
-                config: 0,
-            })
-            .collect();
+        let mut parts = Vec::new();
+        let mut x = 0;
+        for kind in [INDUSTRIAL_MINER, BELT, SMELTER, KIT_PRESS, BELT, DEPOT] {
+            let (width, _) = size(kind, 0);
+            for offset in 0..width {
+                parts.push(Part {
+                    x: x + offset as i32,
+                    y: 0,
+                    kind: if offset == 0 { kind } else { 0 },
+                    dir: 0,
+                    wire: true,
+                    config: 0,
+                });
+            }
+            x += width as i32;
+        }
         Self {
             id: STANDARD_ID,
             version: LAYOUT_VERSION,
@@ -214,8 +246,18 @@ impl Library {
         out.extend([self.legacy_imported as i32, (self.entries.len() + 1) as i32]);
         for entry in std::iter::once(&Blueprint::standard()).chain(&self.entries) {
             out.extend([
-                entry.parts.iter().map(|part| part.x + 1).max().unwrap_or(0),
-                entry.parts.iter().map(|part| part.y + 1).max().unwrap_or(0),
+                entry
+                    .parts
+                    .iter()
+                    .map(|part| part.extent().0)
+                    .max()
+                    .unwrap_or(0),
+                entry
+                    .parts
+                    .iter()
+                    .map(|part| part.extent().1)
+                    .max()
+                    .unwrap_or(0),
                 entry.pieces() as i32,
                 KIT.into(),
                 entry.kits() as i32,
@@ -297,7 +339,20 @@ impl World {
         let mut parts = Vec::new();
         for y in y0..=y1 {
             for x in x0..=x1 {
-                let cell = self.cells[index(x, y)];
+                let tile = index(x, y);
+                if let Some(anchor) = self.footprints.owner(tile) {
+                    let device = self.cells[anchor];
+                    let (width, height) = size(device.kind, device.dir);
+                    if copyable(device.kind)
+                        && (anchor % W < x0
+                            || anchor / W < y0
+                            || anchor % W + width - 1 > x1
+                            || anchor / W + height - 1 > y1)
+                    {
+                        return -17;
+                    }
+                }
+                let cell = self.cells[tile];
                 let kind = if copyable(cell.kind) {
                     layout_kind(cell.kind)
                 } else {
@@ -344,13 +399,10 @@ impl World {
         }
         let price = entry.kits();
         let mut plan = Vec::with_capacity(entry.parts.len());
-        for &part in &entry.parts {
-            let (mut x, mut y) = (part.x, part.y);
-            for _ in 0..turns {
-                (x, y) = (-y, x);
-            }
-            x += (anchor % W) as i32;
-            y += (anchor / W) as i32;
+        let mut occupied = [false; N];
+        for part in entry.parts.iter().map(|part| part.turned(turns)) {
+            let x = part.x + (anchor % W) as i32;
+            let y = part.y + (anchor / W) as i32;
             if !(0..W as i32).contains(&x) || !(0..H as i32).contains(&y) {
                 return -3;
             }
@@ -367,20 +419,21 @@ impl World {
                 part.kind
             };
             if kind != 0 {
-                if self.cells[tile].kind != 0 {
-                    return -2;
-                }
                 if !self.unlocked(kind)
                     || kind == DEPOT && part.config != 0 && !self.known_item(part.config)
                 {
                     return -6;
                 }
-                if !permitted(kind, tile) {
-                    return -3;
+                if let Err(error) = self.validate_footprint(tile, kind, part.dir, None) {
+                    return error;
+                }
+                for covered_tile in covered(tile, kind, part.dir).unwrap() {
+                    if std::mem::replace(&mut occupied[covered_tile], true) {
+                        return -2;
+                    }
                 }
             }
-            let dir = (part.dir + turns as u8) % 4;
-            plan.push((tile, kind, dir, part.wire, part.config));
+            plan.push((tile, kind, part.dir, part.wire, part.config));
         }
         if self.stock[KIT as usize] < price {
             return -5;

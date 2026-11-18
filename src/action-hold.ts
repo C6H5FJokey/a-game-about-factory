@@ -1,28 +1,29 @@
-const HARVEST_MS = 450;
-
-export function bindHarvestHold(root:HTMLElement,actions:{
-  available(tile:number):boolean;
-  gather(tile:number):boolean;
-  mapButton(tile:number):HTMLButtonElement | undefined;
+export function bindActionHold(root:HTMLElement,actions:{
+  attribute:string;
+  duration:number;
+  available(target:number):boolean;
+  complete(target:number):boolean;
+  mapMeter?:HTMLElement;
 }) {
-  let hold:{tile:number; started:number; button?:HTMLButtonElement; pointer?:number; key?:string} | undefined;
+  let hold:{target:number; started:number; button?:HTMLButtonElement; pointer?:number; key?:string} | undefined;
   let meter:HTMLElement | undefined;
   const stop=()=>{
     meter?.style.removeProperty('--harvest');
     meter=undefined;
     hold=undefined;
   };
-  const start=(tile:number,button?:HTMLButtonElement,pointer?:number,key?:string)=>{
-    if (hold || !actions.available(tile)) return;
-    hold={tile,started:performance.now(),button,pointer,key};
+  const start=(target:number,button?:HTMLButtonElement,pointer?:number,key?:string)=>{
+    if (hold || button?.disabled || !actions.available(target)) return;
+    hold={target,started:performance.now(),button,pointer,key};
   };
-  const target=(event:Event)=>(event.target as Element | null)?.closest<HTMLButtonElement>('button[data-gather]');
+  const target=(event:Event)=>(event.target as Element | null)?.closest<HTMLButtonElement>(`button[${actions.attribute}]`);
+  const value=(button:HTMLButtonElement)=>Number(button.getAttribute(actions.attribute));
   root.addEventListener('pointerdown',event=>{
     const button=target(event);
     if (hold && event.pointerId!==hold.pointer) { stop(); return; }
-    if (!button || event.button!==0 || !event.isPrimary) return;
+    if (!button || button.disabled || event.button!==0 || !event.isPrimary) return;
     button.setPointerCapture(event.pointerId);
-    start(Number(button.dataset.gather),button,event.pointerId);
+    start(value(button),button,event.pointerId);
   });
   root.addEventListener('pointermove',event=>{
     if (!hold?.button || hold.pointer!==event.pointerId) return;
@@ -39,7 +40,7 @@ export function bindHarvestHold(root:HTMLElement,actions:{
     if (!button || (event.key!==' ' && event.key!=='Enter')) return;
     event.preventDefault();
     event.stopPropagation();
-    if (!event.repeat) start(Number(button.dataset.gather),button,undefined,event.key);
+    if (!event.repeat) start(value(button),button,undefined,event.key);
   });
   window.addEventListener('keyup',event=>{ if (hold?.key===event.key) stop(); });
   root.addEventListener('focusout',event=>{ if (hold?.key && event.target===hold.button) stop(); });
@@ -47,18 +48,18 @@ export function bindHarvestHold(root:HTMLElement,actions:{
   document.addEventListener('visibilitychange',()=>{ if (document.hidden) stop(); });
   const tick=(now:number)=>{
     if (!hold) return;
-    if (!actions.available(hold.tile) || hold.button && (!hold.button.isConnected || !hold.button.getClientRects().length || hold.button.closest('[inert]'))) {
+    if (!actions.available(hold.target) || hold.button && (!hold.button.isConnected || !hold.button.getClientRects().length || hold.button.closest('[inert]'))) {
       stop(); return;
     }
-    const button=hold.button ?? actions.mapButton(hold.tile);
-    const nextMeter=button?.querySelector<HTMLElement>('.harvest-fill') ?? undefined;
+    const nextMeter=hold.button?hold.button.querySelector<HTMLElement>('.harvest-fill') ?? undefined:actions.mapMeter;
     if (meter!==nextMeter) meter?.style.removeProperty('--harvest');
     meter=nextMeter;
-    const fraction=Math.min(1,(now-hold.started)/HARVEST_MS);
+    const fraction=Math.min(1,(now-hold.started)/actions.duration);
     meter?.style.setProperty('--harvest',String(fraction));
-    if (fraction===1 && actions.gather(hold.tile)) hold.started=now;
+    if (fraction===1 && actions.complete(hold.target)) hold.started=now;
   };
   const protects=(element:HTMLElement,html:string)=>!!hold?.button && element.contains(hold.button) &&
-    html.includes(`data-gather="${hold.tile}"`);
-  return {start,stop,tick,protects};
+    actions.available(hold.target) && html.includes(`${actions.attribute}="${hold.target}"`);
+  const mapTile=()=>hold && !hold.button?hold.target:undefined;
+  return {start,stop,tick,protects,mapTile};
 }

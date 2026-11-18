@@ -2,7 +2,7 @@
 
 在永夜的曙港，从一处露天铁矿白手起家。亲手采矿，造出第一台能替你工作的机器，再把采矿、加工和运输接成产线，把地面工厂制造的反射镜送上轨道。沿跨谷班线向远方供货，让曙港、谷东和西岭连续迎来三轮日出。地图、城市、机器和货物均由程序绘制。
 
-当前为测试版，更新不考虑存档继承。同一版本支持保存、读档和导入导出。
+当前使用 V8 存档，支持导入 V4 至 V7 战役档。V8 按数据集和兼容版本识别存档。
 
 ## 本地运行
 
@@ -20,8 +20,12 @@ npm run dev
 
 ```sh
 npm run build
+npm run test:bundle
 npm run test:sim
+npm run test:content
 npm run preview
 ```
 
 构建结果在 `dist/`。仓库推送至 GitHub 后，在 Pages 设置里选择 GitHub Actions，工作流会构建并发布到仓库子路径。
+
+默认读取 `data/content.config.json`。可编辑其中的 `dataset`、指定数据文件，或设置环境变量 `DAYBREAK_CONTENT_CONFIG` 选择另一份配置。手动运行 Pages 工作流时也可填写 `content_config`。完整战役回归使用默认平衡数值，选用自定义数据时，工作流检查包内的模拟与数据版本及存档往返。[数据配置与验收](docs/data-driven-handoff.md)

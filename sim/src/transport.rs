@@ -1,31 +1,39 @@
 use crate::belts::{node, Cargo};
 use crate::campaign::Stage;
 use crate::catalog::*;
+use crate::footprints::Outlet;
 use crate::world::World;
 
 #[derive(Clone, Copy)]
 enum Source {
     Belt(usize),
-    Machine(usize),
+    Machine(Outlet),
 }
 
 impl World {
     fn can_receive(&self, tile: usize, flow: u8, item: u8) -> bool {
-        let cell = &self.cells[tile];
+        let Some(anchor) = self.footprints.owner(tile) else {
+            return false;
+        };
+        let cell = &self.cells[anchor];
         if is_belt(cell.kind) {
             return belt_input(cell.kind, cell.dir, flow)
                 .and_then(|lane| self.belt.entry(node(tile, lane)))
                 .is_some_and(|id| self.belt.segments[id].can_enter(self.tick));
         }
+        if self.material_masks(tile, anchor).0 & (1 << flow) == 0 {
+            return false;
+        }
         if cell.kind == DEPOT {
             return cell.cfg == 0 && self.stock_room(item) > 0;
         }
-        self.input_capacity(tile, item)
+        self.input_capacity(anchor, item)
             .is_some_and(|cap| cell.inv[item as usize] < cap)
     }
 
     fn receive(&mut self, tile: usize, flow: u8, mut cargo: Cargo, from: usize) {
-        let kind = self.cells[tile].kind;
+        let anchor = self.footprints.owner(tile).unwrap();
+        let kind = self.cells[anchor].kind;
         if is_belt(kind) {
             let lane = belt_input(kind, self.cells[tile].dir, flow).unwrap();
             let id = self.belt.entry(node(tile, lane)).unwrap();
@@ -38,6 +46,9 @@ impl World {
             self.stock[cargo.item as usize] = self.stock[cargo.item as usize].saturating_add(1);
             if cargo.item == PLATE && cargo.source != 0 {
                 self.delivered = self.delivered.saturating_add(1);
+                if matches!(self.stage, Stage::Belt | Stage::BeltFed) {
+                    self.stage = Stage::Expand;
+                }
             }
             if cargo.item == KIT && cargo.source != 0 {
                 self.kit_total = self.kit_total.saturating_add(1);
@@ -46,7 +57,7 @@ impl World {
                 }
             }
         } else {
-            self.cells[tile].inv[cargo.item as usize] += 1;
+            self.cells[anchor].inv[cargo.item as usize] += 1;
             if self.stage == Stage::Belt && kind == BENCH && cargo.item == IRON {
                 self.stage = Stage::BeltFed;
             }
@@ -99,7 +110,7 @@ impl World {
     fn send(&mut self, source: Source, next: usize, flow: u8, cargo: Cargo) {
         let from = match source {
             Source::Belt(id) => *self.belt.segments[id].nodes.last().unwrap(),
-            Source::Machine(tile) => node(tile, 0),
+            Source::Machine(outlet) => node(outlet.tile, 0),
         };
         match source {
             Source::Belt(id) => {
@@ -109,7 +120,8 @@ impl World {
                     cell.split_turn = !cell.split_turn;
                 }
             }
-            Source::Machine(tile) => {
+            Source::Machine(outlet) => {
+                let tile = outlet.anchor;
                 if self.cells[tile].kind == DEPOT {
                     self.stock[cargo.item as usize] -= 1;
                 } else {
@@ -157,10 +169,19 @@ impl World {
                         }
                     }
                 }
-            } else if cell.dir == flow {
-                candidate = self
-                    .machine_output(from)
-                    .map(|cargo| (Source::Machine(from), cargo));
+            } else if let Some(anchor) = self.footprints.owner(from) {
+                if self.material_masks(from, anchor).1 & (1 << flow) != 0 {
+                    candidate = self.machine_output(anchor).map(|cargo| {
+                        (
+                            Source::Machine(Outlet {
+                                anchor,
+                                tile: from,
+                                flow,
+                            }),
+                            cargo,
+                        )
+                    });
+                }
             }
             if let Some((source, cargo)) = candidate {
                 self.send(source, tile, flow, cargo);
@@ -187,24 +208,28 @@ impl World {
                 self.pull_merge(id);
             }
         }
-        for order in 0..self.machines.len() {
-            let tile = self.machines[order];
-            let cell = &self.cells[tile];
-            let Some(next) = neighbor(tile, cell.dir) else {
+        for order in 0..self.footprints.outlets.len() {
+            let outlet = self.footprints.outlets[order];
+            let Some(next) = neighbor(outlet.tile, outlet.flow) else {
                 continue;
             };
-            let target = self.cells[next].kind;
-            if target == 0 || target == MERGER || (cell.kind == DEPOT && target == DEPOT) {
+            let Some(destination) = self.footprints.owner(next) else {
+                continue;
+            };
+            let target = self.cells[destination].kind;
+            if target == MERGER || (self.cells[outlet.anchor].kind == DEPOT && target == DEPOT) {
                 continue;
             }
             // A fast entrance may receive on its own cadence. Ordinary direct
             // device transfers and the tutorial retain the original beat.
-            if !matches!(target, FAST_BELT | EXPRESS_BELT) && self.tick % BELT_TICKS != 0 {
+            if (!is_belt(target) || belt_interval(target) >= BELT_TICKS)
+                && self.tick % BELT_TICKS != 0
+            {
                 continue;
             }
-            if let Some(cargo) = self.machine_output(tile) {
-                if self.can_receive(next, cell.dir, cargo.item) {
-                    self.send(Source::Machine(tile), next, cell.dir, cargo);
+            if let Some(cargo) = self.machine_output(outlet.anchor) {
+                if self.can_receive(next, outlet.flow, cargo.item) {
+                    self.send(Source::Machine(outlet), next, outlet.flow, cargo);
                 }
             }
         }

@@ -63,10 +63,10 @@ impl Stage {
     pub fn required_for(kind: u8) -> Option<Self> {
         use Stage::*;
         Some(match kind {
-            SIMPLE_MINER => PlaceMiner,
+            SIMPLE_MINER => Gather,
             BENCH => Bench,
-            BELT => Belt,
-            IRON_DRILL | INDUSTRIAL_MINER | DEPOT => Expand,
+            BELT | DEPOT => Belt,
+            IRON_DRILL | INDUSTRIAL_MINER => Expand,
             FUEL_DRILL | GENERATOR | CABLE => Power,
             SMELTER => Silica,
             SPLITTER | MERGER | CROSSING => Assemble,
@@ -109,10 +109,9 @@ impl World {
     pub fn known_item(&self, item: u8) -> bool {
         self.stage
             >= match item {
-                IRON => Stage::Craft,
+                IRON | PLATE => Stage::Gather,
                 SILICA => Stage::Silica,
                 FUEL => Stage::Power,
-                PLATE => Stage::Handwork,
                 LENS => Stage::Assemble,
                 MIRROR => Stage::Launch,
                 CORE => Stage::Tracking,
@@ -163,9 +162,6 @@ impl World {
     }
 
     pub fn handwork(&mut self) -> i32 {
-        if self.stage < Stage::Handwork {
-            return -6;
-        }
         if self.stock[IRON as usize] == 0 {
             return -8;
         }

@@ -1,5 +1,6 @@
 import { CityField, Field, H, Kind, Meta, Stage, STEP, W, at, cell, cityValue, inBounds, isTransport, xy, type MapLimits, type Mode, type PreviewCell } from './model';
 import { cargoIndex, design, transportPorts } from './sim-data';
+import { machineAnchor, machinePortTiles, machineSize, previewPorts } from './machine-layout';
 
 type Color = [number,number,number,number];
 const rgba = (r:number,g:number,b:number,a=1):Color => [r/255,g/255,b/255,a];
@@ -7,7 +8,6 @@ const ink = rgba(12,21,29), frame = rgba(59,84,95), line = rgba(39,60,68), amber
 const cyan = rgba(119,225,213), red = rgba(255,145,117), grey = rgba(131,157,168);
 const mineral = [ink,rgba(180,135,112),rgba(133,169,217),rgba(228,157,86),rgba(194,205,207),rgba(167,184,249),rgba(125,222,209),amber,rgba(221,199,152)];
 const shapeForItem = [0,0,3,4,0,3,1,4,1];
-const machinesWithoutOutput = new Set<Kind>([Kind.Generator,Kind.Solar,Kind.Battery,Kind.Station,Kind.DevelopmentHub]);
 
 const vertex = `#version 300 es
 layout(location=0) in vec2 corner;
@@ -79,7 +79,7 @@ export class Camera {
   }
 }
 
-type Scene = { data:Int32Array; mode:Mode; preview:PreviewCell[]; selected:number; focus:number; trace:[number,number][]; now:number; tick:number; chip:number; };
+type Scene = { data:Int32Array; mode:Mode; preview:PreviewCell[]; selected:number; focus:number; trace:[number,number][]; now:number; tick:number; chipTile:number; chip:number; };
 
 export class Renderer {
   readonly camera = new Camera();
@@ -99,6 +99,7 @@ export class Renderer {
   private qualityFrames = 0;
   private lastFrame = 0;
   private small = false;
+  private drawn = new Uint8Array(W*H);
 
   constructor(readonly canvas:HTMLCanvasElement) {
     const context = canvas.getContext('webgl2',{alpha:false,antialias:false,depth:false,preserveDrawingBuffer:false,powerPreference:'high-performance'});
@@ -167,8 +168,9 @@ export class Renderer {
     this.box((x+ex)/2,(y+ey)/2,Math.hypot(dx,dy),weight,color,0,Math.atan2(dy,dx));
   }
 
-  private machine(kind:number,x:number,y:number,direction:number,status:number) {
-    const B=(dx:number,dy:number,w:number,h:number,color:Color,shape=0,angle=0)=>this.box(x+dx,y+dy,w,h,color,shape,angle);
+  private machine(kind:number,x:number,y:number,status:number,opacity=1) {
+    const B=(dx:number,dy:number,w:number,h:number,color:Color,shape=0,angle=0)=>
+      this.box(x+dx,y+dy,w,h,opacity===1?color:[color[0],color[1],color[2],color[3]*opacity],shape,angle);
     let mark=grey;
     if ([Kind.Generator,Kind.Battery,Kind.Solar].includes(kind)) mark=cyan;
     if (kind===Kind.Station || kind===Kind.Assembler) mark=amber;
@@ -212,13 +214,27 @@ export class Renderer {
       default:
         B(-.12,0,.24,.42,mark,1); B(.15,-.06,.22,.37,mark,0,-.3); B(.25,.22,.13,.09,mark); break;
     }
-    if (!machinesWithoutOutput.has(kind)) {
-      const [dx,dy]=STEP[direction];
-      B(dx*.4,dy*.4,.18,.15,mark,5,direction*Math.PI/2);
-    }
     if (status===1) B(-.29,-.29,.10,.10,cyan,2);
     if (status===3) B(.33,-.34,.21,.21,red,3);
     if (status===4) B(.33,-.34,.17,.15,amber,0);
+  }
+
+  private machineBody(kind:number,x:number,y:number,dir:number,status:number,opacity=1) {
+    const [width,height]=machineSize(kind,dir);
+    const cx=x+width/2, cy=y+height/2;
+    if (width>1 || height>1) {
+      this.box(cx,cy,width-.07,height-.07,rgba(104,145,152,opacity),1);
+      this.box(cx,cy,width-.16,height-.16,rgba(24,41,50,opacity),1);
+    }
+    this.machine(kind,cx,cy,status,opacity);
+  }
+
+  private materialPort(x:number,y:number,side:number,output:boolean,paired=false) {
+    const [dx,dy]=STEP[side];
+    const offset=paired?(output ? .11 : -.11):0;
+    const px=x+.5+dx*.44-dy*offset, py=y+.5+dy*.44+dx*offset;
+    this.box(px,py,.30,.24,ink,1,side*Math.PI/2);
+    this.box(px,py,.20,.17,output?amber:cyan,5,(side+(output?0:2))*Math.PI/2);
   }
 
   private transport(kind:number,x:number,y:number,dir:number,detail:boolean,preview?:Color) {
@@ -325,10 +341,12 @@ export class Renderer {
       }
     }
 
+    this.drawn.fill(0);
     for (let y=top;y<bottom;y++) for (let x=left;x<right;x++) {
-      const tile=y*W+x, kind=cell(data,tile,Field.Kind), ore=cell(data,tile,Field.Ore);
+      const tile=y*W+x, anchor=machineAnchor(data,tile);
+      const kind=anchor<0?0:cell(data,anchor,Field.Kind), ore=cell(data,tile,Field.Ore);
       const dir=cell(data,tile,Field.Direction);
-      if (ore) {
+      if (ore && (anchor<0 || anchor===tile)) {
         const color=mineral[ore];
         this.box(x+.5,y+.5,1.42,1.35,[color[0],color[1],color[2],.20],4,-.25);
         this.box(x+.18,y+.19,.18,.20,color,kind?2:3);
@@ -339,24 +357,36 @@ export class Renderer {
             this.box(x+ox,y+oy,size,size*.86,rgba(124,86,67),4,-.25);
             this.box(x+ox-.03,y+oy-.05,size*.74,size*.48,rgba(224,173,132),3,-.24);
           }
-          if (scene.chip>0) {
-            const drift=1-scene.chip;
-            this.box(x+.5+drift*.5,y+.3-Math.sin(drift*Math.PI)*.48,.16,.14,amber,3,drift*2);
-          }
+        }
+        if (tile===scene.chipTile && scene.chip>0) {
+          const drift=1-scene.chip;
+          this.box(x+.5+drift*.5,y+.3-Math.sin(drift*Math.PI)*.48,.16,.14,color,3,drift*2);
         }
       }
       if (isTransport(kind)) {
         this.transport(kind,x+.5,y+.5,dir,c.zoom>=12);
-      } else if (kind) {
-        this.machine(kind,x+.5,y+.5,dir,cell(data,tile,Field.Status));
+      } else if (anchor>=0 && !this.drawn[anchor]) {
+        this.drawn[anchor]=1;
+        const [ax,ay]=xy(anchor);
+        this.machineBody(kind,ax,ay,cell(data,anchor,Field.Direction),cell(data,anchor,Field.Status));
         if (kind===Kind.SimpleMiner) {
-          const progress=cell(data,tile,Field.Progress)/data[Meta.MinerTicks];
+          const progress=cell(data,anchor,Field.Progress)/data[Meta.MinerTicks];
           const stroke=Math.sin(progress*Math.PI*4)*.08;
-          this.box(x+.45,y+.47+stroke,.16,.38,amber,4);
-          this.box(x+.82,y+.82,.38,.24,frame,1);
-          if (cell(data,tile,Field.Inventory)>0) this.box(x+.82,y+.79,.22,.18,mineral[1],4);
-          if (progress>.78) this.box(x+.53+(progress-.78)*1.2,y+.52+(progress-.78),.13,.13,mineral[1],4);
+          this.box(ax+.45,ay+.47+stroke,.16,.38,amber,4);
+          this.box(ax+.82,ay+.82,.38,.24,frame,1);
+          if (cell(data,anchor,Field.Inventory)>0) this.box(ax+.82,ay+.79,.22,.18,mineral[1],4);
+          if (progress>.78) this.box(ax+.53+(progress-.78)*1.2,ay+.52+(progress-.78),.13,.13,mineral[1],4);
         }
+      }
+    }
+    for (const [tile,anchor,masks] of machinePortTiles(data)) {
+      if (c.zoom<16 && anchor!==selected) continue;
+      const [x,y]=xy(tile);
+      if (x<left || x>=right || y<top || y>=bottom) continue;
+      for (let side=0;side<4;side++) {
+        const input=Boolean(masks & (1<<((side+2)%4))), output=Boolean(masks & (16<<side));
+        if (input) this.materialPort(x,y,side,false,output);
+        if (output) this.materialPort(x,y,side,true,input);
       }
     }
 
@@ -402,21 +432,24 @@ export class Renderer {
       const [dx,dy]=STEP[flow];
       this.box(x+.5-dy*.42,y+.5+dx*.42,.87,.07,cyan,0,flow*Math.PI/2);
     }
-    if (selected>=0) this.marker(selected,cyan,1.06);
+    if (selected>=0) this.marker(selected,cyan,1.06,...machineSize(cell(data,selected,Field.Kind),cell(data,selected,Field.Direction)));
     for (const part of preview) {
       if (part.tile<0) continue;
       const [x,y]=xy(part.tile), color=part.conflict?red:amber;
-      this.box(x+.5,y+.5,.95,.95,[...color.slice(0,3),.24] as Color,1);
+      const [width,height]=machineSize(part.kind,part.dir);
+      this.box(x+width/2,y+height/2,width-.05,height-.05,[...color.slice(0,3),.24] as Color,1);
       if (isTransport(part.kind)) this.transport(part.kind,x+.5,y+.5,part.dir,true,color);
       else if (part.kind>0) {
-        this.machine(part.kind,x+.5,y+.5,part.dir,0);
-        if (machinesWithoutOutput.has(part.kind)) {
-          const [dx,dy]=STEP[part.dir];
-          this.box(x+.5+dx*.38,y+.5+dy*.38,.18,.17,color,5,part.dir*Math.PI/2);
+        this.machineBody(part.kind,x,y,part.dir,0,.68);
+        const ports=[...previewPorts(part.tile,part.kind,part.dir)];
+        for (const port of ports) {
+          const [px,py]=xy(port.tile);
+          this.materialPort(px,py,port.side,port.role==='output',
+            ports.some(peer=>peer.tile===port.tile && peer.side===port.side && peer.role!==port.role));
         }
       }
       if (part.wire) this.box(x+.5,y+.5,.32,.32,color,3);
-      this.marker(part.tile,color,.9);
+      this.marker(part.tile,color,.9,width,height);
     }
 
     gl.clear(gl.COLOR_BUFFER_BIT);
@@ -426,11 +459,12 @@ export class Renderer {
     gl.drawArraysInstanced(gl.TRIANGLE_STRIP,0,4,this.length/10);
   }
 
-  private marker(tile:number,color:Color,size:number) {
+  private marker(tile:number,color:Color,size:number,width=1,height=1) {
     const [x,y]=xy(tile);
+    const hw=(width-1+size)/2, hh=(height-1+size)/2;
     for (const i of [-1,1]) for (const j of [-1,1]) {
-      this.box(x+.5+i*size*.37,y+.5+j*size/2,.26*size,.065,color);
-      this.box(x+.5+i*size/2,y+.5+j*size*.37,.065,.26*size,color);
+      this.box(x+width/2+i*(hw-.13*size),y+height/2+j*hh,.26*size,.065,color);
+      this.box(x+width/2+i*hw,y+height/2+j*(hh-.13*size),.065,.26*size,color);
     }
   }
 

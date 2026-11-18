@@ -1,0 +1,11 @@
+[
+  {"id":"iron","icon":"iron","tierOneStackLimit":150},
+  {"id":"silica","icon":"silica","tierOneStackLimit":150},
+  {"id":"fuel","icon":"fuel","tierOneStackLimit":150},
+  {"id":"plate","icon":"plate","tierOneStackLimit":150},
+  {"id":"lens","icon":"lens","tierOneStackLimit":150},
+  {"id":"core","icon":"core","tierOneStackLimit":150},
+  {"id":"mirror","icon":"mirror","tierOneStackLimit":150},
+  {"id":"kit","icon":"kit","tierOneStackLimit":150},
+  {"id":"speed-module","icon":"speed-module","tierOneStackLimit":150}
+]

@@ -6,7 +6,6 @@ pub const HEADWAY: u32 = 12 * HZ;
 pub const TRAVEL: u32 = 4 * HZ;
 pub const CRATE_SIZE: u16 = 16;
 pub const YARD_CAPACITY: u16 = 32;
-pub const LINE_COST: u32 = 8;
 pub const WINDOW_LENGTH: [u32; 3] = [WINDOW, 12 * HZ, 12 * HZ];
 pub const TRACKING_POWER: [u32; 3] = [120, 110, 135];
 pub const WINDOW_GAP: [u32; 3] = [8 * HZ, 3 * HZ, 12 * HZ];
@@ -55,7 +54,7 @@ impl World {
         let i = city - 1;
         if [SENDERS[i], RECEIVERS[i]]
             .iter()
-            .any(|&tile| self.cells[tile].kind != 0)
+            .any(|&tile| self.footprints.owner(tile).is_some())
         {
             return -2;
         }

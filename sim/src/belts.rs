@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 
 use crate::catalog::*;
+use crate::footprints::Outlet;
 use crate::world::Cell;
 
 pub const RETIRED_SOURCE: u16 = N as u16 + 1;
@@ -117,19 +118,18 @@ pub struct Belts {
 }
 
 impl Belts {
-    pub fn rebuild(cells: &[Cell], cargo: &[Cargo], previous: Option<&Self>) -> Self {
+    pub fn rebuild(
+        cells: &[Cell],
+        cargo: &[Cargo],
+        previous: Option<&Self>,
+        outlets: &[Outlet],
+    ) -> Self {
         let mut segment_at = vec![None; NODES];
         let mut incoming = vec![0u8; NODES];
         let mut continues = vec![false; NODES];
         for (tile, cell) in cells.iter().enumerate() {
             let lanes = belt_lanes(cell.kind);
-            if lanes == 0
-                && !matches!(cell.kind, DEPOT | FREIGHT_YARD)
-                && recipe(cell.kind).is_none()
-            {
-                continue;
-            }
-            for lane in 0..lanes.max(1) {
+            for lane in 0..lanes {
                 for flow in belt_outputs(cell.kind, cell.dir, lane)
                     .into_iter()
                     .flatten()
@@ -141,6 +141,11 @@ impl Belts {
                         }
                     }
                 }
+            }
+        }
+        for outlet in outlets {
+            if let Some(target) = target_node(cells, outlet.tile, outlet.flow) {
+                incoming[target] += 1;
             }
         }
 

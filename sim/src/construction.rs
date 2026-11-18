@@ -56,7 +56,7 @@ impl World {
             if !self.progression.contains(tile) || !permitted(kind, tile) {
                 return Err((-3, tile as i32));
             }
-            if old.kind != 0 && !is_belt(old.kind) {
+            if self.footprints.owner(tile).is_some() && !is_belt(old.kind) {
                 return Err((-2, tile as i32));
             }
             if (kind, dir) == (old.kind, old.dir) {
@@ -112,10 +112,9 @@ impl World {
                     let inlet = &self.cells[other];
                     let (new_kind, new_dir) = entries[other].unwrap_or((inlet.kind, inlet.dir));
                     has_output(inlet.kind, inlet.dir, flow) && has_output(new_kind, new_dir, flow)
-                        || inlet.dir == flow
-                            && (recipe(inlet.kind).is_some()
-                                || inlet.kind == DEPOT && inlet.cfg != 0
-                                || inlet.kind == FREIGHT_YARD && RECEIVERS.contains(&other))
+                        || self.footprints.owner(other).is_some_and(|anchor| {
+                            self.material_masks(other, anchor).1 & (1 << flow) != 0
+                        })
                 });
                 if inbound
                     && belt_input(old.kind, old.dir, flow).is_some()
@@ -131,8 +130,9 @@ impl World {
                         return belt_input(outlet.kind, outlet.dir, flow).is_some()
                             && belt_input(new_kind, new_dir, flow).is_some();
                     }
-                    matches!(outlet.kind, GENERATOR | DEPOT | STATION | FREIGHT_YARD)
-                        || recipe(outlet.kind).is_some_and(|r| r.input[0].1 > 0)
+                    self.footprints.owner(other).is_some_and(|anchor| {
+                        self.material_masks(other, anchor).0 & (1 << flow) != 0
+                    })
                 });
                 if was_output && !has_output(replacement.kind, replacement.dir, flow) {
                     return Err((-20, tile as i32));

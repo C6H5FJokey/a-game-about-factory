@@ -2,6 +2,7 @@ use crate::belts::{Belts, Cargo, NODES};
 use crate::blueprints::Library;
 use crate::campaign::Stage;
 use crate::catalog::*;
+use crate::footprints::{covered, Footprints};
 use crate::progression::{cycle_ticks, Progression};
 use crate::regions::*;
 
@@ -81,6 +82,7 @@ pub struct World {
     pub delivered: u32,
     pub kit_total: u32,
     pub cells: Vec<Cell>,
+    pub footprints: Footprints,
     pub belt: Belts,
     pub cargo: Vec<Cargo>,
     pub grids: Vec<Grid>,
@@ -97,7 +99,7 @@ impl World {
     pub fn empty() -> Self {
         let cells = vec![Cell::default(); N];
         let cargo = vec![Cargo::default(); NODES];
-        let belt = Belts::rebuild(&cells, &cargo, None);
+        let belt = Belts::rebuild(&cells, &cargo, None, &[]);
         Self {
             tick: 0,
             stage: Stage::Gather,
@@ -107,6 +109,7 @@ impl World {
             delivered: 0,
             kit_total: 0,
             cells,
+            footprints: Footprints::new(),
             belt,
             cargo,
             grids: Vec::new(),
@@ -148,7 +151,14 @@ impl World {
     }
 
     pub fn rebuild(&mut self) {
-        self.belt = Belts::rebuild(&self.cells, &self.cargo, Some(&self.belt));
+        self.rebuild_footprints()
+            .expect("validated device footprints");
+        self.belt = Belts::rebuild(
+            &self.cells,
+            &self.cargo,
+            Some(&self.belt),
+            &self.footprints.outlets,
+        );
         self.layout_revision = self.layout_revision.wrapping_add(1);
         self.update_grids();
     }
@@ -183,6 +193,16 @@ impl World {
                         pending.push(next);
                     }
                 }
+            }
+        }
+        for &anchor in &self.machines {
+            let c = self.cells[anchor];
+            if c.group == 0 {
+                self.cells[anchor].group = covered(anchor, c.kind, c.dir)
+                    .unwrap()
+                    .map(|tile| self.cells[tile].group)
+                    .find(|&group| group != 0)
+                    .unwrap_or(0);
             }
         }
     }

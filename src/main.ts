@@ -1,18 +1,23 @@
 import './style.css';
 import { bindMapInput, orthogonal } from './input';
-import { bindHarvestHold } from './harvest-hold';
+import { beltTerminal, detourLockedCrossing, dragTiles, findBeltPath, projectBeltPath } from './belt-route';
+import { bindActionHold } from './action-hold';
 import { bindInventoryDrag, canSelectSlot, readSlot, sameSlot, type Selection, type Slot, type SlotRole } from './inventory-drag';
 import {
-  DIRECTION, ERRORS, Field, H, HEADER, HZ, ITEM, Kind, MACHINE, Meta, Op,
-  STATION, STATUS, STEP, STRIDE, Stage, W, SPEED_MODULE, at, cell, drillTool, held, inBounds, isTransport, plainBelt, progression, mw, time, unlocked, xy, CITY, CityField, cityValue, knownItems,
+  DIRECTION, Field, H, HEADER, HZ, Kind, Meta, Op,
+  STATION, STATUS, STEP, STRIDE, Stage, W, SPEED_MODULE, at, cell, drillTool, held, inBounds, isTransport, plainBelt, progression, stackLimit, mw, time, unlocked, xy, CITY, CityField, cityValue, knownItems,
   type Command, type Mode, type PreviewCell, type Tool,
 } from './model';
 import { Renderer } from './renderer';
-import { contents, firstMachine, workshopLesson } from './campaign';
+import { campaignTask, contents, firstMachine, guideText, handbook } from './campaign';
 import { clearLegacyBlueprint, downloadSave, legacyBlueprint, persistSave, resumeSave, reviewScene } from './storage';
 import { actionIcon, itemIcon, machineIcon } from './icons';
 import { devicePower, designPower } from './power-readout';
 import { cargoAt, design, deviceAt, drillVariant, layoutRevision, preparedMaterials, readBlueprints, readDirectory, transportPorts, type Blueprint, type CargoTrack, type Material, type SlotData } from './sim-data';
+import { ERRORS, ITEM, MACHINE, itemDescription } from './catalog-text';
+import { content } from './generated-content';
+import { language, languages, onLanguageChange, setLanguage, t, textHtml } from './i18n';
+import { footprint, machineAnchor, machineMasks, machineSize, occupiedKind, previewPorts, rotatePart } from './machine-layout';
 
 function byId<T extends HTMLElement = HTMLElement>(id:string) { return document.getElementById(id) as T; }
 
@@ -27,10 +32,15 @@ let renderer:Renderer | undefined;
 let data=new Int32Array(HEADER+W*H*STRIDE);
 let limits=progression(data);
 let ready=false, mode:Mode='task', tool:Tool | undefined, selected=-1, focus=-1, inspectingTile=false;
+let guideOpen=false, guideReturnScroll=0;
+let manualWork=false, handcraftExpanded=false;
 let gainUntil=0, gainTile=-1, recenter=true;
-const oreAction=byId<HTMLButtonElement>('ore-action'), gain=byId('ore-gain'), lesson=byId('lesson');
+const gain=byId('ore-gain'), mapHarvest=byId('map-harvest');
+const portraitDrawer=window.matchMedia('(max-width: 720px) and (orientation: portrait)');
 let traced:[number,number][]=[];
 let anchors:number[]=[], direction=0, verticalFirst=false, lastSnapshot=0, lastPanelRender=0;
+let catalogTool=false, beltStarted=false, beltFacing=false, pathMessage='';
+let dragOrigin:{anchors:number[]; started:boolean; facing:boolean; direction:number; message:string} | undefined;
 let pausedPhase=0;
 let blueprints:Blueprint[]=[];
 let stamping:Pick<Blueprint,'id'|'version'> | undefined;
@@ -41,6 +51,7 @@ let speed=1, exportPending=false, manualSave=false, noticeTimeout=0, commitTimeo
 let pending:((result:number)=>void) | undefined, panelPointer=false;
 let previewSequence=0;
 let transportPreview:{key:string;request:number;cargoKey:string;result?:Int32Array} | undefined;
+let confirmTransport=0;
 
 type Draft = { cells:PreviewCell[]; command?:Command; materials:Material[]; label:string; conflict:boolean; capture?:boolean };
 let ghost:Draft={cells:[],materials:[],label:'',conflict:false};
@@ -49,48 +60,83 @@ let selectedItem:Selection | undefined;
 let infoKey='', infoPinned=false, infoTile=-1;
 let balanceItems='';
 
+const languageSelect=byId<HTMLSelectElement>('language-select');
+languageSelect.replaceChildren(...languages.map(locale=>{
+  const names=new Intl.DisplayNames([locale],{type:'language'});
+  return new Option(names.of(locale) ?? locale,locale);
+}));
+languageSelect.closest('label')!.hidden=languages.length<2;
+function applyTranslations() {
+  document.documentElement.lang=language();
+  languageSelect.value=language();
+  for (const node of document.querySelectorAll<HTMLElement>('[data-i18n]')) {
+    node.textContent=t(node.dataset.i18n!);
+  }
+  for (const node of document.querySelectorAll<HTMLElement>('[data-i18n-label]')) {
+    node.setAttribute('aria-label',t(node.dataset.i18nLabel!));
+  }
+  balanceItems='\0';
+  refresh();
+}
+languageSelect.addEventListener('change',()=>{ void setLanguage(languageSelect.value); });
+onLanguageChange(applyTranslations);
+
 const slotKey=(role:SlotRole,item:number,tile:number,lane=0)=>`slot-${role}-${item}-${tile}-${lane}`;
 const slotArt=(item:number,count:number)=>itemIcon(item)+`<span class="item-count">${count}</span>`;
-const slotLabel=(role:SlotRole,item:number,count:number)=>`${({held:'持有',input:'进料',output:'出料',module:'模块槽',cargo:'带上货物',display:'库存'})[role]} · ${ITEM[item]} · ${count}`;
+const slotLabel=(role:SlotRole,item:number,count:number)=>t('ui.slotLabel',{role:t('ui.'+role),item:ITEM[item],count});
 const deviceIdentity=(tile:number)=>deviceAt(data,tile)?.identity ?? 0;
 const slotSelected=(role:SlotRole,item:number,tile:number,track?:CargoTrack)=>selectedItem?.role===role && selectedItem.item===item && selectedItem.tile===tile && selectedItem.identity===(track?.identity ?? deviceIdentity(tile)) && selectedItem.cargoId===(track?.id ?? 0);
 const amountBadge=(role:SlotRole,item:number,tile:number,track?:CargoTrack)=>(slotSelected(role,item,tile,track)?selectedItem?.quantity:undefined);
-const slotData=(role:SlotRole,item:number,count:number,tile:number,lane=0)=>`data-slot="${role}" data-item="${item}" data-tile="${tile}" data-count="${count}" data-quick="${slotKey(role,item,tile,lane)}" aria-label="${slotLabel(role,item,count)}"`;
+const slotData=(role:SlotRole,item:number,count:number,tile:number,lane=0)=>`data-slot="${role}" data-item="${item}" data-tile="${tile}" data-count="${count}" data-quick="${slotKey(role,item,tile,lane)}" aria-label="${textHtml(slotLabel(role,item,count))}"`;
 const itemSlot=(role:SlotRole,item:number,count:number,tile=-1,context='',slot?:SlotData,track?:CargoTrack)=>`
   <button type="button" class="item-slot" ${slotData(role,item,count,tile,(track?.location ?? 0)%2)}
     ${slot?`data-identity="${deviceIdentity(tile)}" data-capacity="${slot.capacity}" data-put="${slot.canPut}" data-take="${slot.canTake}"`:''}
     ${track?`data-identity="${track.identity}" data-lane="${track.location%2}" data-cargo-id="${track.id}" data-take="true"`:''}
     ${role==='held'||slot?.canTake||track?`aria-pressed="${slotSelected(role,item,tile,track)}" data-selected-count="${amountBadge(role,item,tile,track) ?? ''}"`:''}
-    ${context?`data-context="${context}"`:''}>${slotArt(item,count)}</button>`;
+    ${context?`data-context="${textHtml(context)}"`:''}>${slotArt(item,count)}</button>`;
 const slotRow=(title:string,slots:string)=>slots?`<div class="slot-row"><span class="slot-label">${title}</span><div class="slots">${slots}</div></div>`:'';
 
 const button=(name:string,action:string,primary=false,disabled=false)=>
-  `<button type="button" class="button${primary?' primary':''}" data-action="${action}"${disabled?' disabled':''}>${name}</button>`;
+  `<button type="button" class="button${primary?' primary':''}" data-action="${action}"${disabled?' disabled':''}>${textHtml(name)}</button>`;
 const iconButton=(name:string,action:string,icon:Parameters<typeof actionIcon>[0])=>
-  `<button type="button" class="button icon-button icon-button--${icon}" data-action="${action}" aria-label="${name}" title="${name}">${actionIcon(icon)}</button>`;
+  `<button type="button" class="button icon-button icon-button--${icon}" data-action="${action}" aria-label="${textHtml(name)}" title="${textHtml(name)}">${actionIcon(icon)}</button>`;
 const harvestMeter='<span class="harvest-meter" aria-hidden="true"><span class="harvest-fill"></span></span>';
-const harvestButton=(name:string,tile:number)=>
-  tile<0?'':`<button type="button" class="button harvest-button" data-gather="${tile}">长按${name}${harvestMeter}</button>`;
+const holdButton=(label:string,attribute:string,target:number,disabled=false)=>
+  `<button type="button" class="button harvest-button" ${attribute}="${target}"${disabled?' disabled':''}>${textHtml(label)}${harvestMeter}</button>`;
+const harvestButton=(tile:number)=>
+  tile<0?'':holdButton(t('ui.holdGather'),'data-gather',tile);
 const readings=(rows:(readonly [string,string|number])[])=>
-  `<dl class="readings">${rows.map(([name,value])=>`<div><dt>${name}</dt><dd>${value}</dd></div>`).join('')}</dl>`;
+  `<dl class="readings">${rows.map(([name,value])=>`<div><dt>${textHtml(name)}</dt><dd>${textHtml(value)}</dd></div>`).join('')}</dl>`;
 const signal=(message:string,fault=false)=>`<p class="signal${fault?' fault':''}">${message}</p>`;
 const actions=(...buttons:string[])=>`<div class="actions">${buttons.join('')}</div>`;
 const bar=(n:number,max:number)=>`<div class="bar" role="progressbar" aria-label="进度" aria-valuemin="0" aria-valuemax="${max}" aria-valuenow="${Math.min(n,max)}"><span style="width:${Math.min(100,n/max*100)}%"></span></div>`;
 const coordinates=(tile:number)=>{const [x,y]=xy(tile);return `${x}, ${y}`;};
 
-const harvest=bindHarvestHold(app,{
-  available:tile=>ready && speed>0 && tool===undefined && tile>=0 && !!cell(data,tile,Field.Ore) &&
-    !dialog.open && !blueprintDialog.open && !transferDialog.open,
-  gather:gatherAt,
-  mapButton:tile=>!oreAction.hidden && Number(oreAction.dataset.gather)===tile?oreAction:undefined,
+const holdAvailable=()=>ready && speed>0 && !dialog.open && !blueprintDialog.open && !transferDialog.open;
+const harvest=bindActionHold(app,{
+  attribute:'data-gather', duration:450,
+  available:tile=>holdAvailable() && tool===undefined && tile>=0 && !!cell(data,tile,Field.Ore),
+  complete:gatherAt,
+  mapMeter:mapHarvest.querySelector<HTMLElement>('.harvest-fill')!,
 });
+
+// TODO: Read the eligible recipes and independent handcraft cycles from the simulation catalog.
+// The legacy Handwork command always exchanges one iron ore for one structural plate.
+const handcraftRecipe={input:1,output:4,amount:1,duration:content.recipes.find(row=>row.id==='press-plate')!.baseTicks*1000/HZ};
+const hasHandcraftMaterial=()=>held(data,handcraftRecipe.input)>=handcraftRecipe.amount;
+const handcraft=bindActionHold(app,{
+  attribute:'data-handcraft', duration:handcraftRecipe.duration,
+  available:()=>holdAvailable() && mode==='view' && manualWork && handcraftExpanded && !guideOpen &&
+    panel.dataset.expanded==='true' && hasHandcraftMaterial(),
+  complete:item=>submit({op:Op.Handwork},count=>say(t('ui.handcraftResult',{item:ITEM[item],count}))),
+});
+
 bindInventoryDrag(app,byId('item-drag'),{
   selected:()=>selectedItem,
   select:source=>{ selectedItem=source; closeInfo(); refresh(); },
   drop:transferSlot,
   art:itemIcon,
 });
-const textHtml=(s:string)=>s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
 const blueprintById=(id:number)=>blueprints.find(entry=>entry.id===id);
 const activeBlueprint=()=>{
   const selection=stamping;
@@ -117,10 +163,33 @@ function setPanel(open:boolean) {
   if (!open && infoKey && panel.querySelector(`[data-quick="${infoKey}"]`)) closeInfo();
 }
 
-function selectMode(next:Mode) {
+function operationPage():Mode {
+  return inspectingTile && tool===undefined?'view':mode;
+}
+
+function closeGuide() {
+  guideOpen=false;
+  refresh();
+  panelBody.scrollTop=guideReturnScroll;
+}
+
+function selectMode(next:Mode,crafting=false) {
   if (!modeAvailable(next)) return;
+  if (next==='guide') {
+    if (guideOpen) { closeGuide(); return; }
+    guideReturnScroll=panelBody.scrollTop;
+    guideOpen=true;
+    closeInfo();
+    setPanel(true);
+    refresh();
+    panelBody.scrollTop=0;
+    return;
+  }
+  if (guideOpen && next===operationPage() && !crafting) { closeGuide(); return; }
+  guideOpen=false;
   clearDraft();
   mode=next;
+  manualWork=crafting;
   inspectingTile=false;
   traced=[];
   setPanel(true);
@@ -130,27 +199,40 @@ function selectMode(next:Mode) {
 
 function clearDraft() {
   tool=undefined; anchors=[];
-  transportPreview=undefined;
+  catalogTool=false; beltStarted=false; beltFacing=false; pathMessage=''; dragOrigin=undefined;
+  transportPreview=undefined; confirmTransport=0;
   ghost={cells:[],materials:[],label:'',conflict:false};
   canvas.removeAttribute('data-tool');
+  delete draft.dataset.catalog;
   draft.hidden=true;
 }
 
-function choose(next:Tool,anchor=-1) {
+function choose(next:Tool,anchor=-1,fromCatalog=false) {
+  if (tool!==undefined && pending) return;
   if (typeof next==='number' && !unlocked(data,next)) return;
+  clearDraft();
+  catalogTool=fromCatalog;
+  if (fromCatalog) draft.dataset.catalog='true';
   tool=next; anchors=anchor>=0?[anchor]:[]; direction=0; verticalFirst=false;
+  beltStarted=!fromCatalog && plainBelt(next) && anchor>=0;
+  if (anchor>=0 && typeof tool==='number' && isTransport(tool) && isTransport(cell(data,anchor,Field.Kind))) {
+    direction=cell(data,anchor,Field.Direction);
+  }
   inspectingTile=false;
-  mode=next==='wire' || next==='cut' ? 'power' : 'build';
+  mode=!fromCatalog && (next==='wire' || next==='cut') ? 'power' : 'build';
   closeInfo(); canvas.dataset.tool='active';
-  setPanel(false);
+  if (!fromCatalog) setPanel(false);
   updateDraft(); refresh();
 }
 
-function badPlacement(tile:number,kind:number) {
+function badPlacement(tile:number,kind:number,dir=0) {
   if (tile<0) return true;
-  const [x,y]=xy(tile);
-  if (!inBounds(limits,x,y) || kind && !unlocked(data,kind)) return true;
-  if (kind && cell(data,tile,Field.Kind)) return true;
+  if (kind && !unlocked(data,kind)) return true;
+  for (const place of footprint(tile,kind,dir)) {
+    const [x,y]=xy(place);
+    if (place<0 || !inBounds(limits,x,y) || kind && occupiedKind(data,place)) return true;
+    if (kind && place!==tile && CITY.some((_,i)=>cityValue(data,i,CityField.Site)===place)) return true;
+  }
   if (kind===Kind.SimpleMiner) return cell(data,tile,Field.Ore)!==1;
   const site=CITY.findIndex((_,i)=>cityValue(data,i,CityField.Site)===tile);
   if (kind===Kind.Station || site>=0) return kind!==Kind.Station || site<0 || site>=visibleCities();
@@ -169,7 +251,9 @@ function transportDraft(result:Draft) {
   const changed=transportPreview?.key!==key;
   const cargoKey=result.cells.map(({tile})=>Number(!!cargoAt(data,tile,0))+2*Number(!!cargoAt(data,tile,1))).join('');
   if (changed || cargoKey!==transportPreview?.cargoKey) {
+    const queued=!changed && confirmTransport===transportPreview?.request;
     transportPreview={key,request:++previewSequence,cargoKey};
+    confirmTransport=queued?previewSequence:0;
     worker.postMessage({type:'transport-preview',request:previewSequence,words});
   }
   const check=transportPreview?.result;
@@ -206,21 +290,29 @@ function createDraft():Draft {
   if (tool==='valley-line' || tool==='highland-line') {
     const city=tool==='valley-line'?1:2;
     const sites=[CityField.Sender,CityField.Receiver].map(f=>cityValue(data,city,f));
-    result.cells=sites.map(tile=>({tile,kind:Kind.Yard,dir:0,conflict:Boolean(cell(data,tile,Field.Kind))}));
+    result.cells=sites.map(tile=>({tile,kind:Kind.Yard,dir:0,conflict:Boolean(occupiedKind(data,tile))}));
     result.conflict=result.cells.some(c=>c.conflict);
     result.materials=buildMaterials(Kind.Yard); result.label='两端各建一座站场 · 每班 '+data[Meta.CrateSize]+' 件';
     result.command={op:Op.OpenLine,a:city}; return result;
   }
-  if (tool==='wire' || plainBelt(tool)) {
-    const wire=tool==='wire';
-    const tier=Number(tool);
+  if (plainBelt(tool)) {
+    const {cells,terminal,conflict}=projectBeltPath(data,anchors,Number(tool),direction,beltFacing);
+    result.cells=cells; result.conflict=conflict;
+    result.label=pathMessage || (conflict?'路径与端口或交叉条件不符':last<0?'点地图选起点':
+      !beltStarted?'再点虚影选定起点':terminal>=0?'再点接入设备确认':'可继续选点，再点终点确认');
+    if (!conflict) transportDraft(result);
+    if (terminal>=0 || last>=0 && !cells.length) {
+      result.cells.push({tile:last,kind:0,dir:0,conflict:result.conflict});
+    }
+    return result;
+  }
+  if (tool==='wire') {
     result.label=anchors.length?'可继续点转折或确认':'点起点，再点终点';
     const tiles=orthogonal(anchors,verticalFirst);
     const duplicate=new Set(tiles).size!==tiles.length;
     const words:number[]=[];
     let newTiles=0;
     for (const [i,tile] of tiles.entries()) {
-      const kind=cell(data,tile,Field.Kind), start=i===0, end=i===tiles.length-1;
       const next=tiles[i+1], prev=tiles[i-1];
       let dir=direction;
       const from=next===undefined ? prev : tile, to=next??tile;
@@ -229,17 +321,15 @@ function createDraft():Draft {
         const found=STEP.findIndex(([dx,dy])=>dx===nx-x && dy===ny-y);
         if (found>=0) dir=found;
       }
-      if (!wire && tiles.length>1 && (start||end) && kind!==Kind.Empty && !plainBelt(kind)) continue;
       const conflict=duplicate;
-      result.cells.push({tile,dir,kind:wire?0:tier,wire,conflict});
+      result.cells.push({tile,dir,kind:0,wire:true,conflict});
       result.conflict ||= conflict;
-      if (wire ? !cell(data,tile,Field.Wire) : kind===Kind.Empty) newTiles++;
+      if (!cell(data,tile,Field.Wire)) newTiles++;
       words.push(tile,dir);
     }
-    if (!wire) return transportDraft(result);
     const entry=design(Kind.Cable);
     if (entry && newTiles) result.materials=entry.materials.map(({item,count})=>({item,count:count*Math.ceil(newTiles/entry.span)}));
-    if (words.length) result.command={op:Op.Route,a:Number(wire),words};
+    if (words.length) result.command={op:Op.Route,a:1,words};
     return result;
   }
   if (tool==='stamp') {
@@ -250,11 +340,15 @@ function createDraft():Draft {
     if (last<0) return result;
     const [x,y]=xy(last);
     const ores=new Set<number>();
-    for (const part of entry.parts) {
-      let [dx,dy,kind,dir,wire]=part;
-      for (let i=0;i<direction;i++) [dx,dy]=[-dy,dx];
-      dir=(dir+direction)%4;
-      const tile=at(x+dx,y+dy),conflict=badPlacement(tile,kind);
+    const occupied=new Set<number>();
+    for (const [dx,dy,kind,facing,wire] of entry.parts) {
+      const [rx,ry,dir]=rotatePart(dx,dy,kind,facing,direction);
+      const tile=at(x+rx,y+ry);
+      let conflict=badPlacement(tile,kind,dir);
+      if (kind && tile>=0) for (const place of footprint(tile,kind,dir)) {
+        if (occupied.has(place)) conflict=true;
+        occupied.add(place);
+      }
       const variant=drillTool(kind) && tile>=0?drillVariant(data,tile,kind):undefined;
       if (variant) ores.add(variant.output);
       const previewKind=variant?.kind ?? kind;
@@ -279,25 +373,27 @@ function createDraft():Draft {
   if (tool==='remove' || tool==='cut') {
     result.label='点选要拆除的格子';
     if (last>=0) {
-      const wire=tool==='cut',kind=cell(data,last,Field.Kind);
+      const wire=tool==='cut',anchor=wire?last:machineAnchor(data,last);
+      const kind=anchor>=0?cell(data,anchor,Field.Kind):0;
       result.conflict=wire?!cell(data,last,Field.Wire):!kind || [Kind.Station,Kind.Yard].includes(kind);
-      result.cells=[{tile:last,kind:0,dir:0,wire,conflict:true}];
+      const tiles=wire || anchor<0?[last]:[...footprint(anchor,kind,cell(data,anchor,Field.Direction))];
+      result.cells=tiles.map(tile=>({tile,kind:0,dir:0,wire,conflict:true}));
       result.command={op:Op.Remove,a:last,b:Number(wire)};
       result.label=`拆除 ${wire?'电缆':MACHINE[kind].name} · ${coordinates(last)}`;
     }
     return result;
   }
-  result.label='点格子调整放置位置';
+  result.label=last<0?'点地图选址':'再点虚影建造，长按拖动转向';
   if (typeof tool==='number' && isTransport(tool)) {
     if (last>=0) result.cells=[{tile:last,kind:tool,dir:direction}];
     return transportDraft(result);
   }
   result.materials=buildMaterials(tool);
   if (last>=0) {
-    result.conflict=badPlacement(last,tool);
+    result.conflict=badPlacement(last,tool,direction);
     const variant=drillTool(tool)?drillVariant(data,last,tool):undefined;
     if (drillTool(tool)) {
-      const reason=cell(data,last,Field.Kind)?'目标格已占用':variant && result.conflict?'矿种尚未开放':'';
+      const reason=occupiedKind(data,last)?'目标格已占用':variant && result.conflict?'占地或矿种不符合要求':'';
       result.label=variant
         ? `${ITEM[variant.output]} · ${(variant.amount*HZ/variant.ticks).toFixed(2)} 件/秒 · ${mw(variant.demand)}${reason?' · '+reason:''}`
         : reason || '选择一处已开放的矿脉';
@@ -311,38 +407,140 @@ function createDraft():Draft {
 function updateDraft() {
   if (tool===undefined) return;
   ghost=createDraft();
-  const path=plainBelt(tool) || tool==='wire';
   const cannotPay=!affordable(ghost.materials);
   const info=ghost.conflict && !(typeof tool==='number' && drillTool(tool)) && tool!=='capture' && tool!=='stamp' && !(typeof tool==='number' && isTransport(tool))
     ? '目标被占用、路线重叠或矿点不匹配' : ghost.label;
-  const cost=ghost.materials.map(({item,count})=>` <span class="inline-cost${held(data,item)<count?' missing':''}" aria-label="${ITEM[item]} ${held(data,item)} / ${count}">${itemIcon(item)}${held(data,item)} / ${count}</span>`).join('');
+  const cost=ghost.materials.map(({item,count})=>` <span class="inline-cost${held(data,item)<count?' missing':''}" aria-label="${textHtml(ITEM[item])} ${held(data,item)} / ${count}">${itemIcon(item)}${held(data,item)} / ${count}</span>`).join('');
   const canConfirm=Boolean(ghost.command || ghost.capture) && !ghost.conflict && !cannotPay && !pending;
   draft.hidden=false;
-  const html=`<div class="draft-text"><strong>${textHtml(activeToolText())}${cost}</strong> · ${info}${cannotPay?' · 材料不足':''}</div>`+
-    (path && anchors.length>1?button('换弯','turn-path')+button('退一步','back-path'):'')+
+  const html=`<div class="draft-text"><strong>${textHtml(activeToolText())}${cost}</strong> · ${textHtml(info)}${cannotPay?' · '+textHtml(t('ui.unavailable')):''}</div>`+
+    (tool==='wire' && anchors.length>1?button('换弯','turn-path'):'')+
+    ((tool==='wire' || plainBelt(tool)) && anchors.length>1?button('退一步','back-path'):'')+
     (canRotateDraft()?iconButton('旋转','rotate-draft','rotate'):'')+
     button('取消','cancel-draft')+button(tool===Kind.SimpleMiner?'安放':tool==='capture'?'保存蓝图':'确认','confirm-draft',true,!canConfirm);
   if (draft.innerHTML!==html) draft.innerHTML=html;
 }
 
 function canRotateDraft() {
-  return tool==='stamp' || (typeof tool==='number' && (!plainBelt(tool) || anchors.length<2));
+  return tool==='stamp' || typeof tool==='number';
+}
+
+function rotateAt(tile:number,heading:number) {
+  if (!canRotateDraft() || pending) return;
+  if (anchors.at(-1)===tile && direction===heading && (!plainBelt(tool) || beltFacing)) return;
+  if (plainBelt(tool)) {
+    const index=anchors.lastIndexOf(tile);
+    if (index>=0) anchors=anchors.slice(0,index+1);
+    else if (anchors.length || tile<0) return;
+    else anchors=[tile];
+    beltFacing=true; pathMessage='';
+  } else if (!anchors.length && tile>=0) anchors=[tile];
+  direction=heading; confirmTransport=0;
+  updateDraft();
 }
 
 function rotateDraft(tile=-1,step=1) {
-  if (!canRotateDraft()) return;
-  if (!anchors.length && tile>=0) anchors=[tile];
-  direction=(direction+step+4)%4;
+  const last=anchors.at(-1) ?? tile;
+  const anchor=plainBelt(tool) && ghost.cells.some(part=>part.tile===tile && part.kind)?tile:last;
+  const end=plainBelt(tool)?ghost.cells.find(part=>part.tile===anchor && part.kind):undefined;
+  if (plainBelt(tool) && anchors.length>1 && !end) return;
+  rotateAt(anchor,((end?.dir ?? direction)+step+4)%4);
+}
+
+function extendBelt(tile:number) {
+  const prefix=beltTerminal(data,anchors)>=0?anchors.slice(0,-1):anchors;
+  const suffix=findBeltPath(data,limits,prefix,tile,beltFacing?direction:undefined);
+  if (!suffix) {
+    pathMessage='到该格没有可铺设的路线';
+    say(pathMessage,true);
+    return false;
+  }
+  anchors=[...prefix,...suffix]; beltFacing=false;
+  return true;
+}
+
+function tapBelt(tile:number) {
+  const last=anchors.at(-1);
+  pathMessage='';
+  if (!beltStarted) {
+    confirmTransport=0;
+    if (tile===last) beltStarted=true;
+    else {
+      anchors=[tile]; beltFacing=false;
+      direction=isTransport(cell(data,tile,Field.Kind))?cell(data,tile,Field.Direction):0;
+    }
+  } else if (tile===last) {
+    confirmDraft(); return;
+  } else {
+    confirmTransport=0;
+    const index=anchors.lastIndexOf(tile);
+    if (index>=0) { anchors=anchors.slice(0,index+1); beltFacing=false; }
+    else extendBelt(tile);
+  }
+  updateDraft();
+}
+
+function startPathDrag(tile:number) {
+  if (pending || !plainBelt(tool) && tool!=='wire') return false;
+  confirmTransport=0;
+  dragOrigin={anchors,started:beltStarted,facing:beltFacing,direction,message:pathMessage};
+  pathMessage='';
+  if (tool==='wire' || !beltStarted || !anchors.length) {
+    if (anchors.at(-1)!==tile) beltFacing=false;
+    anchors=[tile];
+  } else {
+    const index=anchors.lastIndexOf(tile);
+    if (index>=0) {
+      if (index!==anchors.length-1) beltFacing=false;
+      anchors=anchors.slice(0,index+1);
+    } else if (!extendBelt(tile)) { dragOrigin=undefined; updateDraft(); return false; }
+  }
+  beltStarted=true;
+  return true;
+}
+
+function drawPath(from:number,to:number) {
+  if (!dragOrigin || pending) return;
+  if (plainBelt(tool)) {
+    for (const tile of dragTiles(from,to)) {
+      if (anchors.at(-2)===tile) anchors.pop();
+      else anchors.push(tile);
+    }
+    beltFacing=false;
+  } else if (tool==='wire') {
+    const start=anchors[0];
+    anchors=start===to?[start]:[start,to];
+  }
+  updateDraft();
+}
+
+function finishPathDrag(keep:boolean) {
+  const prior=dragOrigin;
+  dragOrigin=undefined;
+  if (!prior) return;
+  if (keep) {
+    const detour=plainBelt(tool)?detourLockedCrossing(data,limits,anchors):undefined;
+    if (detour) { anchors=detour; updateDraft(); }
+    return;
+  }
+  anchors=prior.anchors; beltStarted=prior.started; beltFacing=prior.facing;
+  direction=prior.direction; pathMessage=prior.message;
   updateDraft();
 }
 
 function tap(tile:number) {
   if (!ready) return;
   if (tool!==undefined) {
+    if (pending) return;
+    if (plainBelt(tool)) { tapBelt(tile); return; }
+    if (typeof tool==='number' && overlapsDraft(tile) || catalogTool && tool==='wire' && anchors.at(-1)===tile) {
+      confirmDraft(); return;
+    }
+    confirmTransport=0;
     if (typeof tool==='number' && isTransport(tool) && !anchors.length && isTransport(cell(data,tile,Field.Kind))) {
       direction=cell(data,tile,Field.Direction);
     }
-    if (plainBelt(tool) || tool==='wire') {
+    if (tool==='wire') {
       if (anchors.at(-1)!==tile) anchors.push(tile);
     } else if (tool==='capture') {
       if (anchors.length===2) anchors=[];
@@ -350,20 +548,22 @@ function tap(tile:number) {
     } else anchors=[tile];
     updateDraft(); return;
   }
-  if (data[Meta.Stage]<Stage.Expand) {
-    const kind=cell(data,tile,Field.Kind);
-    if (kind) inspectMap(tile,true);
-    else if (cell(data,tile,Field.Ore)===1 && data[Meta.Packed]) choose(Kind.SimpleMiner,tile);
-    return;
-  }
+  const anchor=machineAnchor(data,tile);
+  if (anchor>=0) tile=anchor;
   if (renderer && renderer.camera.zoom<13) {
     const cam=renderer.camera;
     cam.aim(cam.x,cam.y,19);
   }
+  guideOpen=false;
   selected=tile;
+  manualWork=false;
   inspectingTile=!!cell(data,tile,Field.Kind) || (mode!=='build' && !!cell(data,tile,Field.Ore));
   focus=-1; traced=[]; setPanel(true); refresh();
   inspectMap(tile,true);
+}
+
+function overlapsDraft(tile:number) {
+  return ghost.cells.some(part=>part.kind && part.tile>=0 && [...footprint(part.tile,part.kind,part.dir)].includes(tile));
 }
 
 function submit(command:Command,done?:(result:number)=>void) {
@@ -378,14 +578,20 @@ function confirmDraft() {
   const plan=createDraft();
   if (plan.conflict || !affordable(plan.materials)) return;
   if (tool==='capture' && plan.capture) { editBlueprint('capture'); return; }
-  if (!plan.command) return;
-  const isStamp=tool==='stamp';
-  submit(plan.command,()=>{
+  if (!plan.command) {
+    if (transportPreview && !transportPreview.result && plan.cells.some(part=>isTransport(part.kind))) {
+      confirmTransport=transportPreview.request;
+    }
+    return;
+  }
+  const keepCatalog=catalogTool, isStamp=tool==='stamp';
+  confirmTransport=0;
+  if (submit(plan.command,()=>{
     focus=-1;
-    clearDraft(); mode=isStamp?'build':'view'; inspectingTile=false;
-    if (data[Meta.Stage]>=Stage.Expand) setPanel(true);
+    clearDraft(); mode=isStamp||keepCatalog?'build':'view'; inspectingTile=false;
+    if (!keepCatalog) setPanel(true);
     refresh();
-  });
+  })) updateDraft();
 }
 
 function gatherAt(tile:number) {
@@ -395,13 +601,33 @@ function gatherAt(tile:number) {
   });
 }
 
+function handcraftPanel() {
+  const {input,output,amount}=handcraftRecipe;
+  const missing=!hasHandcraftMaterial();
+  return `<section class="handcraft-recipe" data-missing="${missing}">
+    <button type="button" class="recipe-heading" data-action="toggle-handcraft" aria-expanded="${handcraftExpanded}" aria-controls="handcraft-details">
+      ${itemIcon(output)}<span>${textHtml(ITEM[output])} ×${amount}</span><span class="recipe-disclosure" aria-hidden="true"></span>
+    </button>
+    <div class="recipe-details" id="handcraft-details"${handcraftExpanded?'':' hidden'}>
+      <span class="slot-label">${textHtml(t('ui.requiredMaterials'))}</span>
+      <div class="requirement${missing?' missing':''}">${itemIcon(input)}<span>${textHtml(ITEM[input])} ×${amount}</span></div>
+      ${holdButton(t('ui.holdCraft'),'data-handcraft',output,missing)}
+    </div>
+  </section>`;
+}
+
 function inspectors() {
+  if (guideOpen) return ['',t('ui.guide'),(Object.keys(handbook) as (keyof typeof handbook)[]).filter(
+    id=>data[Meta.Stage]>=handbook[id]).map(id=>guideEntry(id,true)).join(''),button(t('ui.guideReturn'),'close-guide')];
+  if (mode==='view' && manualWork) {
+    return [t('ui.operations'),t('ui.handcraft'),handcraftPanel()];
+  }
   if (mode==='view' || (inspectingTile && tool===undefined)) {
     const kind=selected<0?0:cell(data,selected,Field.Kind);
     if (kind===Kind.Station) return data[Meta.Stage]>=Stage.Valley?regionalPanel():orbitPanel();
     if (kind===Kind.Yard) return yardPanel();
     if (kind) return devicePanel(kind);
-    if (selected>=0 && cell(data,selected,Field.Ore)) return ['矿点',ITEM[cell(data,selected,Field.Ore)],actions(harvestButton('采集',selected),button('任务进度','mission'))];
+    if (selected>=0 && cell(data,selected,Field.Ore)) return [t('ui.oreDeposit'),ITEM[cell(data,selected,Field.Ore)],actions(harvestButton(selected))];
   }
   if (mode==='orbit') return data[Meta.Stage]>=Stage.Valley?regionalPanel():orbitPanel();
   if (mode==='power') return powerPanel();
@@ -410,11 +636,19 @@ function inspectors() {
   return missionPanel();
 }
 
+function guideEntry(id:keyof typeof handbook,collapsible=false) {
+  const {title,steps}=guideText(id);
+  const list=`<ol>${steps.map(step=>`<li>${textHtml(step)}</li>`).join('')}</ol>`;
+  return collapsible?`<details class="guide-entry" data-guide="${id}"><summary>${textHtml(title)}</summary>${list}</details>`:
+    `<section class="guide-entry" data-guide="${id}"><h3>${textHtml(title)}</h3>${list}</section>`;
+}
+
 function missionPanel() {
   if (data[Meta.Stage]>=Stage.Valley) return regionalMission();
   if (data[Meta.Stage]<Stage.Sunlight) {
-    const [title,detail,...choices]=workshopLesson(data);
-    return ['当前任务',title,`<p class="lead">${detail}</p>`+lessonButtons(choices)];
+    const {title,detail,progress,guides}=campaignTask(data);
+    return [t('ui.activeTask'),title,`<p class="lead">${textHtml(detail)}</p>`+
+      (progress?readings([[t('ui.taskProgress'),progress]]):'')+guides.map(id=>guideEntry(id)).join('')];
   }
   if (!data[Meta.KitTotal] && firstMachine(data,Kind.KitPress)<0) {
     const solar=firstMachine(data,Kind.Solar);
@@ -466,7 +700,7 @@ function yardPanel():string[] {
     '<p class="lead">'+(sending?'将物料带接入本站，或把手中物料装箱。':'把当地输送带接到出料箭头上，通向地面站或加工设备。')+'</p>'+
     readings([['距下班发车',time(data[Meta.Headway]-data[Meta.Tick]%data[Meta.Headway])],['每班容量',data[Meta.CrateSize]+' 件'],['单程',time(data[Meta.Travel])],
       ['在途或卸货',v(CityField.InTransit)+' 件'],['当地已接收',v(CityField.Delivered)+' 件']])+
-    machineSlots(selected,Kind.Yard)+
+    readings(machineLayoutRows(selected,Kind.Yard))+machineSlots(selected,Kind.Yard)+
     actions(sending?'':button('预览末端短带','lastmile-'+city,true),
       sending?button('查看到货站','receiver-'+city):iconButton('旋转出料口','rotate-device','rotate'),button('任务进度','mission'))];
 }
@@ -501,7 +735,7 @@ function regionalPanel():string[] {
       phase===4?button('复演'+CITY[data[Meta.FaultCity]]+'窗口','window-'+data[Meta.FaultCity]+'-0',true):'',
       button('单站试照 · '+CITY[city],'window-'+city+'-0',city>0,trialBlocked || data[Meta.Modules]<=city),
       launch?button('增发镜阵','launch',true,trialBlocked || data[Meta.Mirrors]<3 || data[Meta.Fuel]<5):'')+
-    machineSlots(site,Kind.Station)+reserves+readings([...rows,...devicePower(data,site,Kind.Station)])+
+    machineSlots(site,Kind.Station)+reserves+readings([...machineLayoutRows(site,Kind.Station),...rows,...devicePower(data,site,Kind.Station)])+
     actions(...cities.map((name,n)=>button(name+'地面站','site-'+n)),...(city>0?[button('发货站','sender-'+city),button('到货站','receiver-'+city)]:[]),button('查看电网','power-map'),button('任务进度','mission'))];
 }
 
@@ -516,7 +750,7 @@ function orbitPanel() {
     button(phase===4?'复演窗口':'开始试照','trial',true,phase===1||phase===2);
   return ['轨道控制台','曙港地面站',signal(label,phase===4)+
     actions(nextButton,button('查看电网','power-map'))+
-    machineSlots(STATION,Kind.Station)+readings(devicePower(data,STATION,Kind.Station))+
+    machineSlots(STATION,Kind.Station)+readings([...machineLayoutRows(STATION,Kind.Station),...devicePower(data,STATION,Kind.Station)])+
     readings([['主网当前可给',mw(dispatch)]])+
     (inOrbit?readings([['试照需求','24 秒 · 12 MW'],['运行耗料','1 枚 / 秒']]):'')+
     (phase===2?bar(24*HZ-data[Meta.WindowTicks],24*HZ):'')+
@@ -537,7 +771,7 @@ function powerPanel() {
   const details=group?readings(rows):signal('所选格未接通电缆',true);
   return ['电网诊断',group?'供电区 '+group:'接线检查',details+
     actions(iconButton('铺电缆','wire','cable'),unlocked(data,Kind.Battery)?button('预览蓄电池','battery'):'',button('拆电缆','cut'))+
-    (faults.length ? `<div class="fault-list">${faults.map(i=>`<button type="button" class="button" data-fault="${i}">${MACHINE[cell(data,i,Field.Kind)].name}<small>${coordinates(i)} · 缺电</small></button>`).join('')}</div>`:'')+
+    (faults.length ? `<div class="fault-list">${faults.map(i=>`<button type="button" class="button" data-fault="${i}">${textHtml(MACHINE[cell(data,i,Field.Kind)].name)}<small>${coordinates(i)} · 缺电</small></button>`).join('')}</div>`:'')+
     actions(unlocked(data,Kind.Station)?button('地面站','station'):'',button('任务进度','mission'))];
 }
 
@@ -565,7 +799,7 @@ function transportReadout(tile:number,kind:Kind,interactive=false) {
     const status=cargo?.blocked?'堵塞':cargo?'在途':'空闲';
     rows.push(readings([[name,flow],[status,`${cargo?ITEM[cargo.item]+' ':''}${cargo?1:0} / ${entry.laneCapacity}`]])+
       (interactive && cargo?slotRow('带上货物',itemSlot('cargo',cargo.item,1,tile,`${name} · ${flow}`,undefined,cargo)+
-        `<button type="button" class="button" data-action="take-cargo" data-tile="${tile}" data-lane="${lane}" data-item="${cargo.item}" data-cargo-id="${cargo.id}" data-identity="${cargo.identity}" aria-label="从${name}取走${ITEM[cargo.item]}">取走</button>`):''));
+        `<button type="button" class="button" data-action="take-cargo" data-tile="${tile}" data-lane="${lane}" data-item="${cargo.item}" data-cargo-id="${cargo.id}" data-identity="${cargo.identity}" aria-label="从${name}取走${textHtml(ITEM[cargo.item])}">取走</button>`):''));
   }
   return rows.join('');
 }
@@ -575,27 +809,8 @@ function transportRating(kind:number) {
   return entry?.interval?`${HZ/entry.interval} 件/秒/通道 · ${entry.lanes} 条通道`:'';
 }
 
-function lessonButtons(choices:[string,string,boolean?][]) {
-  const slots:string[]=[], buttons:string[]=[];
-  for (const [name,id,disabled] of choices) {
-    if (id==='feed-bench' || id==='fuel-generator') {
-      const tile=firstMachine(data,id==='feed-bench'?Kind.Bench:Kind.Generator);
-      const item=id==='feed-bench'?1:3;
-      const slot=deviceAt(data,tile)?.slots.find(slot=>slot.role==='input' && slot.item===item);
-      if (slot) slots.push(slotRow('进料',machineSlot(tile,slot)));
-    } else if (id==='collect-bench' || id.startsWith('take-')) {
-      const tile=id==='collect-bench'?firstMachine(data,Kind.Bench):Number(id.slice(5));
-      const slot=deviceAt(data,tile)?.slots.find(slot=>slot.role==='output' && slot.canTake);
-      if (slot) slots.push(slotRow('出料',machineSlot(tile,slot)));
-    } else if (id==='gather-fuel' || id==='gather-silica') {
-      buttons.push(harvestButton(name,nearest(data[Meta.FirstOre],tile=>cell(data,tile,Field.Ore)===(id==='gather-fuel'?3:2))));
-    } else buttons.push(button(name,id,buttons.length===0,disabled));
-  }
-  return slots.join('')+(buttons.length?actions(...buttons):'');
-}
-
 function modeAvailable(next:Mode) {
-  return data[Meta.Stage]>=({task:Stage.Expand,view:Stage.Expand,build:Stage.Expand,power:Stage.Power,orbit:Stage.Launch})[next];
+  return data[Meta.Stage]>=({task:Stage.Gather,view:Stage.Gather,build:Stage.Gather,guide:Stage.Gather,power:Stage.Power,orbit:Stage.Launch})[next];
 }
 
 function deviceName(kind:number) {
@@ -616,7 +831,7 @@ function machineCycle(tile:number,kind:number) {
 
 function devicePanel(kind:number) {
   if (kind===Kind.DevelopmentHub) return [`设备检查 · ${coordinates(selected)}`,'阶段交付站',
-    readings([['已完成阶段',limits.tier],['背包占用',`${limits.used} / ${limits.slots} 格`],['每格堆叠',limits.stack],['时间倍速上限',`${limits.speed}×`],
+    readings([...machineLayoutRows(selected,kind),['已完成阶段',limits.tier],['背包占用',t('ui.backpack',{used:limits.used,slots:limits.slots})],['堆叠上限',t('ui.individualStacks')],['时间倍速上限',`${limits.speed}×`],
       ['缩放范围',`${limits.minZoom}–${limits.maxZoom} 像素/格`],['开放地图',`${limits.right-limits.left} × ${limits.bottom-limits.top} 格`]])+
     signal(limits.tier===0?'下一阶段 · 扩大背包与地图范围，开放重载带和强化采矿机。':'当前阶段已开放全部上限。')+
     actions(iconButton('拆除设备','remove','hammer'))];
@@ -626,6 +841,7 @@ function devicePanel(kind:number) {
   const group=cell(data,selected,Field.Grid);
   const transport=isTransport(kind);
   if (transport) inventory.push(['额定吞吐',transportRating(kind)]);
+  else inventory.push(...machineLayoutRows(selected,kind));
   if (kind===Kind.Depot) inventory.push(['收发设置',cfg?`输出${ITEM[cfg]}`:'收货']);
   if (kind===Kind.Splitter) inventory.push(['分流',cfg?'直行优先':'轮流分配']);
   inventory.push(['方向',DIRECTION[cell(data,selected,Field.Direction)]]);
@@ -637,13 +853,13 @@ function devicePanel(kind:number) {
   if (data[Meta.Stage]>=Stage.Power && !transport && ![Kind.SimpleMiner,Kind.Bench,Kind.Depot].includes(kind)) inventory.push(['供电区',group?`#${group}`:'未连接']);
   const hasPriority=(actual?.grade ?? 0)>=2 || [Kind.Smelter,Kind.Grinder,Kind.Calibrator,Kind.Assembler,Kind.KitPress,Kind.Kiln].includes(kind);
   if (hasPriority) inventory.push(['供电顺序',['普通','优先','最高'][cfg]]);
-  return [`设备检查 · ${coordinates(selected)}`,deviceName(kind),`<div class="device-summary">${machineIcon(kind)}<p class="lead">${device.detail}</p></div>`+
+  return [`设备检查 · ${coordinates(selected)}`,deviceName(kind),`<div class="device-summary">${machineIcon(kind)}<p class="lead">${textHtml(device.detail)}</p></div>`+
     (transport?'':signal(STATUS[status],status>=2&&status<=4))+machineCycle(selected,kind)+readings([...inventory,...devicePower(data,selected,kind)])+
     (transport?transportReadout(selected,kind,true):machineSlots(selected,kind))+
-    actions(kind===Kind.SimpleMiner?harvestButton('手采铁矿',selected)+button('手制结构件','handwork',false,!held(data,1)):'',iconButton('旋转设备','rotate-device','rotate'),
+    actions(cell(data,selected,Field.Ore)?harvestButton(selected):'',iconButton('旋转设备','rotate-device','rotate'),
       hasPriority?button('切换优先级','configure'):'',
       kind===Kind.Splitter?button('切换分流','configure'):'',
-      kind===Kind.Depot?button('切换收发','configure'):'',
+      kind===Kind.Depot && data[Meta.Stage]>=Stage.Expand?button('切换收发','configure'):'',
       kind!==Kind.Generator && kind!==Kind.Battery && kind!==Kind.Solar ? button('沿货流定位','trace-cargo'):'',
       data[Meta.Stage]>=Stage.Power&&!transport?(group?button('查看电网','power-map'):iconButton('接线','wire','cable')):'',
       iconButton('拆除设备','remove','hammer'))+
@@ -654,8 +870,30 @@ function canBuild(kind:number) {
   return Boolean(design(kind)) && unlocked(data,kind) && affordable(buildMaterials(kind));
 }
 
+function machineLayoutRows(tile:number,kind:number) {
+  const dir=cell(data,tile,Field.Direction), [width,height]=machineSize(kind,dir);
+  const rows:[string,string][]=[['占地',`${width} × ${height} 格`]];
+  if (cell(data,tile,Field.Kind)!==kind) return rows;
+  const incoming:string[]=[], outgoing:string[]=[];
+  const labels=new Map<number,string>();
+  for (const port of previewPorts(tile,kind,dir)) {
+    if (port.labelKey) labels.set(port.tile*8+port.side+(port.role==='output'?4:0),t(port.labelKey));
+  }
+  for (const place of footprint(tile,kind,dir)) {
+    const masks=machineMasks(data,place);
+    for (let side=0;side<4;side++) {
+      const edge=`${coordinates(place)} ${DIRECTION[side]}侧`;
+      if (masks & (1<<((side+2)%4))) incoming.push([labels.get(place*8+side),edge].filter(Boolean).join(' · '));
+      if (masks & (16<<side)) outgoing.push([labels.get(place*8+side+4),edge].filter(Boolean).join(' · '));
+    }
+  }
+  if (incoming.length) rows.push([t('ui.input'),incoming.join(' / ')]);
+  if (outgoing.length) rows.push([t('ui.output'),outgoing.join(' / ')]);
+  return rows;
+}
+
 function materialLines(requirements:Material[]) {
-  return requirements.map(({item,count})=>`<p class="requirement${held(data,item)<count?' missing':''}">${itemIcon(item)}<span>${ITEM[item]} <b>${held(data,item)} / ${count}</b></span></p>`).join('');
+  return requirements.map(({item,count})=>`<p class="requirement${held(data,item)<count?' missing':''}">${itemIcon(item)}<span>${textHtml(ITEM[item])} <b>${held(data,item)} / ${count}</b></span></p>`).join('');
 }
 
 function buildCatalog() {
@@ -669,12 +907,12 @@ function buildCatalog() {
   ];
   const entry=(kind:Kind)=>{
     const {name}=MACHINE[kind], available=canBuild(kind);
-    return `<button class="tool machine-tool" type="button" data-tool="${kind}" data-quick="tool-${kind}" data-unavailable="${!available}"
-      aria-label="${name}${available?'':' · 材料不足'}">${machineIcon(kind)}<span>${name}</span></button>`;
+    return `<button class="tool machine-tool" type="button" data-tool="${kind}" data-quick="tool-${kind}" data-unavailable="${!available}" aria-pressed="${tool===kind}"
+      aria-label="${textHtml(name)}${available?'':' · '+textHtml(t('ui.unavailable'))}">${machineIcon(kind)}<span>${textHtml(name)}</span></button>`;
   };
   const sections=groups.map(([name,kinds])=>{
     const cable=name==='电力' && unlocked(data,Kind.Cable)
-      ? `<button class="tool machine-tool" type="button" data-tool="wire" data-quick="tool-wire" data-unavailable="${!canBuild(Kind.Cable)}" aria-label="电缆">${actionIcon('cable')}<span>电缆</span></button>`
+      ? `<button class="tool machine-tool" type="button" data-tool="wire" data-quick="tool-wire" data-unavailable="${!canBuild(Kind.Cable)}" aria-pressed="${tool==='wire'}" aria-label="电缆">${actionIcon('cable')}<span>电缆</span></button>`
       : '';
     const entries=kinds.filter(kind=>unlocked(data,kind)).map(entry).join('')+cable;
     return entries?`<section class="tool-group"><h3>${name}</h3><div class="tool-grid">${entries}</div></section>`:'';
@@ -704,9 +942,10 @@ function closeInfo() {
 }
 
 function inspectMap(tile:number,pin=false) {
+  const anchor=machineAnchor(data,tile);
+  if (anchor>=0) tile=anchor;
   if (!ready || (!pin && infoPinned) || (!pin && tile===infoTile)) return;
-  if (tile<0 || tool!==undefined || (!cell(data,tile,Field.Kind) &&
-      (data[Meta.Stage]<Stage.Expand || !cell(data,tile,Field.Ore)))) {
+  if (tile<0 || tool!==undefined || (!cell(data,tile,Field.Kind) && !cell(data,tile,Field.Ore))) {
     if (infoTile>=0 || pin) closeInfo();
     return;
   }
@@ -731,14 +970,14 @@ function quickMachineStock(tile:number,kind:Kind) {
   });
   if (!items.length) return '<p>内部无物资</p>';
   return `<div class="quick-stock">${items.map(([item,count])=>
-    `<span>${itemIcon(item)}${ITEM[item]} <b>${count}</b></span>`).join('')}</div>`;
+    `<span>${itemIcon(item)}${textHtml(ITEM[item])} <b>${count}</b></span>`).join('')}</div>`;
 }
 
 function syncInfo() {
   if (infoTile>=0 && renderer) {
     const kind=cell(data,infoTile,Field.Kind), ore=cell(data,infoTile,Field.Ore);
     if (!kind && !ore) { closeInfo(); return; }
-    const html=`<strong>${kind?deviceName(kind):ITEM[ore]+'矿点'}</strong>`+
+    const html=`<strong>${textHtml(kind?deviceName(kind):ITEM[ore]+'矿点')}</strong>`+
       (kind?(isTransport(kind)?'':`<p>${STATUS[cell(data,infoTile,Field.Status)]}</p>`)+machineCycle(infoTile,kind)+
         quickMachineStock(infoTile,kind)+readings(devicePower(data,infoTile,kind)):'');
     if (quickInfo.innerHTML!==html) quickInfo.innerHTML=html;
@@ -758,15 +997,14 @@ function syncInfo() {
   if (anchor.dataset.tool==='wire') {
     const entry=design(Kind.Cable);
     html=`<strong>电缆</strong><p>连接设备与电网。每 ${entry?.span ?? 1} 格新电缆结算一组材料。</p>`+
-      materialLines(buildMaterials(Kind.Cable))+(infoPinned?button('选用','wire',true):'');
+      materialLines(buildMaterials(Kind.Cable));
   } else if (anchor.dataset.tool) {
     const kind=Number(anchor.dataset.tool);
     const {name,detail}=MACHINE[kind], requirements=buildMaterials(kind);
-    const enough=canBuild(kind);
     const rating=isTransport(kind)?transportRating(kind):drillTool(kind)?'采矿速率与耗电随落点矿种显示。':designPower(kind);
-    html=`<strong>${name}</strong><p>${detail}</p><p>${rating}</p>`+
-      (requirements.length?materialLines(requirements):'<p>已制作，可直接安放。</p>')+
-      (infoPinned && enough?button('选用','choose-tool-'+kind,true):'');
+    const [width,height]=machineSize(kind,0);
+    html=`<strong>${textHtml(name)}</strong><p>${textHtml(detail)}</p><p>${rating}</p><p>占地 ${width} × ${height} 格</p>`+
+      (requirements.length?materialLines(requirements):'<p>已制作，可直接安放。</p>');
   } else {
     const slot=readSlot(anchor);
     const {role,item,count,canPut,canTake}=slot, cap=Number(anchor.dataset.capacity ?? -1);
@@ -781,11 +1019,14 @@ function syncInfo() {
       cargo:take,
       display:'',
     };
-    html=`<strong>${ITEM[item]} <span class="quick-count">×${count}</span></strong>`+
-      (anchor.dataset.context?`<p>${anchor.dataset.context}</p>`:'')+
-      (cap>=0?`<p>槽位容量 ${count} / ${cap}</p>`:'')+
-      (role==='held'?`<p>占用 ${Math.ceil(count/limits.stack)} 格 · 每格最多 ${limits.stack} 件</p>`:'')+
-      (help[role]?`<p>${help[role]}</p>`:'')+
+    const description=itemDescription(item);
+    const stack=stackLimit(data,item);
+    html=`<strong>${textHtml(ITEM[item])} <span class="quick-count">×${count}</span></strong>`+
+      (description?`<p>${textHtml(description)}</p>`:'')+
+      (anchor.dataset.context?`<p>${textHtml(anchor.dataset.context)}</p>`:'')+
+      (cap>=0?`<p>${textHtml(t('ui.capacity',{count,capacity:cap}))}</p>`:'')+
+      (role==='held'?`<p>${textHtml(t('ui.stackUsage',{used:Math.ceil(count/stack),limit:stack}))}</p>`:'')+
+      (help[role]?`<p>${textHtml(help[role])}</p>`:'')+
       (infoPinned && count>1 && sameSlot(selectedItem,slot)?button(selectedItem?.quantity?`数量 ${selectedItem.quantity}`:'指定数量','transfer-amount'):'');
   }
   if (quickInfo.innerHTML!==html) quickInfo.innerHTML=html;
@@ -815,14 +1056,14 @@ function transferSlot(source:Selection,target:Slot) {
   return submit({op:Op.Transfer,a:source.tile,b:tile,c:item,
     words:[source.quantity ?? 2147483647,source.identity,identity,source.role==='module'||role==='module'?3:source.role==='input'?1:2]},quantity=>{
     selectedItem=undefined;
-    say(`${role==='module'?'已安装':role==='input'?'已送入':'已收取'} ${ITEM[item]} ×${quantity}`);
+    say(t(role==='module'?'ui.installed':role==='input'?'ui.inserted':'ui.received',{item:ITEM[item],count:quantity}));
   });
 }
 
 function takeCargo(tile:number,lane:number,item:number,cargoId:number,identity:number) {
   return submit({op:Op.TakeCargo,a:tile,b:lane,c:item,words:[cargoId,identity]},()=>{
     selectedItem=undefined;
-    say(`已收取 ${ITEM[item]} ×1`);
+    say(t('ui.received',{item:ITEM[item],count:1}));
   });
 }
 
@@ -840,16 +1081,18 @@ function activateSlot(anchor:HTMLButtonElement) {
 
 const rendered=new WeakMap<HTMLElement,string>();
 function fill(element:HTMLElement,html:string) {
-  if (rendered.get(element)===html || harvest.protects(element,html)) return;
+  if (rendered.get(element)===html || harvest.protects(element,html) || handcraft.protects(element,html)) return;
   rendered.set(element,html);
   const active=document.activeElement as HTMLElement | null;
   const key=active && element.contains(active)?active.dataset.quick:undefined;
+  const recipeFocused=active && element.contains(active) && active.closest('.handcraft-recipe');
   element.innerHTML=html;
   if (key) element.querySelector<HTMLButtonElement>(`[data-quick="${key}"]`)?.focus({preventScroll:true});
+  else if (recipeFocused) element.querySelector<HTMLButtonElement>('[data-action="toggle-handcraft"]')?.focus({preventScroll:true});
 }
 
-function renderBalances(stage:number) {
-  const items=stage===Stage.Gather?[]:knownItems(data).filter(item=>item>0);
+function renderBalances() {
+  const items=knownItems(data).filter(item=>item>0);
   const key=items.join(',');
   if (key!==balanceItems) {
     fill(balances,items.length?items.map(item=>itemSlot('held',item,held(data,item))).join('')+
@@ -858,9 +1101,9 @@ function renderBalances(stage:number) {
   }
   const capacity=byId('backpack-capacity');
   if (capacity) {
-    const label=`背包 ${limits.used}/${limits.slots} 格`;
+    const label=t('ui.backpack',{used:limits.used,slots:limits.slots});
     if (capacity.textContent!==label) capacity.textContent=label;
-    capacity.title=`每格最多 ${limits.stack} 件，同种物品自动堆叠`;
+    capacity.title=t('ui.individualStacks');
     capacity.dataset.full=String(limits.used>=limits.slots);
   }
   for (const slot of balances.querySelectorAll<HTMLButtonElement>('[data-item]')) {
@@ -878,25 +1121,17 @@ function renderBalances(stage:number) {
 
 function refresh(force=true) {
   if (!ready) return;
-  const stage=data[Meta.Stage], opening=stage<Stage.Expand;
-  app.dataset.opening=String(opening);
-  renderBalances(stage);
+  renderBalances();
   byId('clock').textContent=time(data[Meta.Tick]);
-  const activePage=inspectingTile && tool===undefined?'view':mode;
+  const activePage=guideOpen?'guide':operationPage();
   for (const nav of document.querySelectorAll<HTMLButtonElement>('.mode')) {
     nav.hidden=!modeAvailable(nav.dataset.mode as Mode);
     nav.setAttribute('aria-pressed',String(nav.dataset.mode===activePage));
   }
   if (force || (!panelPointer && performance.now()-lastPanelRender>220)) {
-    lesson.hidden=!opening || stage===Stage.Gather || tool!==undefined;
-    if (!lesson.hidden) {
-      const [title,detail,...choices]=workshopLesson(data);
-      const html=`<strong>${title}</strong><p>${detail}</p>`+lessonButtons(choices);
-      fill(lesson,html);
-    } else if (!opening && lesson.childElementCount) fill(lesson,'');
     const [tag,title,html,tools='',tabs='']=inspectors();
     byId('panel-tag').textContent=tag; byId('panel-title').textContent=title;
-    fill(byId('panel-tools'),tools);
+    fill(byId('panel-tools'),tools+(activePage==='view'?button(t(manualWork?'ui.inspect':'ui.handcraft'),'manual-work'):''));
     panelTabs.hidden=!tabs;
     fill(panelTabs,tabs);
     fill(panelBody,html);
@@ -927,16 +1162,20 @@ function traceCargo() {
   const seen=new Set<number>();
   let loop=false;
   for (let i=0;i<W*H;i++) {
-    const kind=cell(data,current,Field.Kind), dir=cell(data,current,Field.Direction);
+    const kind=occupiedKind(data,current), dir=cell(data,current,Field.Direction);
+    const outlet=!isTransport(kind) && kind>0?[...footprint(current,kind,dir)].find(tile=>machineMasks(data,tile)>>4):undefined;
+    if (!isTransport(kind) && outlet===undefined) break;
+    if (outlet!==undefined) current=outlet;
     const key=current*2+lane;
     if (seen.has(key)) { loop=true; break; }
     seen.add(key);
-    const flow=(dir+(kind===Kind.Crossing?lane:0))%4;
+    const outputMask=machineMasks(data,current)>>4;
+    const flow=outlet===undefined?(dir+(kind===Kind.Crossing?lane:0))%4:31-Math.clz32(outputMask & -outputMask);
     chain.push([current,flow]);
     const [x,y]=xy(current),[dx,dy]=STEP[flow];
     const next=at(x+dx,y+dy);
     if (next<0) break;
-    const nextKind=cell(data,next,Field.Kind);
+    const nextKind=occupiedKind(data,next);
     if (isTransport(nextKind)) {
       const nextDirection=cell(data,next,Field.Direction);
       const lanes=design(nextKind)?.lanes ?? 0;
@@ -944,20 +1183,20 @@ function traceCargo() {
       while (inlet<lanes && !(transportPorts(nextKind,nextDirection,inlet).incoming&(1<<flow))) inlet++;
       if (inlet===lanes) break;
       lane=inlet;
-    }
+    } else if (nextKind && !(machineMasks(data,next)&(1<<flow))) break;
     current=next;
     if (!isTransport(nextKind)) break;
   }
   traced=chain; focus=current;
   renderer?.camera.focus(current);
-  const terminal=MACHINE[cell(data,current,Field.Kind)].name;
+  const terminal=MACHINE[occupiedKind(data,current)].name;
   say(loop?'该主路形成了回环':`主路终点 · ${terminal} · ${coordinates(current)}`);
 }
 
 function previewOnGrid(kind:Kind) {
   const origin=selected>=0 && cell(data,selected,Field.Grid)?selected:STATION;
   const group=cell(data,origin,Field.Grid);
-  const tile=nearest(origin,i=>!cell(data,i,Field.Kind) && group>0 && cell(data,i,Field.Grid)===group);
+  const tile=nearest(origin,i=>!occupiedKind(data,i) && group>0 && cell(data,i,Field.Grid)===group);
   previewAt(kind,tile);
 }
 
@@ -978,7 +1217,9 @@ function home() {
   const cam=renderer?.camera;
   if (!cam) return;
   const [x,y]=xy(data[Meta.FirstOre]);
-  cam.aim(x+.5,y+.5,data[Meta.Stage]<Stage.Expand?cam.width/6:28);
+  const zoom=data[Meta.Stage]<Stage.Expand?Math.min(cam.width/8,limits.maxZoom):28;
+  const drawerOffset=portraitDrawer.matches && panel.dataset.expanded==='true'?panel.offsetHeight/2:0;
+  cam.aim(x+.5,y+.5+drawerOffset/zoom,zoom);
 }
 
 function setSpeed(value:number) {
@@ -1050,13 +1291,6 @@ function onAction(action:string) {
     else editBlueprint(verb as 'rename'|'delete',id);
     return;
   }
-  if (action.startsWith('choose-tool-')) {
-    const kind=Number(action.slice(12));
-    if (!Number.isInteger(kind) || !MACHINE[kind] || !canBuild(kind)) return;
-    if (kind===Kind.SimpleMiner && !data[Meta.Packed]) onAction('craft-miner');
-    else choose(kind);
-    return;
-  }
   const cam=renderer?.camera;
   const ore=data[Meta.FirstOre];
   const region=/^(line|site|sender|receiver|lastmile|cable|window)-(\d)(?:-(\d))?$/.exec(action);
@@ -1073,34 +1307,25 @@ function onAction(action:string) {
     if (verb==='sender' || verb==='receiver') {
       clearDraft(); mode='view'; selected=v(verb==='sender'?CityField.Sender:CityField.Receiver); cam?.focus(selected); focus=selected; setPanel(true); refresh();
     }
-    if (verb==='lastmile') {cam?.focus(v(CityField.Receiver)+2); choose(Kind.Belt,v(CityField.Receiver)); anchors.push(v(CityField.Site)); updateDraft();}
+    if (verb==='lastmile') {
+      cam?.focus(v(CityField.Receiver)+2);
+      choose(Kind.Belt,v(CityField.Receiver));
+      if (tool===Kind.Belt && !pending) { beltStarted=true; extendBelt(v(CityField.Site)); updateDraft(); }
+    }
     if (verb==='cable') {cam?.focus(v(CityField.Site)); choose('wire',v(CityField.Site));}
     if (verb==='window') submit({op:Op.Trial,a:city,b:Number(program)},()=>say('照明窗口已排定'));
     return;
   }
   switch (action) {
     case 'home': home(); return;
-    case 'ore-action': tap(ore); return;
-    case 'craft-miner': submit({op:Op.CraftMiner},()=>choose(Kind.SimpleMiner)); return;
-    case 'site-miner': choose(Kind.SimpleMiner); return;
-    case 'handwork': submit({op:Op.Handwork}); return;
-    case 'site-bench': choose(Kind.Bench,ore+2); return;
-    case 'first-belt': choose(Kind.Belt,ore+1); return;
-    case 'new-depot': {
-      const bench=firstMachine(data,Kind.Bench), [x,y]=xy(bench), [dx,dy]=STEP[cell(data,bench,Field.Direction)];
-      previewAt(Kind.Depot,at(x+dx-dy,y+dy+dx)); return;
-    }
-    case 'second-belt': choose(Kind.Belt,firstMachine(data,Kind.Bench)); return;
-    case 'new-drill': previewAt(Kind.IndustrialMiner,nearest(ore,i=>!cell(data,i,Field.Kind) && cell(data,i,Field.Ore)===1)); return;
-    case 'new-generator': previewAt(Kind.Generator,nearest(ore,i=>cell(data,i,Field.Ore)===3)+1); return;
-    case 'connect-drill': {
-      choose('wire',firstMachine(data,Kind.Generator)); anchors.push(firstMachine(data,Kind.IronDrill)); updateDraft(); return;
-    }
-    case 'new-grinder': case 'new-assembler': case 'new-calibrator': case 'new-press': {
-      const kind={'new-grinder':Kind.Grinder,'new-assembler':Kind.Assembler,'new-calibrator':Kind.Calibrator,'new-press':Kind.KitPress}[action];
+    case 'close-guide': closeGuide(); return;
+    case 'manual-work': selectMode('view',!manualWork); return;
+    case 'toggle-handcraft': handcraftExpanded=!handcraftExpanded; refresh(); return;
+    case 'new-press': {
+      const kind=Kind.KitPress;
       const existing=firstMachine(data,kind);
       if (existing>=0) { cam?.focus(existing); selected=existing; mode='view'; setPanel(true); refresh(); }
-      else previewAt(kind,nearest(ore,i=>!cell(data,i,Field.Kind) && !cell(data,i,Field.Ore) && cell(data,i,Field.Wire)>0));
+      else previewAt(kind,nearest(ore,i=>!occupiedKind(data,i) && !cell(data,i,Field.Ore) && cell(data,i,Field.Wire)>0));
       return;
     }
     case 'zoom-in': if (cam) cam.scale(cam.width/2,cam.height/2,1.25); return;
@@ -1139,12 +1364,14 @@ function onAction(action:string) {
     }
     case 'dismiss-quantity': transferDialog.close(); return;
     case 'turn-path': verticalFirst=!verticalFirst; updateDraft(); return;
-    case 'back-path': anchors.pop(); updateDraft(); return;
+    case 'back-path': confirmTransport=0; anchors.pop(); beltFacing=false; pathMessage=''; updateDraft(); return;
     case 'rotate-draft': rotateDraft(); return;
     case 'confirm-draft': confirmDraft(); return;
     case 'cancel-draft': {
+      if (tool!==undefined && pending) return;
       const returnToLibrary=tool==='capture' || tool==='stamp';
       clearDraft();
+      closeInfo();
       if (returnToLibrary) { mode='build'; buildTab='blueprints'; setPanel(true); }
       refresh(); return;
     }
@@ -1165,6 +1392,7 @@ function onAction(action:string) {
     case 'reset-confirm': byId('reset-warning').hidden=false; return;
     case 'reset': {
       clearDraft(); closeInfo(); selectedItem=undefined; selected=-1; focus=-1; traced=[]; mode='task'; recenter=true;
+      guideOpen=false;
       buildTab='catalog';
       worker.postMessage({type:'reset'}); worker.postMessage({type:'save'}); dialog.close(); return;
     }
@@ -1178,11 +1406,14 @@ document.addEventListener('click',event=>{
   if (!el || el.disabled || !ready) return;
   if (el.dataset.slot) activateSlot(el);
   else if (el.dataset.tool) {
+    const next=el.dataset.tool==='wire'?'wire':Number(el.dataset.tool);
+    if (tool===next) { onAction('cancel-draft'); return; }
+    if (el.dataset.unavailable!=='true') choose(next,selected,true);
     revealInfo(el,true);
-    if (event.detail===0) quickInfo.querySelector('button')?.focus();
   }
   else if (el.dataset.mode) selectMode(el.dataset.mode as Mode);
   else if (el.dataset.buildTab==='catalog' || el.dataset.buildTab==='blueprints') {
+    if (el.dataset.buildTab!==buildTab && catalogTool && !pending) clearDraft();
     buildTab=el.dataset.buildTab; refresh();
     panelTabs.querySelector<HTMLButtonElement>('[aria-pressed="true"]')?.focus({preventScroll:true});
     panelBody.scrollTop=0;
@@ -1193,6 +1424,11 @@ document.addEventListener('click',event=>{
   }
   else if (el.dataset.action) onAction(el.dataset.action);
   else if (el.dataset.fault) { selected=Number(el.dataset.fault); inspectingTile=true; focus=selected; renderer?.camera.focus(selected); refresh(); }
+});
+app.addEventListener('contextmenu',event=>{
+  if (tool===undefined || event.button!==2 || event instanceof PointerEvent && event.pointerType==='touch') return;
+  event.preventDefault();
+  onAction('cancel-draft');
 });
 document.addEventListener('pointerover',event=>{
   const anchor=(event.target as Element).closest<HTMLButtonElement>('[data-quick]');
@@ -1218,6 +1454,7 @@ window.addEventListener('blur',()=>{panelPointer=false;});
 
 window.addEventListener('keydown',event=>{
   if (blueprintDialog.open || transferDialog.open) return;
+  if (event.key==='Escape' && guideOpen && !dialog.open) { closeGuide(); return; }
   if (event.key==='Escape' && (infoKey || infoTile>=0 || selectedItem)) {
     closeInfo(); selectedItem=undefined; refresh(); return;
   }
@@ -1226,14 +1463,16 @@ window.addEventListener('keydown',event=>{
   if (event.key==='Enter' && tool!==undefined) { event.preventDefault(); confirmDraft(); }
   if (event.key.toLowerCase()==='r' && tool!==undefined) onAction('rotate-draft');
   const key=Number(event.key);
-  if (key>=1 && key<=5) selectMode((['view','build','power','orbit','task'] as const)[key-1]);
+  if (key>=1 && key<=6) selectMode((['view','build','power','orbit','task','guide'] as const)[key-1]);
   if (event.key===' ' || event.key==='p') { event.preventDefault(); setSpeed(speed?0:1); }
   const pan:Record<string,[number,number]>={ArrowLeft:[30,0],ArrowRight:[-30,0],ArrowUp:[0,30],ArrowDown:[0,-30]};
   if (pan[event.key]) { event.preventDefault(); renderer?.camera.pan(...pan[event.key]); }
 });
 
 function reportSaveError(reason:string) {
-  byId('save-status').textContent=reason;
+  const status=byId('save-status');
+  delete status.dataset.i18n;
+  status.textContent=reason;
   say(reason,true);
 }
 
@@ -1248,13 +1487,16 @@ saveFile.addEventListener('change',async()=>{
 
 worker.onmessage=event=>{
   const message=event.data;
-  if (message.type==='error') { fail(message.message); return; }
+  if (message.type==='error') { fail(message.key?t(message.key):message.message); return; }
   if (message.type==='directory') { readDirectory(message.buffer); return; }
   if (message.type==='blueprints') { blueprints=readBlueprints(message.buffer); refresh(); return; }
   if (message.type==='transport-preview') {
     if (transportPreview && transportPreview.request===message.request) {
       transportPreview.result=new Int32Array(message.result);
+      const shouldConfirm=confirmTransport===message.request;
+      if (shouldConfirm) confirmTransport=0;
       updateDraft();
+      if (shouldConfirm && transportPreview.request===message.request) confirmDraft();
     }
     return;
   }
@@ -1294,11 +1536,10 @@ worker.onmessage=event=>{
     if (ready && previous instanceof ArrayBuffer) worker.postMessage({type:'recycle',buffer:previous},[previous]);
     if (!ready) {
       ready=true; loading.hidden=true; app.setAttribute('aria-busy','false');
-      setPanel(window.matchMedia('(min-width: 901px) and (min-height: 521px)').matches);
+      setPanel(data[Meta.Stage]<Stage.Expand || window.matchMedia('(min-width: 901px) and (min-height: 521px)').matches);
       refresh();
       if (legacyCleanup) worker.postMessage({type:'save'});
     } else {
-      if (oldStage<Stage.Expand && data[Meta.Stage]>=Stage.Expand) { mode='task'; selected=-1; setPanel(true); }
       refresh(message.immediate || oldStage!==data[Meta.Stage]);
     }
     if (recenter) { home(); recenter=false; }
@@ -1322,21 +1563,26 @@ worker.onmessage=event=>{
         try { clearLegacyBlueprint(); } catch { /* The saved migration marker prevents duplicates. */ }
         legacyCleanup=false;
       }
-      byId('save-status').textContent='进度已保存到此浏览器。';
+      const status=byId('save-status');
+      delete status.dataset.i18n;
+      status.textContent='进度已保存到此浏览器。';
       if (requested) say('进度已保存');
     }).catch(()=>{
-      byId('save-status').textContent='浏览器未能保存进度，可从这里导出存档。';
+      const status=byId('save-status');
+      delete status.dataset.i18n;
+      status.textContent='浏览器未能保存进度，可从这里导出存档。';
       if (requested) say('本地保存失败，可导出文件。',true);
     });
     return;
   }
   if (message.type==='restored') {
     clearDraft(); closeInfo(); selectedItem=undefined; mode='task'; focus=-1; selected=-1; traced=[]; recenter=true;
+    guideOpen=false;
     buildTab='catalog';
     worker.postMessage({type:'save'}); dialog.close(); say('已恢复存档'); return;
   }
   if (message.type==='invalid-save') {
-    const reason=message.startup?'本地存档损坏或版本不兼容，已开始新战役。':'导入失败，存档损坏或版本不兼容。当前战役可继续。';
+    const reason=message.status===-25?ERRORS[-25]:t(message.startup?'ui.invalidAutoSave':'ui.invalidSave');
     reportSaveError(reason);
   }
 };
@@ -1351,52 +1597,16 @@ const mapLabels=[
   byId('map-labels').append(element); return {...label,element};
 });
 
-function showOreAction(stage:number,tile:number,stock:number) {
-  if (stage<Stage.Mining) {
-    if (oreAction.dataset.slot) {
-      for (const key of ['slot','item','tile','count','quick','identity','capacity','put','take','selectedCount']) delete oreAction.dataset[key];
-      oreAction.classList.remove('item-slot');
-      oreAction.removeAttribute('aria-pressed');
-      oreAction.removeAttribute('aria-label');
-    }
-    if (stage===Stage.PlaceMiner) {
-      delete oreAction.dataset.gather;
-      oreAction.classList.remove('harvest-button');
-      if (oreAction.textContent!=='选择此矿点') oreAction.textContent='选择此矿点';
-    } else if (oreAction.dataset.gather!==String(tile)) {
-      oreAction.dataset.gather=String(tile);
-      oreAction.classList.add('harvest-button');
-      oreAction.innerHTML='长按采集'+harvestMeter;
-    }
-    return;
-  }
-  delete oreAction.dataset.gather;
-  oreAction.classList.remove('harvest-button');
-  const device=deviceAt(data,tile), output=device?.slots.find(slot=>slot.role==='output' && slot.item===1);
-  if (oreAction.dataset.count!==String(stock) || Number(oreAction.dataset.tile)!==tile || Number(oreAction.dataset.identity)!==device?.identity) {
-    Object.assign(oreAction.dataset,{slot:'output',item:'1',tile:String(tile),count:String(stock),quick:slotKey('output',1,tile),
-      identity:String(device?.identity ?? 0),capacity:String(output?.capacity ?? -1),put:'false',take:String(output?.canTake ?? false)});
-    oreAction.classList.add('item-slot');
-    oreAction.setAttribute('aria-label',slotLabel('output',1,stock));
-    oreAction.innerHTML=slotArt(1,stock);
-  }
-  const pressed=String(slotSelected('output',1,tile));
-  if (oreAction.getAttribute('aria-pressed')!==pressed) oreAction.setAttribute('aria-pressed',pressed);
-  const amount=String(amountBadge('output',1,tile) ?? '');
-  if (oreAction.dataset.selectedCount!==amount) oreAction.dataset.selectedCount=amount;
-}
-
 function draw(now:number) {
   harvest.tick(now);
+  handcraft.tick(now);
   if (renderer) {
     if (ready) {
-      const tile=data[Meta.FirstOre], [x,y]=xy(tile), cam=renderer.camera;
-      const [sx,sy]=cam.toScreen(x+.5,y+.5);
-      const stage=data[Meta.Stage], stock=contents(data,tile,1);
-      oreAction.hidden=stage>=Stage.Expand || tool!==undefined || sx<30 || sx>cam.width-30 || sy<0 || sy>cam.height-70;
-      if (!oreAction.hidden) {
-        showOreAction(stage,tile,stock);
-        oreAction.style.transform=`translate(${sx}px,${sy+cam.zoom*.63}px) translateX(-50%)`;
+      const cam=renderer.camera, tile=harvest.mapTile();
+      mapHarvest.hidden=tile===undefined;
+      if (tile!==undefined) {
+        const [x,y]=xy(tile), [sx,sy]=cam.toScreen(x+.5,y+.5);
+        mapHarvest.style.transform=`translate(${sx}px,${sy+cam.zoom*.63}px) translateX(-50%)`;
       }
       gain.hidden=now>=gainUntil;
       if (!gain.hidden) {
@@ -1404,7 +1614,7 @@ function draw(now:number) {
         gain.style.transform=`translate(${px}px,${py-18+(gainUntil-now)/65}px) translateX(-50%)`;
       }
       renderer.render({data,mode,preview:ghost.cells,selected,focus,trace:traced,now,tick:data[Meta.Tick]+animationPhase(now),
-        chip:gainTile===tile && !gain.hidden && stage<=Stage.Craft?(gainUntil-now)/750:0});
+        chipTile:gainTile,chip:gain.hidden?0:(gainUntil-now)/750});
     }
     for (const {name,x,y,stage,element} of mapLabels) {
       const [sx,sy]=renderer.camera.toScreen(x,y);
@@ -1418,6 +1628,8 @@ function draw(now:number) {
   requestAnimationFrame(draw);
 }
 
+applyTranslations();
+
 try {
   renderer=new Renderer(canvas);
   bindMapInput(canvas,renderer.camera,{
@@ -1425,20 +1637,22 @@ try {
     inspect:inspectMap,
     canRotateDraft,
     rotateDraft,
-    startHarvest:(tile,pointer)=>{
-      if (data[Meta.Stage]<=Stage.Craft && tile===data[Meta.FirstOre]) harvest.start(tile,undefined,pointer);
-    },
+    canRotateAt:tile=>!pending && canRotateDraft() && overlapsDraft(tile),
+    rotateAt,
+    startHarvest:(tile,pointer)=>harvest.start(tile,undefined,pointer),
     stopHarvest:harvest.stop,
-    canDragRoute:()=>plainBelt(tool)||tool==='wire',
-    route:(from,to)=>{ anchors=from===to?[from]:[from,to]; updateDraft(); },
+    canDragRoute:()=>!pending && (plainBelt(tool) || tool==='wire'),
+    startRoute:startPathDrag,
+    route:drawPath,
+    finishRoute:finishPathDrag,
   });
   const legacy=legacyBlueprint();
   const url=new URL(`${import.meta.env.BASE_URL}sim.wasm`,document.baseURI).href;
   void resumeSave().then(
-    save=>worker.postMessage({type:'init',url,save,legacy}),
+    save=>worker.postMessage({type:'init',url,signature:content.signature,save,legacy}),
     error=>reviewScene
       ? fail(error instanceof Error ? error.message : '无法载入视觉评审场景。')
-      : worker.postMessage({type:'init',url,legacy}),
+      : worker.postMessage({type:'init',url,signature:content.signature,legacy}),
   );
   window.setInterval(()=>{ if (ready && !document.hidden) worker.postMessage({type:'save'}); },8000);
   document.addEventListener('visibilitychange',()=>{

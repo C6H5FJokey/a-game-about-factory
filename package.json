@@ -4,16 +4,22 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "wasm": "node scripts/build-wasm.mjs",
+    "content": "node scripts/content.mjs --frontend",
+    "wasm": "npm run content && node scripts/build-wasm.mjs",
     "dev": "npm run wasm && vite --host 127.0.0.1",
     "review:visual": "npm run wasm && node scripts/smoke-sim.mjs --capture-visual-review && vite --mode visual-review --host 127.0.0.1",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "npm run content && tsc --noEmit",
     "test:sim": "node scripts/smoke-sim.mjs",
+    "test:content": "node scripts/test-content.mjs",
+    "test:bundle": "node scripts/content.mjs --verify-wasm dist/sim.wasm",
     "build": "npm run wasm && npm run typecheck && vite build --base=./",
     "preview": "vite preview --host 127.0.0.1"
   },
   "devDependencies": {
     "typescript": "5.9.2",
     "vite": "6.4.1"
+  },
+  "dependencies": {
+    "i18next": "25.6.3"
   }
 }

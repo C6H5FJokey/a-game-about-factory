@@ -2,6 +2,11 @@ name: GitHub Pages
 
 on:
   workflow_dispatch:
+    inputs:
+      content_config:
+        description: Content config path relative to the repository for a custom dataset
+        required: false
+        type: string
   push:
     branches: [main]
 
@@ -17,6 +22,8 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      DAYBREAK_CONTENT_CONFIG: ${{ inputs.content_config || '' }}
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -29,7 +36,9 @@ jobs:
       - run: rustup target add wasm32-unknown-unknown
       - run: npm ci
       - run: npm run build
+      - run: npm run test:bundle
       - run: npm run test:sim
+        if: ${{ !inputs.content_config }}
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v4
         with:

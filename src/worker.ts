@@ -6,10 +6,11 @@ type Kernel = WebAssembly.Exports & {
   directory():number; blueprints():number;
   preview_transports(len:number):number;
   reset():void; step(ticks:number):void; max_speed():number;
+  content_signature():number;
   command(op:number,a:number,b:number,c:number,len:number):number;
   save():number; restore(len:number):number;
 };
-type Message = { type:'init'; url:string; save?:unknown; legacy?:number[] } | { type:'command'; data:Command } |
+type Message = { type:'init'; url:string; signature:number; save?:unknown; legacy?:number[] } | { type:'command'; data:Command } |
   { type:'speed'; speed:number } | { type:'recycle'; buffer:ArrayBuffer } |
   { type:'restore'; buffer:ArrayBuffer } | { type:'reset' } | { type:'save' } |
   { type:'transport-preview'; request:number; words:number[] };
@@ -52,19 +53,25 @@ function snapshot(immediate=false) {
 }
 
 function restoreSave(buffer:unknown) {
-  if (!kernel || !(buffer instanceof ArrayBuffer) || buffer.byteLength%4!==0) return false;
+  if (!kernel || !(buffer instanceof ArrayBuffer) || buffer.byteLength%4!==0) return -1;
   const words=new Int32Array(buffer);
-  return input(words) && kernel.restore(words.length)>0;
+  return input(words) ? kernel.restore(words.length) : -1;
 }
 
-async function boot(url:string, save?:unknown, legacy?:number[]) {
+async function boot(url:string, signature:number, save?:unknown, legacy?:number[]) {
   try {
     const file = await fetch(url);
     if (!file.ok) throw new Error(`模拟文件加载失败 (${file.status})`);
     const result = await WebAssembly.instantiate(await file.arrayBuffer());
-    kernel = result.instance.exports as Kernel;
-    if (save!==undefined && !restoreSave(save)) {
-      worker.postMessage({type:'invalid-save',startup:true});
+    const loaded = result.instance.exports as Kernel;
+    if (typeof loaded.content_signature !== 'function' || (loaded.content_signature() >>> 0) !== signature) {
+      worker.postMessage({type:'error',key:'ui.sameContentRequired'});
+      return;
+    }
+    kernel = loaded;
+    if (save!==undefined) {
+      const status=restoreSave(save);
+      if (status<0) worker.postMessage({type:'invalid-save',startup:true,status});
     }
     if (legacy && input(legacy) && kernel.command(Op.MigrateBlueprint,0,0,0,legacy.length)>0) {
       worker.postMessage({type:'legacy-imported'});
@@ -89,7 +96,7 @@ async function boot(url:string, save?:unknown, legacy?:number[]) {
 
 worker.onmessage = event => {
   const message = event.data;
-  if (message.type === 'init') { void boot(message.url,message.save,message.legacy); return; }
+  if (message.type === 'init') { void boot(message.url,message.signature,message.save,message.legacy); return; }
   if (!kernel) return;
   switch (message.type) {
     case 'speed': {
@@ -119,9 +126,9 @@ worker.onmessage = event => {
       return;
     }
     case 'restore': {
-      const ok = restoreSave(message.buffer);
-      worker.postMessage({type:ok ? 'restored' : 'invalid-save'});
-      if (ok) { speed=Math.min(speed,kernel.max_speed()); publishBlueprints(); snapshot(true); }
+      const status = restoreSave(message.buffer);
+      worker.postMessage({type:status>0 ? 'restored' : 'invalid-save',status});
+      if (status>0) { speed=Math.min(speed,kernel.max_speed()); publishBlueprints(); snapshot(true); }
       return;
     }
     case 'reset': kernel.reset(); speed=Math.min(speed,kernel.max_speed()); publishBlueprints(); snapshot(true); return;
