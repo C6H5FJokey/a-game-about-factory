@@ -1,4 +1,4 @@
-import { FIRST_GAP, Field, H, Kind, Meta, STEP, W, at, cell, xy, type Mode, type PreviewCell } from './model';
+import { CityField, Field, H, Kind, Meta, Stage, STEP, W, at, cell, cityValue, xy, type Mode, type PreviewCell } from './model';
 
 type Color = [number,number,number,number];
 const rgba = (r:number,g:number,b:number,a=1):Color => [r/255,g/255,b/255,a];
@@ -61,7 +61,7 @@ export class Camera {
   private limit() { this.x=Math.max(0,Math.min(W,this.x)); this.y=Math.max(0,Math.min(H,this.y)); }
 }
 
-type Scene = { data:Int32Array; mode:Mode; preview:PreviewCell[]; selected:number; focus:number; trace:number[]; now:number; snapshotAt:number; speed:number; };
+type Scene = { data:Int32Array; mode:Mode; preview:PreviewCell[]; selected:number; focus:number; trace:number[]; now:number; snapshotAt:number; speed:number; chip:number; };
 
 export class Renderer {
   readonly camera = new Camera();
@@ -182,7 +182,9 @@ export class Renderer {
       case Kind.Assembler:
       case Kind.KitPress:
       case Kind.Depot: B(0,0,.62,.55,mark,4); B(0,0,.46,.40,ink,4); B(0,0,.23,.21,mark,4); break;
-      case Kind.Smelter:
+      case Kind.Yard:
+        B(0,.12,.73,.13,grey); B(-.2,-.07,.24,.24,amber,1); B(.12,-.07,.24,.24,amber,1); break;
+      case Kind.Bench: case Kind.Smelter:
         B(0,.19,.57,.1,mark,1); B(0,-.19,.57,.1,mark,1); B(0,0,.19,.31,mark,1); break;
       default:
         B(-.12,0,.24,.42,mark,1); B(.15,-.06,.22,.37,mark,0,-.3); B(.25,.22,.13,.09,mark); break;
@@ -221,8 +223,8 @@ export class Renderer {
     const sun=data[Meta.Sun], orbit=mode==='orbit';
     this.box(W/2,H/2,W,H,rgba(14,26,35));
     if (sun || orbit) {
-      const x=sun ? 39+Math.sin(data[Meta.Tick]/95)*4 : 45;
-      for (let i=10;i>=0;i--) this.box(x,16,6+i*.7,60,rgba(250,173,75,sun?.019:.01),0,.37);
+      const x=sun ? data[Meta.BeamX100]/100 : 45;
+      for (let i=10;i>=0;i--) this.box(x,16,3+i*.6,60,rgba(250,173,75,sun?.026:.01));
     }
     for (let x=left;x<=right;x++) this.stroke(x,top,x,bottom,x%5===0?.044:.025,x%5===0?frame:line);
     for (let y=top;y<=bottom;y++) this.stroke(left,y,right,y,y%5===0?.044:.025,y%5===0?frame:line);
@@ -230,7 +232,28 @@ export class Renderer {
       const x=(i*107%499)/10+2.4,y=(i*41%311)/10+1.2;
       this.box(x,y,1.4+i%3*.5,.6,rgba(91,126,133,.12),3,i%2*.54);
     }
-    this.drawCity(Boolean(data[Meta.FirstLight]),Boolean(sun),orbit);
+    if (data[Meta.Stage]>=Stage.Launch) this.drawCity(Boolean(data[Meta.FirstLight]),Boolean(sun),orbit);
+    const finale=data[Meta.VictoryTicks];
+    if (data[Meta.Stage]>=Stage.Valley) for (const city of [1,2]) {
+      if (city===2 && data[Meta.Stage]<Stage.Highland) break;
+      const site=cityValue(data,city,CityField.Site), [x,y]=xy(site), lit=(data[Meta.LitMask] & (1<<city))!==0;
+      const litNow=lit && (finale<0 || finale>city*30);
+      this.box(x+.5,y-4,6.3,4.9,rgba(30,45,52),4);
+      for (let row=0;row<3;row++) for (let col=0;col<4;col++) {
+        const bx=x-1.4+col*1.2,by=y-5.3+row*1.15;
+        this.box(bx,by,.87,.73,frame,1); this.box(bx,by,.46,.18,litNow?amber:grey,1);
+      }
+      const send=cityValue(data,city,CityField.Sender), receive=cityValue(data,city,CityField.Receiver);
+      if (cell(data,send,Field.Kind)!==Kind.Yard) continue;
+      const [sx,sy]=xy(send),[ex,ey]=xy(receive);
+      if (orbit || focus===send || focus===receive) {
+        for(let n=0;n<24;n+=2) this.stroke(sx+.5+(ex-sx)*n/24,sy+.5+(ey-sy)*n/24,sx+.5+(ex-sx)*(n+1)/24,sy+.5+(ey-sy)*(n+1)/24,.06,grey);
+      }
+      const eta=cityValue(data,city,CityField.Arrival);
+      if (eta>=0) {
+        const t=1-eta/data[Meta.Travel]; this.box(sx+.5+(ex-sx)*t,sy+.5+(ey-sy)*t,.55,.4,amber,1);
+      }
+    }
 
     for (let y=top;y<bottom;y++) for (let x=left;x<right;x++) {
       const tile=y*W+x, kind=cell(data,tile,Field.Kind), ore=cell(data,tile,Field.Ore);
@@ -242,6 +265,16 @@ export class Renderer {
         this.box(x+.18,y+.19,.18,.20,color,kind?2:3);
         if (!kind) this.box(x+.55,y+.55,.31,.25,color,shapeForItem[ore]);
         if (!kind) this.box(x+.79,y+.34,.18,.20,color,shapeForItem[ore]);
+        if (tile===data[Meta.FirstOre] && !kind) {
+          for (const [ox,oy,size] of [[.23,.58,.34],[.46,.37,.43],[.65,.56,.36],[.78,.42,.24]]) {
+            this.box(x+ox,y+oy,size,size*.86,rgba(124,86,67),4,-.25);
+            this.box(x+ox-.03,y+oy-.05,size*.74,size*.48,rgba(224,173,132),3,-.24);
+          }
+          if (scene.chip>0) {
+            const drift=1-scene.chip;
+            this.box(x+.5+drift*.5,y+.3-Math.sin(drift*Math.PI)*.48,.16,.14,amber,3,drift*2);
+          }
+        }
       }
       if (kind===Kind.Belt || kind===Kind.Splitter) {
         this.box(x+.5,y+.5,.97,.74,frame,1,dir*Math.PI/2);
@@ -254,6 +287,14 @@ export class Renderer {
         if (c.zoom>=12 || x%3===0 || y%3===0) this.box(x+.5+dx*.20,y+.5+dy*.20,.22,.31,grey,5,dir*Math.PI/2);
       } else if (kind) {
         this.machine(kind,x+.5,y+.5,dir,cell(data,tile,Field.Status));
+        if (kind===Kind.SimpleMiner) {
+          const progress=cell(data,tile,Field.Progress)/data[Meta.MinerTicks];
+          const stroke=Math.sin(progress*Math.PI*4)*.08;
+          this.box(x+.45,y+.47+stroke,.16,.38,amber,4);
+          this.box(x+.82,y+.82,.38,.24,frame,1);
+          if (cell(data,tile,Field.Inventory)>0) this.box(x+.82,y+.79,.22,.18,mineral[1],4);
+          if (progress>.78) this.box(x+.53+(progress-.78)*1.2,y+.52+(progress-.78),.13,.13,mineral[1],4);
+        }
       }
     }
 
@@ -293,7 +334,6 @@ export class Renderer {
       this.box(x+.5-dy*.42,y+.5+dx*.42,.87,.07,cyan,0,cell(data,tile,Field.Direction)*Math.PI/2);
     }
     if (selected>=0) this.marker(selected,cyan,1.06);
-    if (data[Meta.Delivered]===0 && cell(data,FIRST_GAP,Field.Kind)===0) this.marker(FIRST_GAP,amber,1.07);
     for (const part of preview) {
       if (part.tile<0) continue;
       const [x,y]=xy(part.tile), color=part.conflict?red:amber;

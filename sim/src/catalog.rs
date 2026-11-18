@@ -20,6 +20,13 @@ pub const STATION: u8 = 13;
 pub const KIT_PRESS: u8 = 14;
 pub const SPLITTER: u8 = 15;
 pub const KILN: u8 = 16;
+pub const SIMPLE_MINER: u8 = 17;
+pub const BENCH: u8 = 18;
+pub const FREIGHT_YARD: u8 = 19;
+pub const MINER_COST: u32 = 5;
+pub const MINER_TICKS: u16 = 3 * HZ as u16;
+pub const MINER_CAPACITY: u16 = 8;
+pub const FIRST_ORE: usize = index(19, 16);
 
 pub const IRON: u8 = 1;
 pub const SILICA: u8 = 2;
@@ -31,12 +38,17 @@ pub const MIRROR: u8 = 7;
 pub const KIT: u8 = 8;
 
 pub const STATION_POS: usize = index(33, 15);
-pub const DEPOT_POS: usize = index(20, 13);
+pub const STATIONS: [usize; 3] = [STATION_POS, index(48, 29), index(9, 29)];
+pub const SENDERS: [usize; 2] = [index(34, 18), index(35, 18)];
+pub const RECEIVERS: [usize; 2] = [index(44, 29), index(5, 29)];
 pub const LAUNCH_TICKS: u32 = HZ * 8;
 pub const COUNTDOWN: u32 = HZ * 5;
 pub const WINDOW: u32 = HZ * 24;
 pub const BATTERY_CAPACITY: u32 = 24_000;
 pub const BATTERY_POWER: u16 = 40;
+pub const DELIVERY_WINDOW: u32 = 20 * HZ;
+pub const REQUIRED_BLOCKS: usize = 4;
+pub const REQUIRED_KITS: u32 = 12;
 
 pub const fn index(x: usize, y: usize) -> usize {
     y * W + x
@@ -58,6 +70,8 @@ pub fn is_belt(kind: u8) -> bool {
 
 pub fn cost(kind: u8) -> Option<u32> {
     Some(match kind {
+        BENCH => 2,
+        STATION => 8,
         BELT => 1,
         IRON_DRILL | SILICA_DRILL | FUEL_DRILL | DEPOT => 4,
         SMELTER | GRINDER | CALIBRATOR | SPLITTER | KIT_PRESS => 5,
@@ -77,6 +91,8 @@ pub struct Recipe {
 
 pub fn recipe(kind: u8) -> Option<Recipe> {
     let (input, output, amount, ticks, power) = match kind {
+        SIMPLE_MINER => ([(0, 0), (0, 0)], IRON, 1, MINER_TICKS, 0),
+        BENCH => ([(IRON, 1), (0, 0)], PLATE, 1, 30, 0),
         IRON_DRILL => ([(0, 0), (0, 0)], IRON, 1, 12, 10),
         SILICA_DRILL => ([(0, 0), (0, 0)], SILICA, 1, 10, 10),
         FUEL_DRILL => ([(0, 0), (0, 0)], FUEL, 1, 8, 10),
@@ -102,7 +118,9 @@ pub fn terrain(pos: usize) -> u8 {
     let y = pos / W;
     if matches!(
         (x, y),
-        (5, 13)
+        (19, 16)
+            | (22, 19)
+            | (5, 13)
             | (19, 28)
             | (28, 28)
             | (38, 26)
@@ -115,15 +133,24 @@ pub fn terrain(pos: usize) -> u8 {
     ) {
         return IRON;
     }
-    if matches!((x, y), (5, 20) | (4, 22) | (12, 30) | (46, 28)) {
+    if matches!((x, y), (20, 20) | (5, 20) | (4, 22) | (12, 30) | (46, 28)) {
         return SILICA;
     }
-    if matches!((x, y), (5, 7) | (8, 5) | (12, 5) | (39, 19)) {
+    if matches!((x, y), (23, 16) | (5, 7) | (8, 5) | (12, 5) | (39, 19)) {
         return FUEL;
     }
     0
 }
 
 pub fn permitted(kind: u8, pos: usize) -> bool {
+    if kind == STATION || STATIONS.contains(&pos) {
+        return STATIONS.contains(&pos) && kind == STATION;
+    }
+    if kind == FREIGHT_YARD {
+        return SENDERS.contains(&pos) || RECEIVERS.contains(&pos);
+    }
+    if kind == SIMPLE_MINER {
+        return terrain(pos) == IRON;
+    }
     !matches!(kind, IRON_DRILL..=FUEL_DRILL) || terrain(pos) == kind - 1
 }

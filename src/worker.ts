@@ -7,7 +7,7 @@ type Kernel = WebAssembly.Exports & {
   command(op:number,a:number,b:number,c:number,len:number):number;
   save():number; restore(len:number):number;
 };
-type Message = { type:'init'; url:string; save?:ArrayBuffer } | { type:'command'; data:Command } |
+type Message = { type:'init'; url:string; save?:unknown } | { type:'command'; data:Command } |
   { type:'speed'; speed:number } | { type:'recycle'; buffer:ArrayBuffer } |
   { type:'restore'; buffer:ArrayBuffer } | { type:'reset' } | { type:'save' };
 
@@ -35,20 +35,26 @@ function copyOutput(length:number, reusable = false) {
   return buffer;
 }
 
-function snapshot() {
+function snapshot(immediate=false) {
   if (!kernel) return;
   const buffer = copyOutput(kernel.snapshot(),true);
-  worker.postMessage({type:'snapshot',buffer},[buffer]);
+  worker.postMessage({type:'snapshot',buffer,immediate},[buffer]);
 }
 
-async function boot(url:string, save?:ArrayBuffer) {
+function restoreSave(buffer:unknown) {
+  if (!kernel || !(buffer instanceof ArrayBuffer) || buffer.byteLength%4!==0) return false;
+  const words=new Int32Array(buffer);
+  return input(words) && kernel.restore(words.length)>0;
+}
+
+async function boot(url:string, save?:unknown) {
   try {
     const file = await fetch(url);
     if (!file.ok) throw new Error(`模拟文件加载失败 (${file.status})`);
     const result = await WebAssembly.instantiate(await file.arrayBuffer());
     kernel = result.instance.exports as Kernel;
-    if (save && (!input(new Int32Array(save)) || kernel.restore(save.byteLength / 4) < 0)) {
-      worker.postMessage({type:'invalid-save'});
+    if (save!==undefined && !restoreSave(save)) {
+      worker.postMessage({type:'invalid-save',startup:true});
     }
     snapshot();
     previous = performance.now();
@@ -75,8 +81,8 @@ worker.onmessage = event => {
     case 'command': {
       const { op,a=0,b=0,c=0,words=[] } = message.data;
       const status = input(words) ? kernel.command(op,a,b,c,words.length) : -1;
-      worker.postMessage({type:'command-result',status});
       snapshot();
+      worker.postMessage({type:'command-result',status});
       return;
     }
     case 'save': {
@@ -85,12 +91,11 @@ worker.onmessage = event => {
       return;
     }
     case 'restore': {
-      const {buffer} = message;
-      const ok = buffer.byteLength % 4 === 0 && input(new Int32Array(buffer)) && kernel.restore(buffer.byteLength / 4) > 0;
+      const ok = restoreSave(message.buffer);
       worker.postMessage({type:ok ? 'restored' : 'invalid-save'});
-      if (ok) snapshot();
+      if (ok) snapshot(true);
       return;
     }
-    case 'reset': kernel.reset(); snapshot(); return;
+    case 'reset': kernel.reset(); snapshot(true); return;
   }
 };

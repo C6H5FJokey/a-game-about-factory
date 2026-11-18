@@ -7,7 +7,11 @@ use crate::world::Cell;
 pub struct Cargo {
     pub item: u8,
     pub ready: u32,
+    // 0 for stock, tile + 1 for a fresh product, RETIRED_SOURCE for a removed producer.
+    pub source: u16,
 }
+
+pub const RETIRED_SOURCE: u16 = N as u16 + 1;
 
 pub struct Segment {
     pub tiles: Vec<usize>,
@@ -17,13 +21,13 @@ pub struct Segment {
 }
 
 impl Segment {
-    pub fn push(&mut self, item: u8, pulse: u32) -> bool {
+    pub fn push(&mut self, cargo: Cargo, pulse: u32) -> bool {
         if self.queue.len() >= self.tiles.len() || self.last_insert == pulse {
             return false;
         }
         self.queue.push_back(Cargo {
-            item,
             ready: pulse + self.tiles.len() as u32,
+            ..cargo
         });
         self.last_insert = pulse;
         true
@@ -43,7 +47,10 @@ impl Belts {
         let mut incoming = vec![0u8; N];
         let mut previous = vec![None; N];
         for (i, cell) in cells.iter().enumerate() {
-            if !is_belt(cell.kind) && cell.kind != DEPOT && recipe(cell.kind).is_none() {
+            if !is_belt(cell.kind)
+                && !matches!(cell.kind, DEPOT | FREIGHT_YARD)
+                && recipe(cell.kind).is_none()
+            {
                 continue;
             }
             let targets = exits(i, cell);
@@ -91,12 +98,12 @@ impl Belts {
                 .filter_map(|(offset, &tile)| {
                     let stored = cargo[tile];
                     (stored.item > 0).then(|| Cargo {
-                        item: stored.item,
                         ready: if preserve_ready {
                             stored.ready
                         } else {
                             pulse + (len - offset) as u32
                         },
+                        ..stored
                     })
                 })
                 .collect();

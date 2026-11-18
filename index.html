@@ -8,12 +8,13 @@
     <title>把白昼送回去</title>
   </head>
   <body>
-    <div id="app" class="shell" aria-busy="true">
+    <div id="app" class="shell" data-opening="true" aria-busy="true">
       <header class="masthead">
-        <div class="brand"><span class="sunmark" aria-hidden="true"></span><div><h1>把白昼送回去</h1><span class="edition">曙港试照</span></div></div>
-        <div class="balances" aria-label="建造库存">
-          <div class="balance"><span class="resource plate" aria-hidden="true"></span><span>结构件</span><strong id="plate-count">—</strong></div>
-          <div class="balance"><span class="resource kit" aria-hidden="true"></span><span>套件</span><strong id="kit-count">—</strong></div>
+        <div class="brand"><span class="sunmark" aria-hidden="true"></span><h1>把白昼送回去</h1></div>
+        <div class="balances" aria-label="持有物资">
+          <div class="balance" id="iron-balance" hidden><span class="resource" aria-hidden="true"></span><span>铁矿</span><strong id="iron-count">0</strong></div>
+          <div class="balance" id="plate-balance" hidden><span class="resource plate" aria-hidden="true"></span><span>结构件</span><strong id="plate-count">0</strong></div>
+          <div class="balance" id="kit-balance" hidden><span class="resource kit" aria-hidden="true"></span><span>套件</span><strong id="kit-count">0</strong></div>
         </div>
         <button class="button quiet archive" type="button" data-action="archive">档案</button>
       </header>
@@ -23,6 +24,9 @@
           <canvas id="world" aria-label="曙港矿区的可编辑工厂地图"></canvas>
           <div class="map-heading"><div class="sector"><span></span> 曙港矿区</div><div id="map-layer" class="map-layer">货流视图</div></div>
           <div id="map-labels" class="map-labels" aria-hidden="true"></div>
+          <button id="ore-action" type="button" class="button local-action" data-action="ore-action" hidden></button>
+          <span id="ore-gain" class="ore-gain" aria-live="polite" hidden></span>
+          <div id="lesson" class="lesson" hidden></div>
           <div id="notice" class="notice" role="status" hidden></div>
           <div class="map-controls" aria-label="镜头控制">
             <button class="button square" type="button" data-action="home" aria-label="回到工厂">◎</button>
@@ -62,7 +66,8 @@
 
     <dialog id="archive-dialog" class="dialog" aria-labelledby="archive-title">
       <div class="dialog-head"><h2 id="archive-title">矿站档案</h2><button class="button quiet" type="button" data-action="close-dialog">关闭</button></div>
-      <p id="save-status">当前战役会自动保存到此浏览器。</p>
+      <p>测试版更新不考虑存档继承。</p>
+      <p id="save-status" role="status">当前战役会自动保存到此浏览器。</p>
       <div class="dialog-actions"><button class="button" type="button" data-action="save">立即保存</button><button class="button" type="button" data-action="export">导出存档</button><button class="button" type="button" data-action="import">导入存档</button></div>
       <input id="save-file" type="file" accept=".dawn,application/octet-stream" hidden />
       <div class="dialog-actions"><button class="button" type="button" data-action="pause">暂停模拟</button><button class="button danger" type="button" data-action="reset-confirm">新战役</button></div>

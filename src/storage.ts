@@ -5,11 +5,11 @@ const database = new Promise<IDBDatabase>((resolve,reject) => {
   request.onerror = () => reject(request.error);
 });
 
-export async function resumeSave():Promise<ArrayBuffer | undefined> {
+export async function resumeSave():Promise<unknown> {
   const db = await database;
   return new Promise((resolve,reject) => {
     const request = db.transaction('campaign').objectStore('campaign').get('current');
-    request.onsuccess = () => resolve(request.result instanceof ArrayBuffer ? request.result : undefined);
+    request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
 }
