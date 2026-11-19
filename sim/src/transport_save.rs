@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use crate::belts::{node, Belts, Cargo, NODES, RETIRED_SOURCE};
 use crate::catalog::*;
+use crate::saved_ticks;
 use crate::world::World;
 
 impl World {
@@ -71,7 +72,11 @@ impl World {
         }
     }
 
-    pub fn read_transport_save<'a>(&mut self, data: &'a [i32]) -> Option<&'a [i32]> {
+    pub fn read_transport_save<'a>(
+        &mut self,
+        data: &'a [i32],
+        legacy_clock: bool,
+    ) -> Option<&'a [i32]> {
         let [next, revision, count, segments, rest @ ..] = data else {
             return None;
         };
@@ -89,6 +94,8 @@ impl World {
             let loc = usize::try_from(record[0]).ok()?;
             let [_, id, item, source, from, since, ready, blocked] =
                 <[i32; 8]>::try_from(record).ok()?;
+            let since = saved_ticks(since, legacy_clock)?;
+            let ready = saved_ticks(ready, legacy_clock)?;
             if loc >= NODES
                 || loc % 2 >= belt_lanes(self.cells[loc / 2].kind)
                 || previous.is_some_and(|p| p >= loc)
@@ -98,8 +105,8 @@ impl World {
                 || !(1..MATERIAL_ITEMS as i32).contains(&item)
                 || !(0..=RETIRED_SOURCE.into()).contains(&source)
                 || !(0..NODES as i32).contains(&from)
-                || !(0..=self.tick as i32).contains(&since)
-                || !(since..=self.tick as i32 + MAX_BELT_INTERVAL as i32).contains(&ready)
+                || since > self.tick
+                || !(since..=self.tick + MAX_BELT_INTERVAL).contains(&ready)
                 || !matches!(blocked, 0 | 1)
             {
                 return None;
@@ -109,8 +116,8 @@ impl World {
                 source: source as u16,
                 id,
                 from: from as u16,
-                since: since as u32,
-                ready: ready as u32,
+                since,
+                ready,
                 blocked: blocked == 1,
                 ..Cargo::default()
             };
@@ -119,7 +126,13 @@ impl World {
             previous = Some(loc);
         }
         self.rebuild_footprints()?;
-        self.belt = Belts::rebuild(&self.cells, &self.cargo, None, &self.footprints.outlets);
+        self.belt = Belts::rebuild(
+            &self.cells,
+            &self.cargo,
+            None,
+            &self.footprints.outlets,
+            self.legacy_recipes,
+        );
         if self.belt.segments.len() != segments {
             return None;
         }
@@ -129,15 +142,14 @@ impl World {
             .iter_mut()
             .zip(gate_words.chunks_exact(3))
         {
-            let max = self.tick as i32 + MAX_BELT_INTERVAL as i32;
-            if segment.nodes[0] as i32 != words[0]
-                || !(0..=max).contains(&words[1])
-                || !(0..=max).contains(&words[2])
-            {
+            let max = self.tick + MAX_BELT_INTERVAL;
+            let entry = saved_ticks(words[1], legacy_clock)?;
+            let exit = saved_ticks(words[2], legacy_clock)?;
+            if segment.nodes[0] as i32 != words[0] || entry > max || exit > max {
                 return None;
             }
-            segment.next_entry = words[1] as u32;
-            segment.next_exit = words[2] as u32;
+            segment.next_entry = entry;
+            segment.next_exit = exit;
         }
         self.next_cargo_id = *next;
         self.layout_revision = *revision;
@@ -155,7 +167,7 @@ impl World {
             id: self.next_cargo_id,
             from: location as u16,
             since: self.tick,
-            ready: (self.tick / BELT_TICKS + 1) * BELT_TICKS,
+            ready: legacy_cargo_ready(self.tick),
             ..Cargo::default()
         };
         self.cargo[location] = cargo;
@@ -170,7 +182,7 @@ impl World {
         let kind = self.cells[usize::from(cargo.source) - 1].kind;
         matches!(
             (cargo.item, kind),
-            (KIT, KIT_PRESS) | (PLATE, SMELTER | BENCH)
+            (KIT, KIT_PRESS | SPLICER) | (PLATE, SMELTER | BENCH)
         )
         .then_some(())
     }

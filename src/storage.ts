@@ -8,6 +8,7 @@ export const reviewScene = reviewParam && reviewScenes.includes(reviewParam) ? r
 const legacyBlueprintKey = reviewScene ? 'daybreak-review-blueprint' : 'daybreak-blueprint';
 const legacyCampaign = String(content.dataset) === 'campaign' && Number(content.version) === 1;
 const currentSaveKey = 'campaign:'+content.saveIdentity;
+const previousSaveKey = 'campaign:'+content.legacySaveIdentity;
 
 export function legacyBlueprint():number[] | undefined {
   if (!reviewScene && !legacyCampaign) return undefined;
@@ -45,10 +46,15 @@ export async function resumeSave():Promise<unknown> {
     const records = db.transaction('campaign').objectStore('campaign');
     const request = records.get(currentSaveKey);
     request.onsuccess = () => {
-      if (request.result !== undefined || !legacyCampaign) { resolve(request.result); return; }
-      const legacy = records.get('current');
-      legacy.onsuccess = () => resolve(legacy.result);
-      legacy.onerror = () => reject(legacy.error);
+      if (request.result !== undefined) { resolve(request.result); return; }
+      const previous = records.get(previousSaveKey);
+      previous.onsuccess = () => {
+        if (previous.result !== undefined || !legacyCampaign) { resolve(previous.result); return; }
+        const legacy = records.get('current');
+        legacy.onsuccess = () => resolve(legacy.result);
+        legacy.onerror = () => reject(legacy.error);
+      };
+      previous.onerror = () => reject(previous.error);
     };
     request.onerror = () => reject(request.error);
   });

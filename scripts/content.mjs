@@ -4,6 +4,9 @@ import { dirname, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
+const SIM_HZ = 30;
+const CONTENT_HZ = 20;
+const SAVE_VERSION = 10;
 const registryPath = resolve(root, 'data/registry.json');
 const identifier = /^[a-z][a-z0-9-]{0,47}$/;
 const defaultLanguage = 'zh-CN';
@@ -74,10 +77,10 @@ export function loadContent(configPath = process.env.DAYBREAK_CONTENT_CONFIG || 
   const machineRegistry = idMap(registry.machines, 'data/registry.json.machines');
   const itemCodes = [...itemRegistry.values()].sort((a, b) => a.code - b.code);
   const machineCodes = [...machineRegistry.values()].sort((a, b) => a.code - b.code);
-  check(itemCodes.length === 9 && itemCodes.every((item, i) => item.code === i + 1),
-    'data/registry.json.items', 'expected the nine numeric IDs used by the current save format');
-  check(machineCodes.length === 31 && machineCodes.every((machine, i) => machine.code === i),
-    'data/registry.json.machines', 'expected the 31 numeric IDs used by the current save format');
+  check(itemCodes.length === 19 && itemCodes.every((item, i) => item.code === i + 1),
+    'data/registry.json.items', 'expected the 19 numeric IDs used by the current save format');
+  check(machineCodes.length === 35 && machineCodes.every((machine, i) => machine.code === i),
+    'data/registry.json.machines', 'expected the 35 numeric IDs used by the current save format');
   const config = object(read(absoluteConfig), location(absoluteConfig));
   const dataset = config.dataset;
   check(typeof dataset === 'string' && identifier.test(dataset), `${location(absoluteConfig)}.dataset`, 'invalid dataset ID');
@@ -179,15 +182,17 @@ export function loadContent(configPath = process.env.DAYBREAK_CONTENT_CONFIG || 
   })];
   const machines = fixedIds('machines', machineRegistry).map(({ entry, row, at }) => {
     allowedFields(row, ['id','icon','nameKey','descriptionKey','materials','power','generation',
-      'batteryCapacity','batteryPower','span','beltInterval','inputCapacity','outputCapacity','size','ports'], at);
+      'batteryCapacity','batteryPower','span','beltInterval','beltRate','inputCapacity','outputCapacity','size','ports',
+      'nextMaterials','nextPower','nextSpan'], at);
     const [width, height] = list(row.size === undefined ? [1,1] : row.size, `${at}.size`);
     if (row.size !== undefined) check(row.size.length === 2, `${at}.size`, 'expected [width, height]');
     integer(width, 1, 8, `${at}.size[0]`);
     integer(height, 1, 8, `${at}.size[1]`);
     const fixed = ['empty','transport','cable','freight-yard'].includes(entry.behavior);
-    const drillVariant = [2,3,4,27,28,29].includes(entry.code);
-    const canInput = ['depot','generator','station','freight-yard'].includes(entry.id) || !!entry.legacyInputs?.length;
-    const canOutput = ['depot','freight-yard','industrial-miner','reinforced-miner'].includes(entry.id) || !!entry.legacyRecipe;
+    const drillVariant = [2,3,4,27,28,29,33,34].includes(entry.code);
+    const canInput = ['depot','generator','station','freight-yard'].includes(entry.id) || entry.behavior === 'processing';
+    const canOutput = ['depot','freight-yard','industrial-miner','reinforced-miner'].includes(entry.id)
+      || ['processing','mining'].includes(entry.behavior);
     check(!drillVariant || (row.size === undefined && row.ports === undefined), at,
       'set drill geometry on industrial-miner or reinforced-miner');
     check(!fixed || (width === 1 && height === 1 && row.ports === undefined), at, 'this infrastructure type uses its existing single-cell layout');
@@ -218,18 +223,23 @@ export function loadContent(configPath = process.env.DAYBREAK_CONTENT_CONFIG || 
     ports?.sort((a,b) => a.y-b.y || a.x-b.x || a.side-b.side || a.role.localeCompare(b.role));
     const spec = {
       id: row.id, icon: known(row.icon, machineRegistry, `${at}.icon`).code,
-      width, height, ports, canInput, canOutput, ...text(row, 'machines', at),
+      width, height, ports, canInput, canOutput, processing: entry.behavior === 'processing', ...text(row, 'machines', at),
       materials: materials(row.materials, `${at}.materials`, 65535, itemRegistry.size),
+      nextMaterials: materials(row.nextMaterials ?? row.materials, `${at}.nextMaterials`, 65535, itemRegistry.size),
       power: integer(row.power === undefined ? 0 : row.power, 0, 65535, `${at}.power`),
+      nextPower: integer(row.nextPower ?? row.power ?? 0, 0, 65535, `${at}.nextPower`),
       generation: integer(row.generation === undefined ? 0 : row.generation, 0, 65535, `${at}.generation`),
       batteryCapacity: integer(row.batteryCapacity === undefined ? 0 : row.batteryCapacity, 0, 10_000_000, `${at}.batteryCapacity`),
       batteryPower: integer(row.batteryPower === undefined ? 0 : row.batteryPower, 0, 65535, `${at}.batteryPower`),
       span: integer(row.span === undefined ? 1 : row.span, 1, 1904, `${at}.span`),
+      nextSpan: integer(row.nextSpan ?? row.span ?? 1, 1, 1904, `${at}.nextSpan`),
       beltInterval: entry.behavior === 'transport' ? integer(row.beltInterval, 1, 200, `${at}.beltInterval`) : 0,
+      beltRate: entry.behavior === 'transport' ? integer(row.beltRate ?? 60, 1, 1800, `${at}.beltRate`) : 0,
       inputCapacity: integer(row.inputCapacity === undefined ? 0 : row.inputCapacity, 0, 24, `${at}.inputCapacity`),
       outputCapacity: integer(row.outputCapacity === undefined ? 0 : row.outputCapacity, 0, 24, `${at}.outputCapacity`),
     };
     if (entry.code !== 0) check(spec.materials.length > 0, `${at}.materials`, 'a construction cost is required');
+    if (entry.code !== 0) check(spec.nextMaterials.length > 0, `${at}.nextMaterials`, 'a construction cost is required');
     const tutorialItem = { 'simple-miner': 1, 'freight-yard': 4 }[row.id];
     if (tutorialItem) check(spec.materials.length === 1 && spec.materials[0].item === tutorialItem, `${at}.materials`, 'this legacy building requires its original cost item');
     return spec;
@@ -238,27 +248,46 @@ export function loadContent(configPath = process.env.DAYBREAK_CONTENT_CONFIG || 
   const mineralIds = new Set(itemCodes.filter(item => item.mineral).map(item => item.code));
   const recipes = [...rawRecipes.values()].sort((a, b) => a.id.localeCompare(b.id, 'en')).map(row => {
     const at = `${location(sources.recipes)}.${row.id}`;
-    allowedFields(row, ['id','category','inputs','output','machines','byproducts','baseTicks','unlockStage','nameKey','descriptionKey'], at);
-    const inputs = materials(row.inputs, `${at}.inputs`, 24, 2).sort((a, b) => a.item - b.item);
+    allowedFields(row, ['id','category','inputs','output','machines','byproducts','baseTicks','unlockStage','nameKey','descriptionKey','handcraft','modern'], at);
+    const inputs = materials(row.inputs, `${at}.inputs`, 24, 3).sort((a, b) => a.item - b.item);
     check(['mining', 'mineral', 'part'].includes(row.category), `${at}.category`, 'unknown recipe category');
     check(row.category === 'mining' ? inputs.length === 0 : inputs.length > 0, at, 'input count does not match recipe category');
-    check(inputs.every(input => mineralIds.has(input.item) === (row.category === 'mineral')),
+    check(inputs.some(input => mineralIds.has(input.item)) === (row.category === 'mineral'),
       `${at}.inputs`, 'input materials do not match the recipe category');
     const compatible = list(row.machines, `${at}.machines`).map(id => {
       const target = known(id, machineRegistry, `${at}.machines`);
       const allowed = row.category === 'mining' ? target.behavior === 'mining' :
-        target.processingClass === `${row.category}-${inputs.length === 1 ? 'single' : 'double'}`;
+        (target.id === 'kiln' && row.modern ? 'mineral-double' : target.processingClass) ===
+          `${row.category}-${['','single','double','triple'][inputs.length]}`;
       check(allowed, `${at}.machines`, `"${id}" cannot execute ${row.category} recipes with ${inputs.length} inputs`);
       return target.code;
     }).sort((a, b) => a - b);
     check(compatible.length > 0 && new Set(compatible).size === compatible.length, `${at}.machines`, 'expected distinct compatible machines');
     const output = material(row.output, `${at}.output`, 24);
     check(!inputs.some(input => input.item === output.item), `${at}.output`, 'output must differ from inputs');
-    return { id: row.id, category: row.category, inputs, output, machines: compatible,
+    const handcraft = row.handcraft === undefined ? null : object(row.handcraft, `${at}.handcraft`);
+    if (handcraft) allowedFields(handcraft, ['ticks','unlockStage','inputs'], `${at}.handcraft`);
+    const handInputs = handcraft ? materials(handcraft.inputs ?? row.inputs, `${at}.handcraft.inputs`, 24, 3) : [];
+    check(!handcraft || (handInputs.length > 0 && !handInputs.some(input => input.item === output.item)),
+      `${at}.handcraft.inputs`, 'handcraft requires materials distinct from the output');
+    return { id: row.id, key: digest(row.id).readUInt32LE() & 0x1fffffff,
+      category: row.category, inputs, output, machines: compatible, modern: row.modern === true,
+      handcraft: handcraft ? {
+        ticks: integer(handcraft.ticks, 1, 65535, `${at}.handcraft.ticks`),
+        unlockStage: integer(handcraft.unlockStage, 0, 22, `${at}.handcraft.unlockStage`),
+        inputs: handInputs,
+      } : null,
       byproducts: materials(row.byproducts ?? [], `${at}.byproducts`, 24, itemRegistry.size),
       baseTicks: integer(row.baseTicks, 1, 65535, `${at}.baseTicks`),
       unlockStage: integer(row.unlockStage, 0, 22, `${at}.unlockStage`), ...text(row, 'recipes', at) };
   });
+  check(recipes.every(recipe => recipe.key > 0) && new Set(recipes.map(recipe => recipe.key)).size === recipes.length,
+    location(sources.recipes), 'recipe IDs must hash to distinct nonzero keys');
+  for (const recipe of recipes) for (const code of recipe.machines) {
+    check(recipe.output.amount <= machines[code].outputCapacity &&
+      recipe.inputs.every(row => row.amount <= machines[code].inputCapacity),
+      recipe.id, 'recipe quantities exceed machine buffer capacity');
+  }
   const recipeMap = new Map(recipes.map(row => [row.id, row]));
   const activeRecipes = machineCodes.map(entry => {
     if (!entry.legacyRecipe) return null;
@@ -275,13 +304,24 @@ export function loadContent(configPath = process.env.DAYBREAK_CONTENT_CONFIG || 
   const mechanics = activeRecipes.map(recipe => recipe?.inputs ?? null);
   const layouts = machines.flatMap(({id,width,height,ports}) => ports === null ? [] :
     [{id,width,height,ports:ports.map(({x,y,side,role})=>[x,y,side,role])}]);
-  const marker = digest({ dataset, version, itemCodes, machineCodes, mechanics, ...(layouts.length ? { layouts } : {}) });
-  const signature = digest({ dataset, version, items, machines, recipes, locales }).readUInt32LE();
+  const legacyLayouts = layouts.filter(({id})=>machineRegistry.get(id).code<31);
+  const marker = digest({ dataset, version, itemCodes, machineCodes, mechanics, ...(layouts.length ? { layouts } : {}),
+    selectable:recipes.filter(recipe=>recipe.modern).map(({id,inputs,output,machines})=>({id,inputs,output,machines})) });
+  const legacyMarker = digest({ dataset, version, itemCodes:itemCodes.slice(0,9), machineCodes:machineCodes.slice(0,31),
+    mechanics:mechanics.slice(0,31), ...(legacyLayouts.length ? { layouts:legacyLayouts } : {}) });
+  const runtimeRecipes = recipes.map(recipe => ({
+    ...recipe, baseTicks: Math.ceil(recipe.baseTicks * SIM_HZ / CONTENT_HZ),
+  }));
+  const signature = digest({ dataset, version, items, machines, recipes: runtimeRecipes, locales, SIM_HZ, CONTENT_HZ }).readUInt32LE();
+  const tagFor = hash => {
+    const tag = [version, ...Buffer.from(dataset), ...[0, 4, 8, 12].map(at => hash.readInt32LE(at))];
+    return [...tag,tag.length+1];
+  };
   const saveIdentity = marker.toString('hex').slice(0, 32);
-  const tag = [version, ...Buffer.from(dataset), ...[0, 4, 8, 12].map(at => marker.readInt32LE(at))];
-  tag.push(tag.length + 1);
-  return { frontend: { dataset, version, signature, saveIdentity, items, machines, recipes, compatibleRecipes, locales },
-    dependencies: [...dependencies], activeRecipes, tag };
+  const legacySaveIdentity = legacyMarker.toString('hex').slice(0, 32);
+  return { frontend: { dataset, version, signature, saveIdentity, legacySaveIdentity, hz: SIM_HZ, contentHz: CONTENT_HZ,
+    items, machines, recipes: runtimeRecipes, compatibleRecipes, locales },
+    dependencies: [...dependencies], activeRecipes, tag:tagFor(marker), legacyTag:tagFor(legacyMarker) };
 }
 
 function pairs(rows, size) {
@@ -291,25 +331,39 @@ function pairs(rows, size) {
 }
 
 export function emitRust(content) {
-  const { machines, items, signature } = content.frontend;
+  const { machines, items, recipes, signature } = content.frontend;
   const stackRow = key => `[0, ${items.slice(1).map(item => item[key]).join(', ')}]`;
   const list = key => `[${machines.map(row => row[key]).join(', ')}]`;
   return `// Generated by scripts/content.mjs.
+pub const HZ: u32 = ${SIM_HZ};
+pub const CONTENT_HZ: u32 = ${CONTENT_HZ};
+pub const SAVE_VERSION: i32 = ${SAVE_VERSION};
 pub const BUILD_SIGNATURE: u32 = ${signature};
 pub const SAVE_DATA_TAG: &[i32] = &[${content.tag.join(', ')}];
+pub const LEGACY_SAVE_DATA_TAG: &[i32] = &[${content.legacyTag.join(', ')}];
 pub const STACK_LIMITS: [[u32; ITEMS]; 2] = [${stackRow('stackLimit')}, ${stackRow('tierOneStackLimit')}];
 pub const BUILD_MATERIALS: [&[(u8, u32)]; MAX_KIND as usize + 1] = [
 ${machines.map(row => `    &${pairs(row.materials, 0)},`).join('\n')}
 ];
-pub const RECIPE_DATA: [Option<Recipe>; MAX_KIND as usize + 1] = [
-${content.activeRecipes.map(recipe => recipe ? `    Some(Recipe { input: ${pairs(recipe.inputs, 2)}, output: ${recipe.output.item}, amount: ${recipe.output.amount}, ticks: ${recipe.baseTicks}, power: ${recipe.power} }),` : '    None,').join('\n')}
+pub const NEXT_BUILD_MATERIALS: [&[(u8, u32)]; MAX_KIND as usize + 1] = [
+${machines.map(row => `    &${pairs(row.nextMaterials, 0)},`).join('\n')}
 ];
-pub const LEGACY_RECIPE_INPUTS: [[(u8, u16); 2]; MAX_KIND as usize + 1] = [
-${content.activeRecipes.map(recipe => `    ${pairs(recipe?.legacyInputs ?? [], 2)},`).join('\n')}
+pub const RECIPE_DATA: [Option<Recipe>; MAX_KIND as usize + 1] = [
+${content.activeRecipes.map(recipe => recipe ? `    Some(Recipe { input: ${pairs(recipe.inputs, 3)}, output: ${recipe.output.item}, amount: ${recipe.output.amount}, ticks: simulation_ticks(${recipe.baseTicks}), power: ${recipe.power} }),` : '    None,').join('\n')}
+];
+pub const LEGACY_RECIPE_INPUTS: [[(u8, u16); 3]; MAX_KIND as usize + 1] = [
+${content.activeRecipes.map(recipe => `    ${pairs(recipe?.legacyInputs ?? [], 3)},`).join('\n')}
+];
+pub const MACHINE_POWER: [u16; MAX_KIND as usize + 1] = ${list('nextPower')};
+pub const PROCESSING: [bool; MAX_KIND as usize + 1] = [${machines.map(row => row.processing).join(', ')}];
+pub const RECIPES: &[RecipeSpec] = &[
+${recipes.map(recipe => `    RecipeSpec { key: ${recipe.key}, modern: ${recipe.modern}, recipe: Recipe { input: ${pairs(recipe.inputs, 3)}, output: ${recipe.output.item}, amount: ${recipe.output.amount}, ticks: ${recipe.baseTicks}, power: 0 }, machines: &[${recipe.machines.join(', ')}], unlock: ${recipe.unlockStage}, handcraft: ${recipe.handcraft ?
+  `Some(HandRecipe { input: ${pairs(recipe.handcraft.inputs, 3)}, ticks: ${recipe.handcraft.ticks}, unlock: ${recipe.handcraft.unlockStage} })` : 'None'} },`).join('\n')}
 ];
 pub const INPUT_CAPACITY: [u16; MAX_KIND as usize + 1] = ${list('inputCapacity')};
 pub const OUTPUT_CAPACITY: [u16; MAX_KIND as usize + 1] = ${list('outputCapacity')};
 pub const BELT_INTERVAL: [u32; MAX_KIND as usize + 1] = ${list('beltInterval')};
+pub const BELT_RATE: [u32; MAX_KIND as usize + 1] = ${list('beltRate')};
 pub const FOOTPRINT_SIZES: [(u8, u8); MAX_KIND as usize + 1] = [
 ${machines.map(row => `    (${row.width}, ${row.height}),`).join('\n')}
 ];
@@ -318,14 +372,14 @@ ${machines.map(row => row.ports === null ? '    None,' : `    Some(&[${row.ports
   `Port { x: ${port.x}, y: ${port.y}, side: ${port.side}, output: ${port.role === 'output'} }`).join(', ')}]),`).join('\n')}
 ];
 pub const CABLE_SPAN: u32 = ${machines[21].span};
+pub const NEXT_CABLE_SPAN: u32 = ${machines[21].nextSpan};
 pub const GENERATOR_POWER: u16 = ${machines[9].generation};
 pub const SOLAR_POWER: u16 = ${machines[11].generation};
 pub const LAUNCH_POWER: u16 = ${machines[13].power};
 pub const LINE_COST: u32 = ${machines[19].materials[0].amount};
-pub const BATTERY_CAPACITY: u32 = ${machines[10].batteryCapacity};
+pub const BATTERY_CAPACITY: u32 = simulation_ticks(${machines[10].batteryCapacity});
 pub const BATTERY_POWER: u16 = ${machines[10].batteryPower};
-pub const MINER_COST: u32 = ${machines[17].materials[0].amount};
-pub const MINER_TICKS: u16 = ${content.activeRecipes[17].baseTicks};
+pub const MINER_TICKS: u32 = simulation_ticks(${content.activeRecipes[17].baseTicks});
 pub const MINER_CAPACITY: u16 = ${machines[17].outputCapacity};
 `;
 }
@@ -341,10 +395,11 @@ async function verifyWasm(content, target) {
   const { instance } = await WebAssembly.instantiate(readFileSync(target));
   const sim = instance.exports;
   check((sim.content_signature() >>> 0) === content.frontend.signature, target, 'Wasm was generated for a different dataset');
+  check(sim.tick_rate() === content.frontend.hz, target, 'Wasm uses a different simulation clock');
   sim.step(1);
   const length = sim.save();
   const saved = new Int32Array(sim.memory.buffer, sim.output_ptr(), length).slice();
-  check(saved[0] === 8 && saved.length > content.tag.length
+  check(saved[0] === SAVE_VERSION && saved.length > content.tag.length
     && content.tag.every((word, i) => word === saved[length-content.tag.length+i]), target, 'generated save tag does not match the dataset');
   const pointer = sim.reserve_input(length);
   new Int32Array(sim.memory.buffer, pointer, length).set(saved);
@@ -360,7 +415,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
       write(resolve(target), emitRust(content));
       for (const dependency of content.dependencies) console.log(`cargo:rerun-if-changed=${dependency}`);
     } else if (mode === '--frontend') {
-      write(resolve(root, 'src/generated-content.ts'), `// Generated by scripts/content.mjs.\nexport const content = ${JSON.stringify(canonical(content.frontend))} as const;\n`);
+      write(resolve(root, 'src/generated-content.ts'), `// Generated by scripts/content.mjs.\nexport const SIM_HZ = ${SIM_HZ};\nexport const content = ${JSON.stringify(canonical(content.frontend))} as const;\n`);
     } else if (mode === '--verify-wasm' && target) {
       await verifyWasm(content, resolve(target));
     } else {

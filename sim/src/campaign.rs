@@ -60,6 +60,20 @@ impl Stage {
         Self::required_for(kind).is_some_and(|required| self >= required)
     }
 
+    pub fn after_selected_production(self, kind: u8, item: u8, belt_batch: bool) -> Self {
+        use Stage::*;
+        match (self, kind, item) {
+            (Mining, SIMPLE_MINER, IRON) => Collect,
+            (Feed | Working, BENCH, PLATE) => Belt,
+            (BeltFed, BENCH, PLATE) if belt_batch => Expand,
+            (Power, IRON_DRILL | COPPER_DRILL, _) => Silica,
+            (Silica, SILICA_DRILL, SILICA) => Optics,
+            (Optics, BENCH, LENS) => Assemble,
+            (Assemble, SPLICER, MIRROR) => Launch,
+            _ => self,
+        }
+    }
+
     pub fn required_for(kind: u8) -> Option<Self> {
         use Stage::*;
         Some(match kind {
@@ -71,6 +85,9 @@ impl Stage {
             SMELTER => Silica,
             SPLITTER | MERGER | CROSSING => Assemble,
             FAST_BELT => Sunlight,
+            SPLICER => Assemble,
+            COPPER_DRILL | REINFORCED_COPPER_DRILL => Expand,
+            ULTRA_BELT => Acceptance,
             SILICA_DRILL => Silica,
             GRINDER => Optics,
             ASSEMBLER => Assemble,
@@ -87,7 +104,34 @@ impl Stage {
 impl World {
     pub fn unlocked(&self, kind: u8) -> bool {
         if matches!(kind, INDUSTRIAL_MINER | REINFORCED_MINER) {
-            return (IRON..=FUEL).any(|ore| self.unlocked(drill_kind(kind, ore).unwrap()));
+            return [IRON, SILICA, FUEL, COPPER]
+                .into_iter()
+                .any(|ore| self.unlocked(drill_kind(kind, ore).unwrap()));
+        }
+        if !self.legacy_recipes {
+            return self.stage
+                >= match kind {
+                    GENERATOR | CABLE | SMELTER => Stage::Bench,
+                    COPPER_DRILL | IRON_DRILL => Stage::Expand,
+                    FUEL_DRILL => Stage::Power,
+                    KILN | ASSEMBLER => Stage::Silica,
+                    GRINDER | CALIBRATOR | KIT_PRESS => return false,
+                    EXPRESS_BELT
+                    | REINFORCED_IRON_DRILL..=REINFORCED_FUEL_DRILL
+                    | REINFORCED_COPPER_DRILL
+                        if self.progression.tier == 0 =>
+                    {
+                        return false
+                    }
+                    ULTRA_BELT if self.progression.tier == 0 => return false,
+                    _ => match Stage::required_for(kind) {
+                        Some(stage) => stage,
+                        None => return false,
+                    },
+                };
+        }
+        if kind >= SPLICER {
+            return false;
         }
         if kind == CABLE {
             return self.stage >= Stage::Power;
@@ -109,8 +153,11 @@ impl World {
     pub fn known_item(&self, item: u8) -> bool {
         self.stage
             >= match item {
+                COPPER | 11..=15 if !self.legacy_recipes => Stage::Handwork,
+                16..=19 if !self.legacy_recipes => Stage::Silica,
                 IRON | PLATE => Stage::Gather,
                 SILICA => Stage::Silica,
+                FUEL if !self.legacy_recipes => Stage::Bench,
                 FUEL => Stage::Power,
                 LENS => Stage::Assemble,
                 MIRROR => Stage::Launch,
@@ -124,6 +171,8 @@ impl World {
         match terrain(tile) {
             IRON if tile == FIRST_ORE || self.stage >= Stage::Expand => IRON,
             FUEL if self.stage >= Stage::Power => FUEL,
+            FUEL if !self.legacy_recipes && self.stage >= Stage::Bench => FUEL,
+            COPPER if !self.legacy_recipes && self.stage >= Stage::Handwork => COPPER,
             SILICA if self.stage >= Stage::Silica => SILICA,
             _ => 0,
         }
@@ -180,7 +229,7 @@ impl World {
 
     pub fn collect(&mut self, tile: usize) -> i32 {
         let cell = self.cells[tile];
-        let Some(r) = recipe(cell.kind) else {
+        let Some(r) = self.recipe_at(tile) else {
             return -1;
         };
         legacy_result(self.transfer(

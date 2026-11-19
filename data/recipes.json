@@ -12,5 +12,21 @@
   {"id":"press-plate","category":"mineral","inputs":[{"item":"iron","amount":1}],"output":{"item":"plate","amount":1},"baseTicks":30,"unlockStage":6,"machines":["smelter"]},
   {"id":"mine-reinforced-iron","category":"mining","inputs":[],"output":{"item":"iron","amount":1},"baseTicks":8,"unlockStage":11,"machines":["reinforced-iron-drill"]},
   {"id":"mine-reinforced-silica","category":"mining","inputs":[],"output":{"item":"silica","amount":1},"baseTicks":7,"unlockStage":11,"machines":["reinforced-silica-drill"]},
-  {"id":"mine-reinforced-fuel","category":"mining","inputs":[],"output":{"item":"fuel","amount":1},"baseTicks":6,"unlockStage":11,"machines":["reinforced-fuel-drill"]}
+  {"id":"mine-reinforced-fuel","category":"mining","inputs":[],"output":{"item":"fuel","amount":1},"baseTicks":6,"unlockStage":11,"machines":["reinforced-fuel-drill"]},
+  {"id":"smelt-iron-ingot","category":"mineral","inputs":[{"item":"iron","amount":1}],"output":{"item":"iron-ingot","amount":1},"baseTicks":20,"unlockStage":6,"machines":["smelter"],"modern":true,"handcraft":{"ticks":15,"unlockStage":5,"inputs":[{"item":"iron","amount":2}]}},
+  {"id":"smelt-copper-ingot","category":"mineral","inputs":[{"item":"copper","amount":1}],"output":{"item":"copper-ingot","amount":1},"baseTicks":40,"unlockStage":6,"machines":["smelter"],"modern":true,"handcraft":{"ticks":30,"unlockStage":5,"inputs":[{"item":"copper","amount":2}]}},
+  {"id":"smelt-silica-ingot","category":"mineral","inputs":[{"item":"silica","amount":1}],"output":{"item":"silica-ingot","amount":1},"baseTicks":60,"unlockStage":13,"machines":["smelter"],"modern":true},
+  {"id":"form-plate","category":"part","inputs":[{"item":"iron-ingot","amount":2}],"output":{"item":"plate","amount":2},"baseTicks":60,"unlockStage":6,"machines":["bench"],"modern":true},
+  {"id":"form-rivets","category":"part","inputs":[{"item":"iron-ingot","amount":1}],"output":{"item":"rivet","amount":4},"baseTicks":120,"unlockStage":6,"machines":["bench"],"modern":true},
+  {"id":"draw-copper-wire","category":"part","inputs":[{"item":"copper-ingot","amount":1}],"output":{"item":"copper-wire","amount":2},"baseTicks":160,"unlockStage":6,"machines":["bench"],"modern":true,"handcraft":{"ticks":120,"unlockStage":5}},
+  {"id":"form-optical-blank","category":"part","inputs":[{"item":"silica-ingot","amount":1}],"output":{"item":"optical-blank","amount":1},"baseTicks":120,"unlockStage":13,"machines":["bench"],"modern":true},
+  {"id":"polish-lens","category":"part","inputs":[{"item":"optical-blank","amount":2}],"output":{"item":"lens","amount":1},"baseTicks":240,"unlockStage":13,"machines":["bench"],"modern":true},
+  {"id":"assemble-frame","category":"part","inputs":[{"item":"plate","amount":2},{"item":"rivet","amount":4}],"output":{"item":"frame","amount":1},"baseTicks":150,"unlockStage":13,"machines":["assembler"],"modern":true},
+  {"id":"assemble-armature","category":"part","inputs":[{"item":"iron-ingot","amount":1},{"item":"copper-wire","amount":2}],"output":{"item":"armature","amount":1},"baseTicks":240,"unlockStage":13,"machines":["assembler"],"modern":true},
+  {"id":"assemble-core","category":"part","inputs":[{"item":"optical-blank","amount":1},{"item":"copper-wire","amount":2}],"output":{"item":"core","amount":1},"baseTicks":300,"unlockStage":17,"machines":["assembler"],"modern":true},
+  {"id":"batch-ferrosilicon","category":"mineral","inputs":[{"item":"iron-ingot","amount":2},{"item":"silica","amount":1}],"output":{"item":"ferrosilicon","amount":1},"baseTicks":240,"unlockStage":13,"machines":["kiln"],"modern":true},
+  {"id":"splice-mirror","category":"part","inputs":[{"item":"frame","amount":1},{"item":"lens","amount":1},{"item":"ferrosilicon","amount":1}],"output":{"item":"mirror","amount":1},"baseTicks":300,"unlockStage":15,"machines":["splicer"],"modern":true},
+  {"id":"splice-kit","category":"part","inputs":[{"item":"frame","amount":1},{"item":"armature","amount":1},{"item":"plate","amount":2}],"output":{"item":"kit","amount":1},"baseTicks":300,"unlockStage":18,"machines":["splicer"],"modern":true},
+  {"id":"mine-copper","category":"mining","inputs":[],"output":{"item":"copper","amount":1},"baseTicks":20,"unlockStage":11,"machines":["copper-drill"],"modern":true},
+  {"id":"mine-reinforced-copper","category":"mining","inputs":[],"output":{"item":"copper","amount":1},"baseTicks":10,"unlockStage":11,"machines":["reinforced-copper-drill"],"modern":true}
 ]

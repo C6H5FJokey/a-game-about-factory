@@ -16,7 +16,7 @@ struct Part {
     kind: u8,
     dir: u8,
     wire: bool,
-    config: u8,
+    config: i32,
 }
 
 impl Part {
@@ -82,9 +82,9 @@ fn copyable(kind: u8) -> bool {
 
 fn max_config(kind: u8) -> u8 {
     match kind {
-        DEPOT => 8,
+        DEPOT => (ITEMS - 1) as u8,
         SPLITTER => 1,
-        kind if recipe(kind).is_some() || miner_grade(kind) >= 2 => 2,
+        kind if PROCESSING[kind as usize] || recipe(kind).is_some() || miner_grade(kind) >= 2 => 2,
         _ => 0,
     }
 }
@@ -106,7 +106,14 @@ fn read_parts(words: &[i32], legacy: bool) -> Option<Vec<Part>> {
             || layout_kind(kind) != kind
             || !(0..4).contains(&p[3])
             || !(0..=1).contains(&p[4])
-            || !(0..=i32::from(max_config(kind))).contains(&p[5])
+            || p[5] < 0
+            || if PROCESSING[kind as usize] && p[5] > 3 {
+                !recipe_index(p[5] >> 2).is_some_and(|index| {
+                    RECIPES[index].modern && RECIPES[index].machines.contains(&kind)
+                }) || p[5] & 3 == 3
+            } else {
+                p[5] > i32::from(max_config(kind))
+            }
             || (kind == 0 && p[4] == 0)
         {
             return None;
@@ -129,7 +136,7 @@ fn read_parts(words: &[i32], legacy: bool) -> Option<Vec<Part>> {
             kind,
             dir,
             wire: p[4] == 1,
-            config: p[5] as u8,
+            config: p[5],
         };
         let (right, bottom) = part.extent();
         width = width.max(right);
@@ -140,7 +147,46 @@ fn read_parts(words: &[i32], legacy: bool) -> Option<Vec<Part>> {
 }
 
 impl Blueprint {
-    fn standard() -> Self {
+    fn standard(legacy: bool) -> Self {
+        if !legacy {
+            let key = RECIPES
+                .iter()
+                .find(|spec| {
+                    spec.modern && spec.recipe.output == KIT && spec.machines.contains(&SPLICER)
+                })
+                .map_or(0, |spec| spec.key);
+            return Self {
+                id: STANDARD_ID,
+                version: LAYOUT_VERSION,
+                name: "标准厂段".to_owned(),
+                parts: vec![
+                    Part {
+                        x: 0,
+                        y: 0,
+                        kind: SPLICER,
+                        dir: 0,
+                        wire: true,
+                        config: key << 2,
+                    },
+                    Part {
+                        x: 2,
+                        y: 0,
+                        kind: BELT,
+                        dir: 0,
+                        wire: false,
+                        config: 0,
+                    },
+                    Part {
+                        x: 3,
+                        y: 0,
+                        kind: DEPOT,
+                        dir: 0,
+                        wire: false,
+                        config: 0,
+                    },
+                ],
+            };
+        }
         let mut parts = Vec::new();
         let mut x = 0;
         for kind in [INDUSTRIAL_MINER, BELT, SMELTER, KIT_PRESS, BELT, DEPOT] {
@@ -187,7 +233,7 @@ impl Blueprint {
                 part.kind.into(),
                 part.dir.into(),
                 part.wire as i32,
-                part.config.into(),
+                part.config,
             ]);
         }
     }
@@ -242,9 +288,9 @@ impl Library {
         id
     }
 
-    pub fn write_view(&self, out: &mut Vec<i32>) {
+    pub fn write_view(&self, out: &mut Vec<i32>, legacy: bool) {
         out.extend([self.legacy_imported as i32, (self.entries.len() + 1) as i32]);
-        for entry in std::iter::once(&Blueprint::standard()).chain(&self.entries) {
+        for entry in std::iter::once(&Blueprint::standard(legacy)).chain(&self.entries) {
             out.extend([
                 entry
                     .parts
@@ -367,7 +413,12 @@ impl World {
                     kind,
                     dir: cell.dir,
                     wire: cell.wire,
-                    config: cell.cfg.min(max_config(kind)),
+                    config: i32::from(cell.cfg.min(max_config(kind)))
+                        | if cell.selected_recipe == 0 {
+                            0
+                        } else {
+                            RECIPES[cell.selected_recipe as usize - 1].key << 2
+                        },
                 });
             }
         }
@@ -386,7 +437,7 @@ impl World {
         }
         let standard;
         let entry = if id == STANDARD_ID {
-            standard = Blueprint::standard();
+            standard = Blueprint::standard(self.legacy_recipes);
             &standard
         } else {
             let Some(entry) = self.blueprints.entries.iter().find(|entry| entry.id == id) else {
@@ -420,7 +471,7 @@ impl World {
             };
             if kind != 0 {
                 if !self.unlocked(kind)
-                    || kind == DEPOT && part.config != 0 && !self.known_item(part.config)
+                    || kind == DEPOT && part.config != 0 && !self.known_item(part.config as u8)
                 {
                     return -6;
                 }
@@ -433,14 +484,29 @@ impl World {
                     }
                 }
             }
-            plan.push((tile, kind, part.dir, part.wire, part.config));
+            let (config, chosen) = if PROCESSING[kind as usize] && part.config > 3 {
+                let Some(index) = recipe_index(part.config >> 2) else {
+                    return -16;
+                };
+                let spec = &RECIPES[index];
+                if self.legacy_recipes
+                    || !spec.machines.contains(&kind)
+                    || (self.stage as u8) < spec.unlock
+                {
+                    return -6;
+                }
+                (part.config as u8 & 3, (index + 1) as u16)
+            } else {
+                (part.config as u8, 0)
+            };
+            plan.push((tile, kind, part.dir, part.wire, config, chosen));
         }
         if self.stock[KIT as usize] < price {
             return -5;
         }
         self.stock[KIT as usize] -= price;
         self.materialize();
-        for (tile, kind, dir, wire, cfg) in plan {
+        for (tile, kind, dir, wire, cfg, selected_recipe) in plan {
             let wire = self.cells[tile].wire || wire;
             if kind != 0 {
                 self.install(
@@ -449,6 +515,7 @@ impl World {
                         kind,
                         dir,
                         cfg,
+                        selected_recipe,
                         wire,
                         ..Cell::default()
                     },

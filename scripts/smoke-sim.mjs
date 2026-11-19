@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { loadContent } from './content.mjs';
 
+const content=loadContent();
 const artifact = await readFile(new URL('../public/sim.wasm', import.meta.url));
 const { instance } = await WebAssembly.instantiate(artifact);
 const sim = instance.exports;
+const hz = sim.tick_rate();
+assert.equal(hz, 30);
 const width = 56;
 const tile = (x,y) => y * width + x;
 const header = 98;
@@ -81,6 +85,45 @@ function save() {
   return new Int32Array(sim.memory.buffer, sim.output_ptr(), length).slice();
 }
 
+function saveWith20HzClock(current) {
+  const saved = current.slice();
+  const toOldClock = index => { saved[index] = Math.floor(saved[index] * 20 / hz); };
+  for (const index of [1,14,16,19,20,21,32,43]) toOldClock(index);
+  const transport = 54 + width*34*19;
+  for (let row=54;row<transport;row+=19) {
+    if (saved[row]===9) saved[row+4] = Math.floor(saved[row+4] * 20 / (2*hz));
+    else toOldClock(row+4);
+    for (const field of [5,6,9]) toOldClock(row+field);
+  }
+  const cargoEnd = transport + 4 + saved[transport+2]*8;
+  for (let row=transport+4;row<cargoEnd;row+=8) {
+    toOldClock(row+5);
+    toOldClock(row+6);
+  }
+  for (let row=cargoEnd;row<cargoEnd+saved[transport+3]*3;row+=3) {
+    toOldClock(row+1);
+    toOldClock(row+2);
+  }
+  return saved;
+}
+
+function legacySave(current,version) {
+  const data=version<9?saveWith20HzClock(current):current.slice();
+  const transport=54+width*34*19;
+  const progression=transport+4+data[transport+2]*8+data[transport+3]*3;
+  const devices=progression+4+data[progression+3];
+  const extension=devices+2+data[devices+1];
+  const extra=content.frontend.items.length-10;
+  const library=extension+1+extra*3+(extra+3)*data[devices+1];
+  data[0]=version;
+  return Int32Array.from([
+    ...data.subarray(0,version<7?progression:extension),
+    ...(version<7?data.subarray(devices,extension):[]),
+    ...data.subarray(library,data.length-data.at(-1)),
+    ...(version>=8?content.legacyTag:[]),
+  ]);
+}
+
 const reviewSaves = process.argv.includes('--capture-visual-review') ? new Map() : undefined;
 function captureReview(name) {
   if (reviewSaves) reviewSaves.set(name, new Uint8Array(save().buffer));
@@ -108,6 +151,106 @@ function until(test,label,limit=2400) {
   for (let n=0;n<limit && !test();n+=5) advance(5);
   assert.ok(test(),label);
 }
+
+function testProductionOpening() {
+  const key = id => content.frontend.recipes.find(row=>row.id===id).key;
+  const choose=(position,id)=>command(22,position,device(position).id,key(id));
+  const available=(position,item,role)=>device(position).slots.find(row=>row[0]===item&&row[1]===role)?.[2] ?? 0;
+  const heldNew=item=>{
+    const frame=snapshot();
+    const recipeEnd=frame[frame[frame.at(-1)-1]-14]-1;
+    return frame[frame[recipeEnd]+2+item-10];
+  };
+  let token=0;
+  const craft=(id,ticks,output=1)=>{
+    assert.equal(command(23,key(id),++token),1);
+    advance(ticks-1);
+    assert.equal(command(25,token),-27);
+    advance(1);
+    assert.equal(command(25,token),output);
+    assert.equal(command(24,token),1);
+  };
+  const tiers=directory();
+  for(const [kind,rate] of [[1,60],[22,120],[26,270],[32,600]]) {
+    const row=tiers.get(kind);
+    assert.equal(row[15+2*row[12]],-rate);
+  }
+  assert.equal(tiers.get(17)[14],10);
+  const copper=tile(17,17), generator=tile(20,17), furnace=tile(20,16), table=tile(22,16);
+  for(let n=0;n<10;n++) assert.equal(command(9,ore),1);
+  assert.equal(command(1,ore,17),1);
+  advance(3*hz);
+  assert.equal(take(ore,1,1),1);
+  assert.equal(stage(),5);
+  for(let n=0;n<31;n++) assert.equal(command(9,ore),1);
+  for(let n=0;n<8;n++) assert.equal(command(9,copper),1);
+  assert.equal(command(23,key('form-plate'),++token),-6,'A machine-only recipe cannot be made by hand.');
+  assert.equal(command(23,key('smelt-iron-ingot'),++token),1);
+  advance(7);
+  assert.equal(command(24,token),1);
+  advance(15);
+  assert.equal(command(25,token),-1);
+  assert.equal(snapshot()[36],32,'Cancelling a handcraft batch consumes no ore.');
+  for(let n=0;n<16;n++) craft('smelt-iron-ingot',15);
+  assert.equal(heldNew(11),16);
+  for(let n=0;n<4;n++) craft('smelt-copper-ingot',30);
+  for(let n=0;n<4;n++) craft('draw-copper-wire',120,2);
+  assert.equal(heldNew(15),8);
+  assert.equal(stage(),6,'Copper wire opens the first grid without electricity.');
+  assert.equal(command(1,generator,9),1);
+  assert.equal(command(1,furnace,5),1);
+  assert.equal(feedByHand(furnace,1,1),-13,'An unconfigured machine has no material inlet.');
+  assert.equal(choose(furnace,'form-plate'),-6);
+  const stale=device(furnace).id;
+  assert.equal(choose(furnace,'smelt-iron-ingot'),1);
+  assert.equal(command(15,-1,furnace,1,[1,0,stale]),-15);
+  const refill=()=>{
+    for(let n=0;n<8;n++) assert.equal(command(9,tile(23,16)),1);
+    assert.ok(feedByHand(generator,3,8)>0);
+  };
+  refill();
+  for(let n=0;n<12;n++) assert.equal(command(9,ore),1);
+  assert.equal(feedByHand(furnace,1,10),10);
+  advance(30);
+  assert.equal(fieldAt(furnace,5),3,'Unpowered furnace waits.');
+  assert.equal(choose(furnace,'smelt-copper-ingot'),-26,'Switching a backed-up machine preserves inventory.');
+  cable(20,17,20,16);
+  assert.equal(heldNew(15),4);
+  advance(150);
+  assert.equal(available(furnace,11,2),5);
+  assert.equal(take(furnace,11,5),5);
+  advance(90);
+  assert.equal(take(furnace,11,3),3);
+  assert.equal(command(1,table,18),1);
+  cable(20,16,22,16);
+  assert.equal(heldNew(15),0);
+  assert.equal(choose(table,'form-plate'),1);
+  refill();
+  advance(60);
+  assert.equal(take(furnace,11,2),2);
+  assert.equal(feedByHand(table,11,2),2);
+  advance(90);
+  assert.equal(take(table,4,1),1);
+  assert.equal(command(1,tile(21,16),1),1);
+  assert.equal(stage(),9);
+  const conserved=available(ore,1,2);
+  assert.ok(conserved>0);
+  assert.equal(command(1,tile(18,16),1),-4,'The single starting belt spent one plate.');
+  for(let n=0;n<3;n++) assert.equal(command(9,ore),1);
+  assert.equal(feedByHand(furnace,1,5),5);
+  refill();
+  until(()=>stage()===10,'A belt actually sends iron ingots to the assembly bench.');
+  const flowing=save();
+  assert.equal(restore(flowing),1);
+  assert.deepEqual(save(),flowing);
+  until(()=>stage()===11,'Only the batch using automatic intake advances the opening.');
+  assert.equal(available(ore,1,2),conserved,'The simple miner retained its ore.');
+  console.log('P1 opening passed: timed handcraft, copper wiring, recipe choice, automatic intake and V10 restore.');
+}
+
+const modernEmpty=save();
+testProductionOpening();
+assert.equal(restore(legacySave(modernEmpty,9)),1);
 advance(100);
 assert.equal(stage(),0);
 const catalog=directory();
@@ -115,6 +258,7 @@ assert.deepEqual(catalog.get(20).slice(1,4),[11,2,14],'Industrial level exposes 
 assert.deepEqual(catalog.get(20).slice(12,15),[1,4,4]);
 assert.deepEqual(catalog.get(17).slice(12,15),[1,1,5]);
 assert.equal(catalog.get(9)[5],108);
+assert.equal(catalog.get(10)[7]/(10*hz),120,'The battery still holds 120 MJ.');
 assert.equal(snapshot()[36],0);
 assert.equal(snapshot().slice(header,header+width*34*19).filter((_,i)=>i%19===0).some(Boolean),false);
 for(let i=0;i<5;i++) act(9,19,16);
@@ -129,7 +273,7 @@ assert.equal(command(1,tile(19,17),17),-3);
 assert.equal(snapshot()[36],5,'Invalid placement spends nothing.');
 place(19,16,17);
 assert.equal(snapshot()[36],0,'The directory placement spends materials directly from a fresh campaign.');
-advance(120);
+advance(6*hz);
 assert.equal(fieldAt(ore,10),2);
 assert.equal(snapshot()[36],0);
 captureReview('miner');
@@ -142,7 +286,7 @@ assert.equal(take(ore,1,1),-9);
 assert.equal(snapshot()[36],2);
 assert.equal(command(12),1); assert.equal(command(12),1);
 place(21,16,18);
-advance(60); act(11,19,16);
+advance(3*hz); act(11,19,16);
 const firstFeed=save();
 for (let i=0;i<12;i++) act(9,19,16);
 assert.deepEqual(device(bench).slots,[[1,1,0,10,3],[4,2,0,5,2],[9,3,0,1,3]]);
@@ -165,11 +309,11 @@ assert.equal(snapshot()[36],12);
 const noInput=save();
 assert.equal(takeInput(bench,1,1),-9,'The reserved item cannot be withdrawn.');
 assert.deepEqual(save(),noInput);
-advance(29);
+advance(1.5*hz-1);
 assert.equal(device(bench).slots[1][2],1,'Withdrawing unconsumed input does not interrupt a cycle.');
 assert.equal(restore(firstFeed),1);
 assert.equal(feedByHand(bench,1,1),1);
-advance(30);
+advance(1.5*hz);
 const firstPlate=save();
 act(11,21,16);
 while (snapshot()[1]<5) { act(9,19,16); assert.equal(command(12),1); }
@@ -187,9 +331,9 @@ act(11,21,16); place(22,16,12);
 for (let n=0;n<120 && fieldAt(bench,13)===0;n++) advance(1);
 assert.equal(fieldAt(bench,13),1,'The press buffers an output before the next belt pulse.');
 const selectedPress=device(bench).id;
-advance(5);
+advance(8);
 assert.equal(take(bench,4,1,selectedPress),-9,'Manual withdrawal cannot duplicate cargo taken by automation.');
-advance(11000);
+advance(550*hz);
 assert.ok(snapshot()[19]>=150);
 const beforeDrill=save();
 for (let i=0;i<5;i++) act(9,19,28);
@@ -229,23 +373,23 @@ until(()=>fieldAt(tile(22,20),16)>=3,'Build three mirror modules.');
 act(11,22,20); act(13,33,15,7);
 for(let i=0;i<5;i++) act(9,23,16);
 act(13,33,15,3); assert.equal(command(5),1);
-advance(200); assert.equal(stage(),17);
+advance(10*hz); assert.equal(stage(),17);
 place(5,20,3); place(6,20,7,3); cable(5,20,20,20);
 const feed=[tile(6,19),3,tile(6,18),3,tile(6,17),3,tile(6,16),3,tile(6,15),3,tile(6,14),0];
 for(let x=7;x<33;x++) feed.push(tile(x,14),0);
 feed.push(tile(33,14),1);
 assert.equal(command(2,0,0,0,feed),1);
 until(()=>snapshot()[13]===16,'Cores arrive at the station.');
-assert.equal(command(6),1); advance(101); assert.equal(snapshot()[15],1);
+assert.equal(command(6),1); advance(5*hz+1); assert.equal(snapshot()[15],1);
 assert.equal(device(tile(33,15)).demand,120);
 assert.equal(device(tile(33,15)).used,0);
 captureReview('first-light');
 place(33,16,10); cable(33,15,33,16);
 until(()=>device(tile(33,16)).charge>0,'A battery reports the power actually charging it.');
-advance(1800); assert.equal(command(6),1); advance(101);
+advance(90*hz); assert.equal(command(6),1); advance(5*hz+1);
 assert.equal(device(tile(33,15)).used,120);
 assert.ok(device(tile(33,16)).discharge>0);
-advance(499);
+advance(25*hz-1);
 assert.equal(snapshot()[7],1,'Charged storage and continuous supply complete first light.');
 place(19,28,2); place(21,28,5); place(22,28,14); place(24,28,12);
 assert.equal(command(2,0,0,0,[tile(20,28),0,tile(23,28),0]),1);
@@ -292,7 +436,7 @@ assert.deepEqual([device(tile(12,30)).grade,device(tile(12,30)).ore],[2,2]);
 assert.equal(restore(beforeBlueprint),1);
 
 // The version-four payload stores separate drill kinds and has no library tail.
-const v4=beforeBlueprint.slice(0,54+width*34*19);
+const v4=saveWith20HzClock(beforeBlueprint).slice(0,54+width*34*19);
 v4[0]=4;
 const legacyInputs=new Map([[5,[[1,1]]],[6,[[2,2]]],[7,[[2,1]]],[8,[[4,2],[5,1]]],
   [14,[[4,2]]],[16,[[2,4]]],[18,[[1,1]]]]);
@@ -317,7 +461,7 @@ cable(33,15,38,26);
 cable(43,26,47,21);
 const fourthDepot=tile(52,21), fourthPress=tile(50,21);
 assert.equal(command(4,fourthDepot,8),1);
-advance(300);
+advance(15*hz);
 assert.equal(fieldAt(tile(51,21),4),8,'A fresh kit is waiting outside the blocked depot.');
 assert.equal(snapshot()[8],3,'A fourth press with undelivered output is not counted.');
 assert.deepEqual(snapshot().slice(26,29),[20,4,12],'The mission receives the simulation acceptance thresholds.');
@@ -337,13 +481,13 @@ assert.equal(take(fourthPress,8,1,removedId),-15,'A stale selection cannot take 
 const rebuilt=save();
 assert.equal(restore(rebuilt),1);
 assert.equal(command(4,fourthDepot,0),1);
-advance(15);
+advance(23);
 assert.equal(snapshot()[8],3);
 assert.equal(snapshot()[21],0,'A replacement press cannot inherit an in-flight delivery.');
 
 assert.equal(restore(blocked),1);
 assert.equal(command(4,fourthDepot,0),1);
-advance(15);
+advance(23);
 assert.equal(snapshot()[8],4);
 assert.equal(fieldAt(fourthPress,18),1);
 assert.ok(snapshot()[20]>=12);
@@ -359,7 +503,7 @@ sim.reset();
 assert.equal(restore(saved),1);
 assert.deepEqual(save(),saved,'The save restores inventory, in-flight goods and orbit progress.');
 assert.equal(command(4,fourthDepot,8),1);
-advance(400);
+advance(20*hz);
 assert.ok(snapshot()[8]<4,'An idle delivery line ages out of the 20-second window.');
 assert.equal(stage(),19);
 
@@ -374,7 +518,7 @@ function deployMirror() {
   until(()=>fieldAt(tile(22,20),16)>=3,'Three more modules leave the assembly line.');
   act(11,22,20); act(13,33,15,7);
   for(let n=0;n<5;n++) act(9,23,16);
-  act(13,33,15,3); assert.equal(command(5),1); advance(200);
+  act(13,33,15,3); assert.equal(command(5),1); advance(10*hz);
 }
 function connectCity(city,x,receiverX) {
   until(()=>snapshot()[1]>=50,'Produce construction materials for the branch line.',6000);
@@ -411,18 +555,18 @@ function connectCity(city,x,receiverX) {
   until(()=>fieldAt(tile(x,29),15)===16,'A scheduled freight crate feeds the local belt and station.');
 }
 connectCity(1,48,44); deployMirror();
-assert.equal(command(6,1,0),1); advance(360);
+assert.equal(command(6,1,0),1); advance(18*hz);
 assert.equal(stage(),20,'A successful independent valley window reveals the third city.');
 connectCity(2,9,5); deployMirror();
-assert.equal(command(6,1,1),1); advance(700);
+assert.equal(command(6,1,1),1); advance(35*hz);
 assert.equal(stage(),21,'Two adjacent windows unlock the three-city schedule.');
 captureReview('three-cities');
-assert.equal(command(6,0,2),1); advance(1000);
+assert.equal(command(6,0,2),1); advance(50*hz);
 const regionalSave=save(), progress=snapshot().slice(44,50);
 sim.reset(); assert.equal(restore(regionalSave),1);
 assert.deepEqual(save(),regionalSave,'Restoring an active campaign preserves routes, cargo and window timers.');
 assert.deepEqual(snapshot().slice(44,50),progress);
-advance(4000);
+advance(200*hz);
 assert.equal(stage(),22,'Three complete cycles finish with reserves in all three stations.');
 assert.equal(snapshot()[47],3); assert.equal(snapshot()[48],7);
 console.log('主线通过：空手采矿、第一台机器、自动送料、首照、四厂段、跨谷实物交付、相邻窗口与连续三轮三城验收。');
@@ -457,7 +601,7 @@ assert.deepEqual(quote.slice(3),[4,8]);
 assert.equal(quote[0],1);
 assert.equal(command(20,quote[2]-1,0,0,work),-23);
 assert.equal(command(20,quote[2],0,0,work),1);
-advance(40);
+advance(2*hz);
 const twoLanes=cargoTracks();
 const [oreId,oreItem,deviceId]=twoLanes.get(cross*2);
 assert.equal(oreItem,2);
@@ -465,13 +609,18 @@ assert.equal(twoLanes.get(cross*2+1)[1],8);
 const fullCross=save();
 assert.equal(restore(fullCross),1);
 assert.deepEqual(save(),fullCross);
+const v8=legacySave(fullCross,8);
+assert.equal(restore(v8),1);
+assert.equal(snapshot()[0],Math.ceil(v8[1]*hz/20));
+assert.deepEqual(legacySave(save(),8),v8,'V8 migration preserves the timeline, cargo identities and stored energy.');
+assert.equal(restore(fullCross),1);
 assert.equal(previewTransports([cross,15,0])[0],-21);
 assert.equal(command(21,cross,0,2,[oreId,deviceId]),1);
 const afterPickup=save();
 assert.equal(command(21,cross,0,2,[oreId,deviceId]),-22);
 assert.deepEqual(save(),afterPickup);
 assert.equal(cargoTracks().get(cross*2+1)[0],twoLanes.get(cross*2+1)[0]);
-advance(10);
+advance(0.5*hz);
 assert.notEqual(cargoTracks().get(cross*2)[0],oreId);
 const newPlan=command(16,cross,fast,0,named('高速交叉段'));
 const layout=blueprints().get(newPlan);
@@ -521,16 +670,10 @@ beforeHub[progressStart(beforeHub)]=1;
 assert.equal(restore(beforeHub),1);
 place(0,10,12);
 const recent=save();
-const legacySource=recent.subarray(0,recent.length-recent.at(-1));
-const v7=legacySource.slice();
-v7[0]=7;
+const v7=legacySave(recent,7);
 assert.equal(restore(v7),1);
-assert.deepEqual(save(),recent);
-const legacyOffset=progressStart(legacySource);
-const v6=new Int32Array(legacySource.length-4);
-v6.set(legacySource.subarray(0,legacyOffset));
-v6.set(legacySource.subarray(legacyOffset+4),legacyOffset);
-v6[0]=6;
+assert.deepEqual(legacySave(save(),7),v7);
+const v6=legacySave(recent,6);
 assert.equal(restore(v6),1);
 assert.equal(fieldAt(tile(0,10),0),12);
 assert.deepEqual(limits().slice(0,10),[0,16,0,2,9,48,0,0,56,34]);
@@ -546,10 +689,10 @@ assert.deepEqual(device(moduleStation).slots[2],[9,3,1,1,3]);
 const equipped=save();
 assert.equal(restore(equipped),1);
 assert.deepEqual(save(),equipped);
-advance(19);
+advance(hz-1);
 assert.equal(device(moduleStation).slots[1][2],0);
 advance(1);
-assert.equal(device(moduleStation).slots[1][2],1,'The module shortens the 30-tick cycle to 20 ticks.');
+assert.equal(device(moduleStation).slots[1][2],1,'The module shortens the 1.5-second cycle to one second.');
 assert.equal(command(15,moduleStation,-1,9,[1,device(moduleStation).id,0,3]),1);
 assert.deepEqual(device(moduleStation).slots[2],[9,3,0,1,3]);
 console.log('发展系统通过：满仓限制、阶段交付站、地图与倍速边界、高阶设备、V6 迁移及速度模块。');

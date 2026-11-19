@@ -7,6 +7,7 @@ mod footprints;
 mod interface;
 mod inventory;
 mod progression;
+mod recipes;
 mod regions;
 mod transport;
 mod transport_save;
@@ -20,13 +21,14 @@ use belts::{node, RETIRED_SOURCE};
 use campaign::Stage;
 use catalog::*;
 use regions::*;
-use world::{Cell, Orbit, World};
+use world::{Cell, Orbit, World, FUEL_STEPS_PER_TICK};
 
 const HEADER: usize = 54 + 3 * 14 + 2;
-const SAVE_HEADER: usize = 32 + 2 * ROUTE_WORDS;
+const SAVE_HEADER: usize = 32 + 2 * LEGACY_ROUTE_WORDS;
 const SAVE_CELL_WORDS: usize = 19;
 const SAVE_WORDS: usize = SAVE_HEADER + N * SAVE_CELL_WORDS;
-const SAVE_VERSION: i32 = 8;
+const TAGGED_SAVE_VERSION: i32 = 8;
+const PRE_RECIPE_SAVE_VERSION: i32 = 9;
 const BUFFER: usize = 48_000;
 const MAX_INPUT: usize = 1_000_000;
 
@@ -87,6 +89,11 @@ pub extern "C" fn max_speed() -> u32 {
 }
 
 #[no_mangle]
+pub extern "C" fn tick_rate() -> u32 {
+    HZ
+}
+
+#[no_mangle]
 pub extern "C" fn content_signature() -> u32 {
     BUILD_SIGNATURE
 }
@@ -120,7 +127,7 @@ pub extern "C" fn command(op: i32, a: i32, b: i32, c: i32, len: usize) -> i32 {
             9 if tile < N => world.gather(tile),
             10 => world.craft_miner(),
             11 if tile < N => world.collect(tile),
-            12 => world.handwork(),
+            12 if world.legacy_recipes => world.handwork(),
             13 if tile < N && (1..MATERIAL_ITEMS as i32).contains(&b) => {
                 world.hand_feed(tile, b as u8)
             }
@@ -132,6 +139,10 @@ pub extern "C" fn command(op: i32, a: i32, b: i32, c: i32, len: usize) -> i32 {
             19 => world.blueprints.import_legacy(words),
             20 => world.build_transports(a, words),
             21 => world.take_cargo(tile, b as usize, c, words),
+            22 if tile < N => world.select_recipe(tile, b, c),
+            23 => world.start_handcraft(a, b),
+            24 => world.cancel_handcraft(a),
+            25 => world.finish_handcraft(a),
             _ => -1,
         }
     })
@@ -179,15 +190,19 @@ pub extern "C" fn snapshot() -> usize {
             REQUIRED_KITS as i32,
             world.stage as i32,
             world.packed_miners as i32,
-            MINER_COST as i32,
+            world.build_materials(SIMPLE_MINER)[0].1 as i32,
             MINER_TICKS as i32,
             MINER_CAPACITY as i32,
-            (1..=MAX_KIND)
+            (1..=SPLICER)
                 .filter(|&kind| world.unlocked(kind))
                 .fold(0, |mask, kind| mask | (1 << kind)),
             FIRST_ORE as i32,
         ]);
-        output.extend(world.stock[1..MATERIAL_ITEMS].iter().map(|&v| v as i32));
+        output.extend(
+            world.stock[1..LEGACY_MATERIAL_ITEMS]
+                .iter()
+                .map(|&v| v as i32),
+        );
         output.extend([
             o.modules as i32,
             o.target as i32,
@@ -269,7 +284,7 @@ pub extern "C" fn snapshot() -> usize {
                 c.progress as i32,
                 c.energy as i32,
             ]);
-            output.extend(c.inv[1..MATERIAL_ITEMS].iter().map(|&n| n as i32));
+            output.extend(c.inv[1..LEGACY_MATERIAL_ITEMS].iter().map(|&n| n as i32));
             output.push(c.delivering_kits(world.tick) as i32);
         }
         for g in &world.grids {
@@ -280,6 +295,7 @@ pub extern "C" fn snapshot() -> usize {
                 g.stored as i32,
             ]);
         }
+        world.write_recipe_view(output);
         world.write_machine_footprints(output);
         world.write_progression(output);
         world.write_transport_projection(output);
@@ -302,7 +318,11 @@ pub extern "C" fn save() -> usize {
             world.delivered as i32,
             world.kit_total as i32,
         ]);
-        output.extend(world.stock[..MATERIAL_ITEMS].iter().map(|&v| v as i32));
+        output.extend(
+            world.stock[..LEGACY_MATERIAL_ITEMS]
+                .iter()
+                .map(|&v| v as i32),
+        );
         output.extend([
             o.orbiting as i32,
             o.launch_left as i32,
@@ -326,7 +346,11 @@ pub extern "C" fn save() -> usize {
         ]);
         for r in world.routes {
             output.extend([r.arrival as i32, r.delivered as i32]);
-            output.extend(r.crate_stock.map(i32::from));
+            output.extend(
+                r.crate_stock[..LEGACY_MATERIAL_ITEMS]
+                    .iter()
+                    .map(|&v| i32::from(v)),
+            );
         }
         for (i, c) in world.cells.iter().enumerate() {
             output.extend([
@@ -341,13 +365,14 @@ pub extern "C" fn save() -> usize {
                 world.cargo[node(i, 0)].item as i32,
                 world.cargo[node(i, 0)].ready as i32,
             ]);
-            output.extend(c.inv[1..MATERIAL_ITEMS].iter().map(|&n| n as i32));
+            output.extend(c.inv[1..LEGACY_MATERIAL_ITEMS].iter().map(|&n| n as i32));
             output.push(world.cargo[node(i, 0)].source as i32);
         }
         debug_assert_eq!(output.len(), SAVE_WORDS);
         world.write_transport_save(output);
         world.write_progression_save(output);
         world.write_saved_devices(output);
+        world.write_recipe_save(output);
         world.blueprints.write_save(output);
         output.extend(SAVE_DATA_TAG);
         output.len()
@@ -361,7 +386,10 @@ pub extern "C" fn restore(len: usize) -> i32 {
         let Some(words) = runtime.input.get(..len) else {
             return -1;
         };
-        let data = if words.first() == Some(&SAVE_VERSION) {
+        let data = if matches!(
+            words.first().copied(),
+            Some(TAGGED_SAVE_VERSION | PRE_RECIPE_SAVE_VERSION | SAVE_VERSION)
+        ) {
             let Some(end) = words
                 .last()
                 .and_then(|&size| usize::try_from(size).ok())
@@ -371,7 +399,12 @@ pub extern "C" fn restore(len: usize) -> i32 {
             else {
                 return -1;
             };
-            if words[end..] != *SAVE_DATA_TAG {
+            let tag = if words[0] < SAVE_VERSION {
+                LEGACY_SAVE_DATA_TAG
+            } else {
+                SAVE_DATA_TAG
+            };
+            if words[end..] != *tag {
                 return -25;
             }
             &words[..end]
@@ -386,6 +419,16 @@ pub extern "C" fn restore(len: usize) -> i32 {
             None => -1,
         }
     })
+}
+
+fn saved_ticks(value: i32, legacy_clock: bool) -> Option<u32> {
+    let ticks = u32::try_from(value).ok()?;
+    let ticks = if legacy_clock {
+        simulation_ticks(ticks)
+    } else {
+        ticks
+    };
+    (ticks <= i32::MAX as u32).then_some(ticks)
 }
 
 impl World {
@@ -428,10 +471,10 @@ impl World {
         let materials = if use_packed_miner {
             &[][..]
         } else {
-            if kind == FREIGHT_YARD || materials(kind).is_empty() {
+            if kind == FREIGHT_YARD || self.build_materials(kind).is_empty() {
                 return -1;
             }
-            materials(kind)
+            self.build_materials(kind)
         };
         if !self.progression.contains(tile)
             || !permitted(kind, tile)
@@ -444,7 +487,7 @@ impl World {
         {
             return -3;
         }
-        if kind == KILN && !self.orbit.first_light {
+        if self.legacy_recipes && kind == KILN && !self.orbit.first_light {
             return -6;
         }
         if let Err(error) = self.validate_footprint(tile, kind, dir as u8, None) {
@@ -460,7 +503,7 @@ impl World {
         self.stage = match (self.stage, kind) {
             (Stage::Gather | Stage::Craft | Stage::PlaceMiner, SIMPLE_MINER) => Stage::Mining,
             (Stage::Bench, BENCH) => Stage::Feed,
-            (Stage::Expand, IRON_DRILL) => Stage::Power,
+            (Stage::Expand, IRON_DRILL | COPPER_DRILL) => Stage::Power,
             (stage, _) => stage,
         };
         self.install(
@@ -488,7 +531,7 @@ impl World {
                 .collect();
             return self.build_transports(self.layout_revision, &plan);
         }
-        if self.stage < Stage::Power {
+        if !self.unlocked(CABLE) {
             return -6;
         }
         let mut seen = vec![false; N];
@@ -503,7 +546,10 @@ impl World {
             }
             new_tiles += u32::from(!self.cells[tile].wire);
         }
-        if !self.spend(materials(CABLE), new_tiles.div_ceil(CABLE_SPAN)) {
+        if !self.spend(
+            self.build_materials(CABLE),
+            new_tiles.div_ceil(self.cable_span()),
+        ) {
             return -4;
         }
         for p in words.chunks_exact(2) {
@@ -536,7 +582,7 @@ impl World {
             }
         }
         if c.progress > 0 {
-            if let Some(recipe) = recipe(c.kind) {
+            if let Some(recipe) = self.recipe_at(tile) {
                 for (item, count) in recipe.input {
                     returned[item as usize] += u32::from(count);
                 }
@@ -555,7 +601,7 @@ impl World {
         if c.kind == SIMPLE_MINER {
             self.packed_miners += 1;
         }
-        if matches!(c.kind, KIT_PRESS | SMELTER | BENCH) {
+        if matches!(c.kind, KIT_PRESS | SPLICER | SMELTER | BENCH) {
             for cargo in &mut self.cargo {
                 if cargo.source == tile as u16 + 1 {
                     cargo.source = RETIRED_SOURCE;
@@ -581,9 +627,9 @@ impl World {
         }
         let c = &mut self.cells[tile];
         let max = match c.kind {
-            DEPOT => 8,
+            DEPOT => (ITEMS - 1) as i32,
             SPLITTER => 1,
-            kind if recipe(kind).is_some() || kind == STATION => 2,
+            kind if PROCESSING[kind as usize] || recipe(kind).is_some() || kind == STATION => 2,
             _ => return -1,
         };
         if !(0..=max).contains(&value) {
@@ -614,29 +660,41 @@ impl World {
     }
 
     fn from_save(data: &[i32]) -> Option<Self> {
-        let max_kind = match data.first().copied()? {
+        let version = *data.first()?;
+        let max_kind = match version {
             4 if data.len() == SAVE_WORDS => FREIGHT_YARD,
             5 if data.len() > SAVE_WORDS => INDUSTRIAL_MINER,
             6 if data.len() > SAVE_WORDS => CROSSING,
-            7 | SAVE_VERSION if data.len() > SAVE_WORDS => MAX_KIND,
+            7..=PRE_RECIPE_SAVE_VERSION if data.len() > SAVE_WORDS => REINFORCED_MINER,
+            SAVE_VERSION if data.len() > SAVE_WORDS => MAX_KIND,
             _ => return None,
         };
+        let legacy_clock = version < PRE_RECIPE_SAVE_VERSION;
+        let ticks = |value| saved_ticks(value, legacy_clock);
         let sane = |x: i32| (0..1_000_000_000).contains(&x);
         let flag = |x| matches!(x, 0 | 1);
-        if data[1..13].iter().any(|&x| !sane(x)) {
+        if data[2..13].iter().any(|&x| !sane(x)) {
             return None;
         }
+        let tick = ticks(data[1])?;
+        let launch_left = ticks(data[14])?;
+        let time_left = ticks(data[16])?;
+        let fault_at = ticks(data[19])?;
+        let sun_until = ticks(data[20])?;
+        let next_window = ticks(data[21])?;
+        let clock_limit = simulation_ticks(1_000_000_000);
         if !flag(data[13])
-            || !(0..=LAUNCH_TICKS as i32).contains(&data[14])
+            || tick >= clock_limit
+            || launch_left > LAUNCH_TICKS
             || !(0..=4).contains(&data[15])
-            || !(0..=WINDOW as i32).contains(&data[16])
+            || time_left > WINDOW
             || !flag(data[17])
             || !(0..=3).contains(&data[18])
-            || !(0..=WINDOW as i32).contains(&data[19])
-            || !sane(data[20])
-            || !sane(data[21])
+            || fault_at > WINDOW
+            || sun_until >= clock_limit
+            || next_window >= clock_limit
             || !flag(data[22])
-            || matches!(data[15], 1 | 2) && data[16] == 0
+            || matches!(data[15], 1 | 2) && time_left == 0
         {
             return None;
         }
@@ -649,11 +707,11 @@ impl World {
             || !(0..=3).contains(&data[28])
             || !(0..=7).contains(&data[29])
             || !(0..=2).contains(&data[30])
-            || data[15] == 2 && data[16] as u32 > WINDOW_LENGTH[data[26] as usize]
+            || data[15] == 2 && time_left > WINDOW_LENGTH[data[26] as usize]
         {
             return None;
         }
-        w.tick = data[1] as u32;
+        w.tick = tick;
         w.delivered = data[2] as u32;
         w.kit_total = data[3] as u32;
         for (slot, &value) in w.stock.iter_mut().zip(&data[4..13]) {
@@ -661,15 +719,15 @@ impl World {
         }
         w.orbit = Orbit {
             orbiting: data[13] == 1,
-            launch_left: data[14] as u32,
+            launch_left,
             mode: data[15] as u8,
-            time_left: data[16] as u32,
+            time_left,
             first_light: data[17] == 1,
             fault: data[18] as u8,
-            fault_at: data[19] as u32,
-            sun_until: data[20] as u32,
+            fault_at,
+            sun_until,
             sun_city: u8::try_from(data[31]).ok()?,
-            next_window: data[21] as u32,
+            next_window,
             complete: data[22] == 1,
             modules: data[25] as u8,
             target: data[26] as u8,
@@ -681,9 +739,9 @@ impl World {
         for (r, words) in w
             .routes
             .iter_mut()
-            .zip(data[32..SAVE_HEADER].chunks_exact(ROUTE_WORDS))
+            .zip(data[32..SAVE_HEADER].chunks_exact(LEGACY_ROUTE_WORDS))
         {
-            r.arrival = u32::try_from(words[0]).ok()?;
+            r.arrival = ticks(words[0])?;
             r.delivered = u32::try_from(words[1]).ok()?;
             for (slot, &count) in r.crate_stock.iter_mut().zip(&words[2..]) {
                 *slot = u16::try_from(count).ok()?;
@@ -696,15 +754,18 @@ impl World {
             .chunks_exact(SAVE_CELL_WORDS)
             .enumerate()
         {
+            let progress = ticks(s[4])?;
+            let energy = ticks(s[5])?;
+            let last_kit_delivery = ticks(s[6])?;
             if !(0..=i32::from(max_kind)).contains(&s[0])
                 || !(0..4).contains(&s[1])
                 || !flag(s[2])
                 || !flag(s[7])
-                || !(0..i32::from(u16::MAX)).contains(&s[4])
-                || !(0..=10_000_000).contains(&s[5])
-                || !(0..=data[1]).contains(&s[6])
+                || progress >= simulation_ticks(u16::MAX.into())
+                || energy > simulation_ticks(10_000_000)
+                || last_kit_delivery > tick
                 || !(0..MATERIAL_ITEMS as i32).contains(&s[8])
-                || !sane(s[9])
+                || ticks(s[9])? >= clock_limit
                 || s[10..18]
                     .iter()
                     .any(|x| !(0..=if s[0] == FREIGHT_YARD as i32 { 32 } else { 24 }).contains(x))
@@ -719,15 +780,16 @@ impl World {
                 kind
             };
             let max = match kind {
-                DEPOT => 8,
+                DEPOT => (ITEMS - 1) as i32,
                 SPLITTER => 1,
                 MERGER => 3,
                 _ => 2,
             };
             if !(0..=max).contains(&s[3])
-                || (kind != 0 && (!w.stage.allows(kind) || !permitted(kind, i)))
+                || (kind != 0
+                    && ((version < SAVE_VERSION && !w.stage.allows(kind)) || !permitted(kind, i)))
                 || (s[8] != 0 && !is_belt(kind))
-                || (s[6] != 0 && kind != KIT_PRESS)
+                || (s[6] != 0 && !matches!(kind, KIT_PRESS | SPLICER))
                 || (s[18] != 0 && !matches!(s[8] as u8, KIT | PLATE))
             {
                 return None;
@@ -736,7 +798,7 @@ impl World {
             for (slot, &value) in inv[1..MATERIAL_ITEMS].iter_mut().zip(&s[10..18]) {
                 *slot = value as u16;
             }
-            if data[0] < SAVE_VERSION && s[4] > 0 {
+            if version < TAGGED_SAVE_VERSION && progress > 0 {
                 if let Some(r) = recipe(kind) {
                     let legacy = LEGACY_RECIPE_INPUTS[kind as usize];
                     if r.input != legacy {
@@ -749,6 +811,11 @@ impl World {
                     }
                 }
             }
+            let progress = if legacy_clock && kind == GENERATOR {
+                s[4] as u32 * (HZ * FUEL_STEPS_PER_TICK / CONTENT_HZ)
+            } else {
+                progress
+            };
             w.install(
                 i,
                 Cell {
@@ -756,9 +823,9 @@ impl World {
                     dir: s[1] as u8,
                     wire: s[2] == 1,
                     cfg: s[3] as u8,
-                    progress: s[4] as u16,
-                    energy: (s[5] as u32).min(BATTERY_CAPACITY),
-                    last_kit_delivery: s[6] as u32,
+                    progress,
+                    energy: energy.min(BATTERY_CAPACITY),
+                    last_kit_delivery,
                     split_turn: s[7] == 1,
                     inv,
                     ..Cell::default()
@@ -790,13 +857,19 @@ impl World {
                         || w.progression.tier == 0
                             && matches!(
                                 c.kind,
-                                EXPRESS_BELT | REINFORCED_IRON_DRILL..=REINFORCED_FUEL_DRILL
+                                EXPRESS_BELT | ULTRA_BELT | REINFORCED_IRON_DRILL
+                                    ..=REINFORCED_FUEL_DRILL | REINFORCED_COPPER_DRILL
                             ))
             }) {
                 return None;
             }
-            w.read_transport_save(transport)?;
             let rest = w.read_saved_devices(rest, true)?;
+            let rest = if version == SAVE_VERSION {
+                w.read_recipe_save(rest)?
+            } else {
+                rest
+            };
+            w.read_transport_save(transport, legacy_clock)?;
             w.blueprints = blueprints::Library::read_save(rest)?;
             w.update_grids();
         } else {

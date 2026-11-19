@@ -46,7 +46,7 @@ impl World {
             self.stock[cargo.item as usize] = self.stock[cargo.item as usize].saturating_add(1);
             if cargo.item == PLATE && cargo.source != 0 {
                 self.delivered = self.delivered.saturating_add(1);
-                if matches!(self.stage, Stage::Belt | Stage::BeltFed) {
+                if self.legacy_recipes && matches!(self.stage, Stage::Belt | Stage::BeltFed) {
                     self.stage = Stage::Expand;
                 }
             }
@@ -58,7 +58,19 @@ impl World {
             }
         } else {
             self.cells[anchor].inv[cargo.item as usize] += 1;
-            if self.stage == Stage::Belt && kind == BENCH && cargo.item == IRON {
+            if !self.legacy_recipes
+                && matches!(self.stage, Stage::Belt | Stage::BeltFed)
+                && kind == BENCH
+                && cargo.item == IRON_INGOT
+                && cargo.id != 0
+            {
+                self.cells[anchor].belt_iron += 1;
+                self.stage = Stage::BeltFed;
+            } else if self.legacy_recipes
+                && self.stage == Stage::Belt
+                && kind == BENCH
+                && cargo.item == IRON
+            {
                 self.stage = Stage::BeltFed;
             }
         }
@@ -85,8 +97,11 @@ impl World {
             (cell.inv.iter().position(|&count| count > 0)? as u8, 0)
         } else if cell.kind == DEPOT && cell.cfg != 0 && self.stock[cell.cfg as usize] > 0 {
             (cell.cfg, 0)
-        } else if let Some(r) = recipe(cell.kind) {
-            if self.stage < Stage::Belt || cell.inv[r.output as usize] == 0 {
+        } else if let Some(r) = self.recipe_at(tile) {
+            if self.stage < Stage::Belt
+                || cell.inv[r.output as usize] == 0
+                || (cell.kind == SIMPLE_MINER && !self.legacy_recipes)
+            {
                 return None;
             }
             (
@@ -222,8 +237,8 @@ impl World {
             }
             // A fast entrance may receive on its own cadence. Ordinary direct
             // device transfers and the tutorial retain the original beat.
-            if (!is_belt(target) || belt_interval(target) >= BELT_TICKS)
-                && self.tick % BELT_TICKS != 0
+            if (!is_belt(target) || self.legacy_recipes && belt_interval(target) >= BELT_TICKS)
+                && !belt_pulse(self.tick)
             {
                 continue;
             }

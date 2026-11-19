@@ -12,6 +12,16 @@ const itemArt = [
   '<path fill="#c1924d" d="m5 10 13-6 9 6v13l-13 5-9-5Z"/><path fill="#f8d896" d="m5 10 9 5 13-5M14 15v13"/><path d="m9 13 13-6m-4 13 5-2"/>',
   '<path fill="#b28a58" d="m4 10 12-5 12 5v14l-12 4-12-4Z"/><path fill="#e5c58e" d="m4 10 12 5 12-5"/><path d="M16 15v13m-7-13 4 2m10 3v4"/>',
   '<path fill="#6caba9" d="M5 8h22v17H5z"/><path fill="#dfedd3" d="m9 15 4 3-4 3m6-6 4 3-4 3m6-6 4 3-4 3" stroke-width="2"/>',
+  '<path fill="#b97044" d="m4 23 3-12 9-6 10 7 3 10-8 6H10Z"/><path fill="#efad75" d="m7 11 9-6 10 7-8 3Z"/><path stroke="#ffd9a1" d="m8 20 5-4m8 7 4-4"/>',
+  '<path fill="#a6bcc7" d="M4 23l4-10 16-5 5 9-4 7-16 4Z"/><path fill="#e5f0f4" d="m8 13 16-5 5 9-18 6Z"/>',
+  '<path fill="#a86239" d="M4 23l4-10 16-5 5 9-4 7-16 4Z"/><path fill="#eaab71" d="m8 13 16-5 5 9-18 6Z"/>',
+  '<path fill="#5f80ad" d="M4 23l4-10 16-5 5 9-4 7-16 4Z"/><path fill="#b4d7fc" d="m8 13 16-5 5 9-18 6Z"/>',
+  '<path fill="#94abb5" d="m8 8 7 3 2 8-4 7-5-2-1-9Zm12-3 5 2 2 9-5 3-3-8Z"/><path fill="#d9e4e9" d="M5 9l5-4 7 4-1 5-7 2Zm12-3 3-3 6 2 1 4-6 2Z"/>',
+  '<rect x="7" y="6" width="18" height="21" rx="6" fill="#955431"/><path d="M8 11h16M8 15h16M8 19h16M8 23h16m-7 4v3" stroke="#f5ad63" stroke-width="3"/>',
+  '<path fill="#7ba9bd" d="m4 12 14-7 11 6-3 11-15 6-7-6Z"/><path fill="#cce9f4" d="m4 12 14-7 11 6-15 7Z"/><path stroke="#f1fcff" d="m9 13 12-6m-5 10 10-5"/>',
+  '<path fill="#c7ba8d" fill-rule="evenodd" d="M3 6h25v21H3zm6 6v9h13v-9Z"/><path d="m5 8 3 3m16-3 2 3M5 24l3-3m16 2 2 2"/>',
+  '<path fill="#c8804d" d="M5 12h5l2-6h10l2 6h4v8h-4l-2 6H12l-2-6H5Z"/><path fill="#f2bb82" d="M13 10h8v12h-8z"/><path d="M16 10v12m3-12v12"/>',
+  '<path fill="#548397" d="m3 20 6-9 16-4 4 9-4 8-15 4Z"/><path fill="#9ec3ce" d="m9 11 16-4 4 9-17 6Z"/><path stroke="#d5e8ec" d="m16 13 7-2m-8 6 11-3"/>',
 ];
 
 const machineArt: Record<number,string> = {
@@ -19,6 +29,8 @@ const machineArt: Record<number,string> = {
   [Kind.Belt]:'<rect x="2" y="9" width="28" height="14" rx="4"/><path d="M8 9v14m16-14v14m-12-7h8m-3-3 3 3-3 3"/>',
   [Kind.FastBelt]:'<rect x="2" y="9" width="28" height="14" rx="4"/><path class="accent cyan" d="m8 12 4 4-4 4m6-8 4 4-4 4m6-8 4 4-4 4"/>',
   [Kind.ExpressBelt]:'<rect x="2" y="7" width="28" height="18" rx="3"/><path class="accent fuel" d="m7 11 4 5-4 5m7-10 4 5-4 5m7-10 4 5-4 5"/>',
+  [Kind.UltraBelt]:'<rect x="2" y="6" width="28" height="20" rx="3"/><path class="accent cyan" d="M6 10h20M6 22h20m-20-6h21m-6-5 6 5-6 5"/>',
+  [Kind.Splicer]:'<rect x="3" y="5" width="26" height="22" rx="3"/><path class="accent fuel" d="M4 10h5l7 6h12M4 16h12M4 22h5l7-6"/>',
   [Kind.Merger]:'<path d="M3 7h6l9 9h11M3 25h6l9-9m-12-12 3 3-3 3m0 12 3 3-3 3m19-15 4 3-4 3"/>',
   [Kind.Crossing]:'<path d="M4 11h7m10 0h7M4 21h7m10 0h7m-14-17h8v24h-8z"/><path d="M4 16h6m15 0h4m-3-3 3 3-3 3m-9-11v16m-3-4 3 4 3-4"/>',
   [Kind.IronDrill]:'<path d="M6 23V8h19v15M3 24h26M11 13h9l-5 9Zm4-2V6"/><path class="accent iron" d="m12 26 4-3 5 3-4 3Z"/>',
@@ -50,8 +62,10 @@ export function itemIcon(item:number) {
 export function machineIcon(kind:number) {
   kind=content.machines[kind]?.icon ?? kind;
   if (kind===Kind.IndustrialMiner) kind=Kind.IronDrill;
-  const reinforced=kind>=Kind.ReinforcedIronDrill && kind<=Kind.ReinforcedMiner;
-  if (reinforced) kind=kind===Kind.ReinforcedMiner?Kind.IronDrill:kind-Kind.ReinforcedIronDrill+Kind.IronDrill;
+  const copper=kind===Kind.CopperDrill || kind===Kind.ReinforcedCopperDrill;
+  const reinforced=kind===Kind.ReinforcedCopperDrill || kind>=Kind.ReinforcedIronDrill && kind<=Kind.ReinforcedMiner;
+  if (copper) kind=Kind.IronDrill;
+  if (reinforced && !copper) kind=kind===Kind.ReinforcedMiner?Kind.IronDrill:kind-Kind.ReinforcedIronDrill+Kind.IronDrill;
   return `<svg class="machine-icon" viewBox="0 0 32 32" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${machineArt[kind] ?? ''}${reinforced?'<path class="accent fuel" d="M22 5h5m-2.5-2.5v5"/>':''}</svg>`;
 }
 

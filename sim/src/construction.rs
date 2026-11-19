@@ -81,13 +81,21 @@ impl World {
                 cargo[target] = Cargo {
                     from: location,
                     since: self.tick,
-                    ready: self.tick + belt_interval(kind),
+                    ready: belt_deadline(
+                        self.tick,
+                        belt_interval(kind),
+                        if self.legacy_recipes {
+                            0
+                        } else {
+                            BELT_RATE[kind as usize]
+                        },
+                    ),
                     blocked: false,
                     ..old_cargo
                 };
             }
             if old.kind != kind {
-                for &(item, count) in materials(kind) {
+                for &(item, count) in self.build_materials(kind) {
                     cost[item as usize] += count;
                 }
             }

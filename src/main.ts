@@ -4,12 +4,12 @@ import { beltTerminal, detourLockedCrossing, dragTiles, findBeltPath, projectBel
 import { bindActionHold } from './action-hold';
 import { bindInventoryDrag, canSelectSlot, readSlot, sameSlot, type Selection, type Slot, type SlotRole } from './inventory-drag';
 import {
-  DIRECTION, Field, H, HEADER, HZ, Kind, Meta, Op,
+  DIRECTION, Field, H, HEADER, HZ, Kind, Meta, Op, energyMj, legacyRecipes, selectedRecipe,
   STATION, STATUS, STEP, STRIDE, Stage, W, SPEED_MODULE, at, cell, drillTool, held, inBounds, isTransport, plainBelt, progression, stackLimit, mw, time, unlocked, xy, CITY, CityField, cityValue, knownItems,
   type Command, type Mode, type PreviewCell, type Tool,
 } from './model';
 import { Renderer } from './renderer';
-import { campaignTask, contents, firstMachine, guideText, handbook } from './campaign';
+import { campaignTask, contents, firstMachine, guideText, handbook, visibleGuide } from './campaign';
 import { clearLegacyBlueprint, downloadSave, legacyBlueprint, persistSave, resumeSave, reviewScene } from './storage';
 import { actionIcon, itemIcon, machineIcon } from './icons';
 import { devicePower, designPower } from './power-readout';
@@ -33,7 +33,7 @@ let data=new Int32Array(HEADER+W*H*STRIDE);
 let limits=progression(data);
 let ready=false, mode:Mode='task', tool:Tool | undefined, selected=-1, focus=-1, inspectingTile=false;
 let guideOpen=false, guideReturnScroll=0;
-let manualWork=false, handcraftExpanded=false;
+let manualWork=false, handcraftExpanded:number|undefined;
 let gainUntil=0, gainTile=-1, recenter=true;
 const gain=byId('ore-gain'), mapHarvest=byId('map-harvest');
 const portraitDrawer=window.matchMedia('(max-width: 720px) and (orientation: portrait)');
@@ -49,6 +49,7 @@ let legacyCleanup=false;
 let buildTab:'catalog'|'blueprints'='catalog';
 let speed=1, exportPending=false, manualSave=false, noticeTimeout=0, commitTimeout=0;
 let pending:((result:number)=>void) | undefined, panelPointer=false;
+let pendingFailure:((status:number)=>void) | undefined;
 let previewSequence=0;
 let transportPreview:{key:string;request:number;cargoKey:string;result?:Int32Array} | undefined;
 let confirmTransport=0;
@@ -120,15 +121,30 @@ const harvest=bindActionHold(app,{
   mapMeter:mapHarvest.querySelector<HTMLElement>('.harvest-fill')!,
 });
 
-// TODO: Read the eligible recipes and independent handcraft cycles from the simulation catalog.
-// The legacy Handwork command always exchanges one iron ore for one structural plate.
-const handcraftRecipe={input:1,output:4,amount:1,duration:content.recipes.find(row=>row.id==='press-plate')!.baseTicks*1000/HZ};
-const hasHandcraftMaterial=()=>held(data,handcraftRecipe.input)>=handcraftRecipe.amount;
+const manualRecipes=content.recipes.flatMap(row=>row.handcraft?[{
+  key:row.key, inputs:row.handcraft.inputs, output:row.output, ticks:row.handcraft.ticks, unlock:row.handcraft.unlockStage,
+}]:[]);
+const legacyHandcraft={key:0,inputs:[{item:1,amount:1}],output:{item:4,amount:1},
+  ticks:content.recipes.find(row=>row.id==='press-plate')!.baseTicks,unlock:0};
+const handOptions=()=>legacyRecipes(data)?[legacyHandcraft]:manualRecipes.filter(row=>data[Meta.Stage]>=row.unlock);
+const handRecipe=(key:number)=>handOptions().find(row=>row.key===key);
+const hasHandcraftMaterial=(key:number)=>handRecipe(key)?.inputs.every(row=>held(data,row.item)>=row.amount) ?? false;
+let handToken=0, handStarted=0;
 const handcraft=bindActionHold(app,{
-  attribute:'data-handcraft', duration:handcraftRecipe.duration,
-  available:()=>holdAvailable() && mode==='view' && manualWork && handcraftExpanded && !guideOpen &&
-    panel.dataset.expanded==='true' && hasHandcraftMaterial(),
-  complete:item=>submit({op:Op.Handwork},count=>say(t('ui.handcraftResult',{item:ITEM[item],count}))),
+  attribute:'data-handcraft', duration:key=>(handRecipe(key)?.ticks ?? HZ)*1000/(HZ*speed),
+  available:key=>holdAvailable() && mode==='view' && manualWork && handcraftExpanded===key && !guideOpen &&
+    panel.dataset.expanded==='true' && hasHandcraftMaterial(key),
+  begin:key=>key===0 || submit({op:Op.StartHandcraft,a:key,b:++handToken},
+    ()=>{handStarted=data[Meta.Tick];},()=>{handcraft.stop();}),
+  cancel:key=>{ if (key!==0) worker.postMessage({type:'cancel-handcraft',token:handToken}); },
+  complete:key=>{
+    const row=handRecipe(key);
+    if (!row || key!==0 && data[Meta.Tick]-handStarted<row.ticks) return false;
+    return submit(key===0?{op:Op.Handwork}:{op:Op.FinishHandcraft,a:handToken},count=>{
+      handStarted=data[Meta.Tick];
+      say(t('ui.handcraftResult',{item:ITEM[row.output.item],count}));
+    },()=>{handcraft.stop();});
+  },
 });
 
 bindInventoryDrag(app,byId('item-drag'),{
@@ -279,7 +295,7 @@ function selectStamp(id=0) {
 }
 
 function activeToolText() {
-  if (typeof tool==='number') return MACHINE[tool].name;
+  if (typeof tool==='number') return machineText(tool).name;
   return ({wire:'铺电缆',stamp:activeBlueprint()?.name ?? '蓝图',capture:'框选蓝图',remove:'拆除设备',cut:'拆除电缆','valley-line':'谷东班线','highland-line':'西岭班线'} as const)[tool ?? 'wire'];
 }
 
@@ -379,7 +395,7 @@ function createDraft():Draft {
       const tiles=wire || anchor<0?[last]:[...footprint(anchor,kind,cell(data,anchor,Field.Direction))];
       result.cells=tiles.map(tile=>({tile,kind:0,dir:0,wire,conflict:true}));
       result.command={op:Op.Remove,a:last,b:Number(wire)};
-      result.label=`拆除 ${wire?'电缆':MACHINE[kind].name} · ${coordinates(last)}`;
+      result.label=`拆除 ${wire?'电缆':machineText(kind).name} · ${coordinates(last)}`;
     }
     return result;
   }
@@ -566,9 +582,10 @@ function overlapsDraft(tile:number) {
   return ghost.cells.some(part=>part.kind && part.tile>=0 && [...footprint(part.tile,part.kind,part.dir)].includes(tile));
 }
 
-function submit(command:Command,done?:(result:number)=>void) {
+function submit(command:Command,done?:(result:number)=>void,failed?:(status:number)=>void) {
   if (!ready || pending) return false;
   pending=done ?? (()=>{});
+  pendingFailure=failed;
   worker.postMessage({type:'command',data:command});
   return true;
 }
@@ -602,23 +619,24 @@ function gatherAt(tile:number) {
 }
 
 function handcraftPanel() {
-  const {input,output,amount}=handcraftRecipe;
-  const missing=!hasHandcraftMaterial();
+  return handOptions().map(({key,inputs,output,ticks})=>{
+  const missing=!hasHandcraftMaterial(key), expanded=handcraftExpanded===key;
   return `<section class="handcraft-recipe" data-missing="${missing}">
-    <button type="button" class="recipe-heading" data-action="toggle-handcraft" aria-expanded="${handcraftExpanded}" aria-controls="handcraft-details">
-      ${itemIcon(output)}<span>${textHtml(ITEM[output])} ×${amount}</span><span class="recipe-disclosure" aria-hidden="true"></span>
+    <button type="button" class="recipe-heading" data-action="toggle-handcraft-${key}" aria-expanded="${expanded}" aria-controls="handcraft-details-${key}">
+      ${itemIcon(output.item)}<span>${textHtml(ITEM[output.item])} ×${output.amount}</span><span class="recipe-disclosure" aria-hidden="true"></span>
     </button>
-    <div class="recipe-details" id="handcraft-details"${handcraftExpanded?'':' hidden'}>
-      <span class="slot-label">${textHtml(t('ui.requiredMaterials'))}</span>
-      <div class="requirement${missing?' missing':''}">${itemIcon(input)}<span>${textHtml(ITEM[input])} ×${amount}</span></div>
-      ${holdButton(t('ui.holdCraft'),'data-handcraft',output,missing)}
+    <div class="recipe-details" id="handcraft-details-${key}"${expanded?'':' hidden'}>
+      <span class="slot-label">${textHtml(t('ui.requiredMaterials'))} · ${ticks/HZ} s</span>
+      ${inputs.map(({item,amount})=>`<div class="requirement${held(data,item)<amount?' missing':''}">${itemIcon(item)}<span>${textHtml(ITEM[item])} ×${amount}</span></div>`).join('')}
+      ${holdButton(t('ui.holdCraft'),'data-handcraft',key,missing)}
     </div>
   </section>`;
+  }).join('');
 }
 
 function inspectors() {
   if (guideOpen) return ['',t('ui.guide'),(Object.keys(handbook) as (keyof typeof handbook)[]).filter(
-    id=>data[Meta.Stage]>=handbook[id]).map(id=>guideEntry(id,true)).join(''),button(t('ui.guideReturn'),'close-guide')];
+    id=>visibleGuide(data,id)).map(id=>guideEntry(id,true)).join(''),button(t('ui.guideReturn'),'close-guide')];
   if (mode==='view' && manualWork) {
     return [t('ui.operations'),t('ui.handcraft'),handcraftPanel()];
   }
@@ -650,24 +668,24 @@ function missionPanel() {
     return [t('ui.activeTask'),title,`<p class="lead">${textHtml(detail)}</p>`+
       (progress?readings([[t('ui.taskProgress'),progress]]):'')+guides.map(id=>guideEntry(id)).join('')];
   }
-  if (!data[Meta.KitTotal] && firstMachine(data,Kind.KitPress)<0) {
-    const solar=firstMachine(data,Kind.Solar);
-    if (solar<0) return ['曙港 · 首照','接住曙港的阳光','<p class="lead">太阳能阵列接上电缆，光带经过时便能为工厂供电。</p>'+
-      actions(button('预览太阳能阵列','solar',true),button('生产第一套扩建设备','new-press'))];
-    return ['曙港 · 扩建','做出第一套扩建设备','<p class="lead">把两块结构件送进套件装配机，再把它的产物接到建造仓。这个厂段能为下一段供应设备。</p>'+
-      actions(button('安放套件装配机','new-press',true),button('查看太阳能阵列','solar'))];
+  const legacy=legacyRecipes(data);
+  const kitMachine=legacy?Kind.KitPress:Kind.Splicer;
+  if (!data[Meta.KitTotal] && firstMachine(data,kitMachine)<0) {
+    const detail=legacy?'给套件装配机供应结构件，并把产物送进建造仓。':
+      '在拼接站选择标准设备套件，送入框架、电枢和结构件。用短带把套件交给建造仓。';
+    return ['曙港 · 扩建','做出第一套扩建设备',`<p class="lead">${detail}</p>`];
   }
   const blocks=data[Meta.RequiredBlocks], kits=data[Meta.RequiredKits], seconds=data[Meta.DeliverySeconds];
   const deliveries:[string,string][]=[];
   for (let tile=0;tile<W*H;tile++) {
-    if (cell(data,tile,Field.Kind)!==Kind.KitPress) continue;
+    if (cell(data,tile,Field.Kind)!==kitMachine) continue;
     const status=!cell(data,tile,Field.Grid)?'未接线':cell(data,tile,Field.DeliveringKits)?'已交付':'等待交付';
-    deliveries.push([`套件机 · ${coordinates(tile)}`,status]);
+    deliveries.push([`${deviceName(kitMachine)} · ${coordinates(tile)}`,status]);
   }
   return ['任务通讯','扩建四条厂段',
-    `<p class="lead">将厂段布置在铁矿点并接电。最近 ${seconds} 秒内需有 ${blocks} 台套件机各交付新套件，全厂累计到仓 ${kits} 套，便可向谷外供货。</p>`+
+    `<p class="lead">在「建造 → 蓝图」部署厂段，接通原料和电网。最近 ${seconds} 秒内需有 ${blocks} 台设备各交付新套件，全厂累计到仓 ${kits} 套。</p>`+
     readings([['近期交付厂段',`${data[Meta.Blocks]} / ${blocks}`],['新制套件累计到仓',`${data[Meta.KitTotal]} / ${kits}`],...deliveries])+
-    bar(data[Meta.Blocks],blocks)+actions(button('安放套件装配机','new-press'),button('预览标准厂段','standard',true,data[Meta.Kits]<3),iconButton('铺电缆','wire','cable'))];
+    bar(data[Meta.Blocks],blocks)];
 }
 
 function visibleCities() {
@@ -678,18 +696,17 @@ function regionalMission():string[] {
   const city=stage===Stage.Valley?1:2;
   const v=(f:CityField)=>cityValue(data,city,f);
   const name=CITY[city], site=v(CityField.Site);
-  const task=(title:string,detail:string,...choices:string[])=>['当前任务',title,'<p class="lead">'+detail+'</p>'+actions(...choices)];
-  if (stage===Stage.Victory) return task('三座城迎来了日出','连续三轮照明已完成，各站备好了下一轮的校准芯与储能。你可以继续扩建工厂。',button('查看三城','station',true));
-  if (stage===Stage.Acceptance) return task('让三城连续运转','按曙港、谷东、西岭的顺序运行三轮。末轮收束时，每座站都要留足下一轮的准备量。',
-    button('查看验收与各站准备线','station',true));
+  const task=(title:string,detail:string,progress?:string)=>['当前任务',title,
+    '<p class="lead">'+detail+'</p>'+(progress?readings([['任务进度',progress]]):'')];
+  if (stage===Stage.Victory) return task('三座城迎来了日出','连续三轮照明已完成，各站备好了下一轮的校准芯与储能。你可以继续扩建工厂。','3 / 3');
+  if (stage===Stage.Acceptance) return task('让三城连续运转','在「轨道」安排曙港、谷东、西岭连续照明。末轮收束时，每座站都要留足下一轮的准备量。',`${data[Meta.Rounds]} / 3`);
   if (cell(data,v(CityField.Sender),Field.Kind)!==Kind.Yard)
-    return task('给'+name+'开通班线','本地厂段已经能交货。建一对站场，把第一箱物料送过山谷。',button('开通'+name+'班线 · '+data[Meta.LineCost]+' 结构件','line-'+city,true,data[Meta.Plates]<data[Meta.LineCost]));
-  if (cell(data,site,Field.Kind)!==Kind.Station) return task('在'+name+'接货','到货站已经就位。在当地安放地面站，准备接收校准芯。',button('安放'+name+'地面站','site-'+city,true));
-  if (!v(CityField.Delivered)) return task('让第一箱货抵达'+name,'在曙港发货站装入校准芯。到货后，由当地的短带把货送出站场。',button('查看发货站','sender-'+city,true),button('预览末端短带','lastmile-'+city),button('查看到货站','receiver-'+city));
-  if (!cell(data,site,Field.Grid)) return task('给'+name+'地面站供电','将地面站接上现有电网，或在当地建立供电区。',button('从地面站铺电缆','cable-'+city,true));
-  if (data[Meta.Modules]<=city) return task('把镜阵延伸到'+name,'在曙港备好三个镜阵模块和五份燃料，为这座城增发一组镜阵。',button('前往曙港发射台','site-0',true));
-  return task(city===1?'点亮谷东':'连续点亮谷东与西岭',city===1?'校准芯到站后，跟踪第一场跨谷照明窗口。':'谷东窗口结束三秒后，西岭接班。提前为两站备好物料和电力。',
-    button('查看窗口与准备情况','site-'+city,true));
+    return task('给'+name+'开通班线','从「建造」开通跨谷班线，再把第一箱物料送过山谷。',`${held(data,4)} / ${data[Meta.LineCost]} 结构件`);
+  if (cell(data,site,Field.Kind)!==Kind.Station) return task('在'+name+'接货','到货站已经就位。从「建造」安放当地地面站，准备接收校准芯。');
+  if (!v(CityField.Delivered)) return task('让第一箱货抵达'+name,'在曙港发货站装入校准芯。到货后，由当地的短带把货送出站场。','0 / 1');
+  if (!cell(data,site,Field.Grid)) return task('给'+name+'地面站供电','把当地地面站接上电网，或用本地发电机为它供电。');
+  if (data[Meta.Modules]<=city) return task('把镜阵延伸到'+name,'在曙港备好三个镜阵模块和五份燃料，从「轨道」为这座城增发一组镜阵。',`${data[Meta.Modules]} / ${city+1}`);
+  return task(city===1?'点亮谷东':'连续点亮谷东与西岭',city===1?'校准芯到站后，在「轨道」发起第一场跨谷照明。':'从「轨道」安排相邻窗口。谷东窗口结束三秒后，西岭接班。');
 }
 
 function yardPanel():string[] {
@@ -723,7 +740,7 @@ function regionalPanel():string[] {
     rows.push([name+'窗口',interval+' · '+mw(v(CityField.Power))+' · 1 芯/秒']);
     reserves+=slotRow(name+'校准芯',itemSlot('display',6,contents(data,v(CityField.Site),6),v(CityField.Site),
       data[Meta.Stage]>=Stage.Acceptance?`下一轮准备 ${v(CityField.CoreReserve)} 枚`:''));
-    if (data[Meta.Stage]>=Stage.Acceptance) rows.push([name+'所在电网储能', (v(CityField.Stored)/200).toFixed(1)+' / '+(v(CityField.EnergyReserve)/200).toFixed(1)+' MJ']);
+    if (data[Meta.Stage]>=Stage.Acceptance) rows.push([name+'所在电网储能', energyMj(v(CityField.Stored)).toFixed(1)+' / '+energyMj(v(CityField.EnergyReserve)).toFixed(1)+' MJ']);
     start=end+v(CityField.Gap);
   }
   const launch=city===0 && data[Meta.Modules]<cities.length;
@@ -767,7 +784,7 @@ function powerPanel() {
   }
   const index=HEADER+W*H*STRIDE+group*4;
   const rows:[string,string][]=[['当前发电',mw(data[index])],['请求负荷',mw(data[index+1])]];
-  if (unlocked(data,Kind.Battery)) rows.push(['电池可放电',mw(data[index+2])],['已储能',Math.floor(data[index+3]/200)+' MJ']);
+  if (unlocked(data,Kind.Battery)) rows.push(['电池可放电',mw(data[index+2])],['已储能',Math.floor(energyMj(data[index+3]))+' MJ']);
   const details=group?readings(rows):signal('所选格未接通电缆',true);
   return ['电网诊断',group?'供电区 '+group:'接线检查',details+
     actions(iconButton('铺电缆','wire','cable'),unlocked(data,Kind.Battery)?button('预览蓄电池','battery'):'',button('拆电缆','cut'))+
@@ -806,27 +823,55 @@ function transportReadout(tile:number,kind:Kind,interactive=false) {
 
 function transportRating(kind:number) {
   const entry=design(kind);
-  return entry?.interval?`${HZ/entry.interval} 件/秒/通道 · ${entry.lanes} 条通道`:'';
+  return entry?.interval?`${entry.interval<0?-entry.interval:content.contentHz/entry.interval*60} 件/分钟/通道 · ${entry.lanes} 条通道`:'';
 }
 
 function modeAvailable(next:Mode) {
+  if (next==='power') return unlocked(data,Kind.Cable);
   return data[Meta.Stage]>=({task:Stage.Gather,view:Stage.Gather,build:Stage.Gather,guide:Stage.Gather,power:Stage.Power,orbit:Stage.Launch})[next];
 }
 
 function deviceName(kind:number) {
   const grade=design(kind)?.grade;
-  return MACHINE[grade===3?Kind.ReinforcedMiner:grade===2?Kind.IndustrialMiner:kind].name;
+  return machineText(grade===3?Kind.ReinforcedMiner:grade===2?Kind.IndustrialMiner:kind).name;
+}
+
+function machineText(kind:number) {
+  const current=MACHINE[kind];
+  if (legacyRecipes(data)) return current;
+  const id=content.machines[kind]?.id;
+  if (kind===Kind.Bench) return {name:t('machines.bench.activeName'),detail:t('machines.bench.activeDescription')};
+  if (kind===Kind.ExpressBelt) return {name:current.name,detail:t('machines.fast-belt.description')};
+  if ([Kind.Smelter,Kind.Kiln,Kind.Assembler].includes(kind))
+    return {name:current.name,detail:t(`machines.${id}.activeDescription`)};
+  return current;
 }
 
 function machineCycle(tile:number,kind:number) {
   const entry=design(kind);
-  if (!entry?.ticks) return '';
+  const chosen=selectedRecipe(data,tile);
+  if (!entry || !chosen && (!entry.ticks || !legacyRecipes(data) && !entry.grade)) return '';
   const hasModule=deviceAt(data,tile)?.slots.some(slot=>slot.role==='module' && slot.count>0);
-  const ticks=hasModule?Math.ceil(2*entry.ticks/3):entry.ticks;
+  const ticks=chosen?.ticks ?? (hasModule?Math.ceil(2*entry.ticks/3):entry.ticks);
   const progress=Math.min(100,Math.round(100*cell(data,tile,Field.Progress)/ticks));
   const label=entry.grade?'采集进度':'生产进度';
   return `<div class="cycle-readout"><div><span>${label}</span><b>${progress}%</b></div>`+
     `<div class="cycle-meter" role="progressbar" aria-label="${label}" aria-valuenow="${progress}"><span style="width:${progress}%"></span></div></div>`;
+}
+
+function recipePicker(tile:number,kind:number) {
+  if (legacyRecipes(data) || !content.machines[kind]?.processing) return '';
+  const chosen=selectedRecipe(data,tile);
+  const available=content.recipes.filter(row=>row.modern && row.machines.some(id=>id===kind) && row.unlockStage<=data[Meta.Stage]);
+  return `<section class="handcraft-recipe recipe-picker"><div class="recipe-details">
+    <span class="slot-label">${textHtml(t(chosen?'ui.productionRecipe':'ui.noRecipe'))}</span>
+    ${available.map(row=>{
+      const price=row.inputs.map(item=>`${ITEM[item.item]} ×${item.amount}`).join(' + ');
+      const detail=`${price} → ${ITEM[row.output.item]} ×${row.output.amount} · ${(chosen?.key===row.key?chosen.ticks:row.baseTicks)/HZ} s`;
+      const active=chosen?.key===row.key;
+      return `<button type="button" class="button${active?' primary':''}" data-action="choose-recipe-${row.key}" aria-pressed="${active}">${textHtml(detail)}</button>`;
+    }).join('')}
+  </div></section>`;
 }
 
 function devicePanel(kind:number) {
@@ -835,7 +880,7 @@ function devicePanel(kind:number) {
       ['缩放范围',`${limits.minZoom}–${limits.maxZoom} 像素/格`],['开放地图',`${limits.right-limits.left} × ${limits.bottom-limits.top} 格`]])+
     signal(limits.tier===0?'下一阶段 · 扩大背包与地图范围，开放重载带和强化采矿机。':'当前阶段已开放全部上限。')+
     actions(iconButton('拆除设备','remove','hammer'))];
-  const device=MACHINE[kind], status=cell(data,selected,Field.Status), cfg=cell(data,selected,Field.Config);
+  const device=machineText(kind), status=cell(data,selected,Field.Status), cfg=cell(data,selected,Field.Config);
   const inventory:(readonly [string,string|number])[]=[];
   const actual=deviceAt(data,selected);
   const group=cell(data,selected,Field.Grid);
@@ -850,18 +895,19 @@ function devicePanel(kind:number) {
     inventory.push(['矿种',ITEM[actual.ore]]);
     if (rating?.ticks) inventory.push(['采矿速率',`${(rating.amount*HZ/rating.ticks).toFixed(2)} 件/秒`]);
   }
-  if (data[Meta.Stage]>=Stage.Power && !transport && ![Kind.SimpleMiner,Kind.Bench,Kind.Depot].includes(kind)) inventory.push(['供电区',group?`#${group}`:'未连接']);
-  const hasPriority=(actual?.grade ?? 0)>=2 || [Kind.Smelter,Kind.Grinder,Kind.Calibrator,Kind.Assembler,Kind.KitPress,Kind.Kiln].includes(kind);
+  if (unlocked(data,Kind.Cable) && (design(kind)?.demand || design(kind)?.generation || design(kind)?.batteryPower))
+    inventory.push(['供电区',group?`#${group}`:'未连接']);
+  const hasPriority=(actual?.grade ?? 0)>=2 || content.machines[kind]?.processing;
   if (hasPriority) inventory.push(['供电顺序',['普通','优先','最高'][cfg]]);
   return [`设备检查 · ${coordinates(selected)}`,deviceName(kind),`<div class="device-summary">${machineIcon(kind)}<p class="lead">${textHtml(device.detail)}</p></div>`+
-    (transport?'':signal(STATUS[status],status>=2&&status<=4))+machineCycle(selected,kind)+readings([...inventory,...devicePower(data,selected,kind)])+
+    (transport?'':signal(STATUS[status],status>=2&&status<=4))+recipePicker(selected,kind)+machineCycle(selected,kind)+readings([...inventory,...devicePower(data,selected,kind)])+
     (transport?transportReadout(selected,kind,true):machineSlots(selected,kind))+
     actions(cell(data,selected,Field.Ore)?harvestButton(selected):'',iconButton('旋转设备','rotate-device','rotate'),
-      hasPriority?button('切换优先级','configure'):'',
+      hasPriority && data[Meta.Stage]>=Stage.Expand?button('切换优先级','configure'):'',
       kind===Kind.Splitter?button('切换分流','configure'):'',
       kind===Kind.Depot && data[Meta.Stage]>=Stage.Expand?button('切换收发','configure'):'',
       kind!==Kind.Generator && kind!==Kind.Battery && kind!==Kind.Solar ? button('沿货流定位','trace-cargo'):'',
-      data[Meta.Stage]>=Stage.Power&&!transport?(group?button('查看电网','power-map'):iconButton('接线','wire','cable')):'',
+      unlocked(data,Kind.Cable)&&!transport?(group?button('查看电网','power-map'):iconButton('接线','wire','cable')):'',
       iconButton('拆除设备','remove','hammer'))+
     actions(button('任务进度','mission'))];
 }
@@ -876,7 +922,7 @@ function machineLayoutRows(tile:number,kind:number) {
   if (cell(data,tile,Field.Kind)!==kind) return rows;
   const incoming:string[]=[], outgoing:string[]=[];
   const labels=new Map<number,string>();
-  for (const port of previewPorts(tile,kind,dir)) {
+  for (const port of previewPorts(tile,kind,dir,legacyRecipes(data))) {
     if (port.labelKey) labels.set(port.tile*8+port.side+(port.role==='output'?4:0),t(port.labelKey));
   }
   for (const place of footprint(tile,kind,dir)) {
@@ -899,14 +945,14 @@ function materialLines(requirements:Material[]) {
 function buildCatalog() {
   const groups: [string, Kind[]][]=[
     ['开采',[Kind.SimpleMiner,Kind.IndustrialMiner,Kind.ReinforcedMiner]],
-    ['加工',[Kind.Bench,Kind.Smelter,Kind.Grinder,Kind.Calibrator,Kind.Assembler,Kind.KitPress,Kind.Kiln]],
-    ['物流',[Kind.Belt,Kind.FastBelt,Kind.ExpressBelt,Kind.Splitter,Kind.Merger,Kind.Crossing,Kind.Depot]],
+    ['加工',[Kind.Bench,Kind.Smelter,Kind.Grinder,Kind.Calibrator,Kind.Assembler,Kind.KitPress,Kind.Kiln,Kind.Splicer]],
+    ['物流',[Kind.Belt,Kind.FastBelt,Kind.ExpressBelt,Kind.UltraBelt,Kind.Splitter,Kind.Merger,Kind.Crossing,Kind.Depot]],
     ['电力',[Kind.Generator,Kind.Battery,Kind.Solar]],
     ['轨道',[Kind.Station]],
     ['发展',[Kind.DevelopmentHub]],
   ];
   const entry=(kind:Kind)=>{
-    const {name}=MACHINE[kind], available=canBuild(kind);
+    const {name}=machineText(kind), available=canBuild(kind);
     return `<button class="tool machine-tool" type="button" data-tool="${kind}" data-quick="tool-${kind}" data-unavailable="${!available}" aria-pressed="${tool===kind}"
       aria-label="${textHtml(name)}${available?'':' · '+textHtml(t('ui.unavailable'))}">${machineIcon(kind)}<span>${textHtml(name)}</span></button>`;
   };
@@ -923,7 +969,14 @@ function buildCatalog() {
 function buildPanel() {
   const tabs=([['catalog','建筑'],['blueprints','蓝图']] as const).map(([id,label])=>
     `<button type="button" class="panel-tab" data-build-tab="${id}" aria-pressed="${buildTab===id}">${label}</button>`).join('');
-  if (buildTab==='catalog') return ['建造','建筑目录',buildCatalog(),iconButton('拆除设备','remove-tool','hammer'),tabs];
+  if (buildTab==='catalog') {
+    const lines=CITY.slice(1,visibleCities()).flatMap((name,index)=>{
+      const city=index+1;
+      return cell(data,cityValue(data,city,CityField.Sender),Field.Kind)===Kind.Yard?[]:
+        [button('开通'+name+'班线 · '+data[Meta.LineCost]+' 结构件','line-'+city,false,held(data,4)<data[Meta.LineCost])];
+    });
+    return ['建造','建筑目录',buildCatalog()+(lines.length?actions(...lines):''),iconButton('拆除设备','remove-tool','hammer'),tabs];
+  }
   if (!data[Meta.FirstLight]) return ['建造','蓝图','<p class="lead">完成曙港首照后开放蓝图。</p>','',tabs];
   const card=(entry:Blueprint)=>`<div class="blueprint-entry"><strong>${textHtml(entry.name)}</strong>`+
     `<p class="lead">${entry.width} × ${entry.height} 格 · ${entry.devices} 台设备</p>`+
@@ -1000,7 +1053,7 @@ function syncInfo() {
       materialLines(buildMaterials(Kind.Cable));
   } else if (anchor.dataset.tool) {
     const kind=Number(anchor.dataset.tool);
-    const {name,detail}=MACHINE[kind], requirements=buildMaterials(kind);
+    const {name,detail}=machineText(kind), requirements=buildMaterials(kind);
     const rating=isTransport(kind)?transportRating(kind):drillTool(kind)?'采矿速率与耗电随落点矿种显示。':designPower(kind);
     const [width,height]=machineSize(kind,0);
     html=`<strong>${textHtml(name)}</strong><p>${textHtml(detail)}</p><p>${rating}</p><p>占地 ${width} × ${height} 格</p>`+
@@ -1088,7 +1141,7 @@ function fill(element:HTMLElement,html:string) {
   const recipeFocused=active && element.contains(active) && active.closest('.handcraft-recipe');
   element.innerHTML=html;
   if (key) element.querySelector<HTMLButtonElement>(`[data-quick="${key}"]`)?.focus({preventScroll:true});
-  else if (recipeFocused) element.querySelector<HTMLButtonElement>('[data-action="toggle-handcraft"]')?.focus({preventScroll:true});
+  else if (recipeFocused) element.querySelector<HTMLButtonElement>('[data-action^="toggle-handcraft-"]')?.focus({preventScroll:true});
 }
 
 function renderBalances() {
@@ -1292,7 +1345,6 @@ function onAction(action:string) {
     return;
   }
   const cam=renderer?.camera;
-  const ore=data[Meta.FirstOre];
   const region=/^(line|site|sender|receiver|lastmile|cable|window)-(\d)(?:-(\d))?$/.exec(action);
   if (region) {
     const [,verb,id,program]=region, city=Number(id);
@@ -1316,18 +1368,20 @@ function onAction(action:string) {
     if (verb==='window') submit({op:Op.Trial,a:city,b:Number(program)},()=>say('照明窗口已排定'));
     return;
   }
+  if (action.startsWith('toggle-handcraft-')) {
+    const key=Number(action.slice('toggle-handcraft-'.length));
+    handcraftExpanded=handcraftExpanded===key?undefined:key;
+    refresh();
+    return;
+  }
+  if (action.startsWith('choose-recipe-')) {
+    submit({op:Op.SelectRecipe,a:selected,b:deviceIdentity(selected),c:Number(action.slice('choose-recipe-'.length))});
+    return;
+  }
   switch (action) {
     case 'home': home(); return;
     case 'close-guide': closeGuide(); return;
     case 'manual-work': selectMode('view',!manualWork); return;
-    case 'toggle-handcraft': handcraftExpanded=!handcraftExpanded; refresh(); return;
-    case 'new-press': {
-      const kind=Kind.KitPress;
-      const existing=firstMachine(data,kind);
-      if (existing>=0) { cam?.focus(existing); selected=existing; mode='view'; setPanel(true); refresh(); }
-      else previewAt(kind,nearest(ore,i=>!occupiedKind(data,i) && !cell(data,i,Field.Ore) && cell(data,i,Field.Wire)>0));
-      return;
-    }
     case 'zoom-in': if (cam) cam.scale(cam.width/2,cam.height/2,1.25); return;
     case 'zoom-out': if (cam) cam.scale(cam.width/2,cam.height/2,.8); return;
     case 'toggle-panel': setPanel(panel.dataset.expanded!=='true'); return;
@@ -1338,18 +1392,11 @@ function onAction(action:string) {
     case 'power-map': powerMap(); return;
     case 'trace-cargo': traceCargo(); return;
     case 'battery': previewOnGrid(Kind.Battery); return;
-    case 'solar': {
-      const tile=firstMachine(data,Kind.Solar);
-      if (tile<0) previewOnGrid(Kind.Solar);
-      else {mode='view'; selected=tile; cam?.focus(tile); refresh();}
-      return;
-    }
     case 'wire': choose('wire'); return;
     case 'cut': choose('cut'); return;
     case 'remove-tool': choose('remove'); return;
     case 'remove': choose('remove',selected); return;
     case 'capture': if (data[Meta.FirstLight]) { buildTab='blueprints'; choose('capture'); } return;
-    case 'standard': selectStamp(); return;
     case 'dismiss-blueprint': blueprintDialog.close(); return;
     case 'transfer-amount': {
       if (!selectedItem) return;
@@ -1503,7 +1550,9 @@ worker.onmessage=event=>{
   if (message.type==='legacy-imported') { legacyCleanup=!reviewScene; return; }
   if (message.type==='command-result') {
     const done=pending; pending=undefined;
+    const failed=pendingFailure; pendingFailure=undefined;
     if (message.status<0) {
+      failed?.(message.status);
       if ([-20,-21,-23].includes(message.status)) transportPreview=undefined;
       if ([-15,-22].includes(message.status)) selectedItem=undefined;
       const error=ERRORS[message.status] ?? '操作失败';
@@ -1589,7 +1638,8 @@ worker.onmessage=event=>{
 worker.onerror=()=>fail('模拟没有启动。请刷新页面后重试。');
 
 const mapLabels=[
-  { name:'燃料矿', x:23.5, y:15.5, stage:Stage.Power }, { name:'铁矿', x:22.5, y:18.5,stage:Stage.Expand },
+  { name:'铜矿', x:17.5, y:16.5, stage:Stage.Handwork, oreTile:at(17,17) },
+  { name:'燃料矿', x:23.5, y:15.5, stage:Stage.Bench, oreTile:at(23,16) }, { name:'铁矿', x:22.5, y:18.5,stage:Stage.Expand },
   { name:'硅矿', x:20.5, y:19.5,stage:Stage.Silica }, { name:'曙港城', x:44, y:5.2,stage:Stage.Launch },
   { name:'谷东城', x:48, y:22.1,stage:Stage.Valley }, { name:'西岭城', x:8, y:22.1,stage:Stage.Highland },
 ].map(label=>{
@@ -1616,9 +1666,10 @@ function draw(now:number) {
       renderer.render({data,mode,preview:ghost.cells,selected,focus,trace:traced,now,tick:data[Meta.Tick]+animationPhase(now),
         chipTile:gainTile,chip:gain.hidden?0:(gainUntil-now)/750});
     }
-    for (const {name,x,y,stage,element} of mapLabels) {
+    for (const {name,x,y,stage,element,oreTile} of mapLabels) {
       const [sx,sy]=renderer.camera.toScreen(x,y);
-      const visible=ready && data[Meta.Stage]>=stage && sx>24&&sy>(sx<157?88:41)&&sx<renderer.camera.width-26&&sy<renderer.camera.height-42;
+      const visible=ready && data[Meta.Stage]>=stage && (oreTile===undefined || !!cell(data,oreTile,Field.Ore))
+        && sx>24&&sy>(sx<157?88:41)&&sx<renderer.camera.width-26&&sy<renderer.camera.height-42;
       element.hidden=!visible;
       if (visible) element.style.transform=`translate(${Math.round(sx)}px,${Math.round(sy)}px) translate(-50%,-100%)`;
       const city=CITY.findIndex(city=>name===city+'城');

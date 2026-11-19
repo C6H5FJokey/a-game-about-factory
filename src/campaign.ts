@@ -1,4 +1,4 @@
-import { Field, H, Kind, Meta, Stage, STATION, W, cell, held } from './model';
+import { Field, H, Kind, Meta, Stage, STATION, W, cell, held, legacyRecipes } from './model';
 import { design } from './sim-data';
 import { t } from './i18n';
 
@@ -18,12 +18,21 @@ export const handbook = {
   miner:Stage.Mining,
   slots:Stage.Collect,
   handwork:Stage.Handwork,
+  manualMaterials:Stage.Handwork,
+  connectPower:Stage.Bench,
+  chooseRecipe:Stage.Feed,
+  automaticFeed:Stage.Belt,
   belt:Stage.Belt,
   power:Stage.Power,
   orbit:Stage.Launch,
 } as const;
 
 type Guide = keyof typeof handbook;
+
+export function visibleGuide(data:Int32Array,id:Guide) {
+  const modern=id==='manualMaterials' || id==='connectPower' || id==='chooseRecipe' || id==='automaticFeed';
+  return data[Meta.Stage]>=handbook[id] && (legacyRecipes(data)?!modern:id!=='handwork');
+}
 
 export function guideText(id:Guide) {
   return {title:t(`guide.${id}.title`),steps:t(`guide.${id}.steps`).split('\n')};
@@ -35,6 +44,20 @@ export function campaignTask(data:Int32Array) {
   });
   const stock=(item:number,required:number)=>`${held(data,item)} / ${required}`;
   const cost=(kind:Kind)=>design(kind)?.materials[0]?.count ?? 0;
+  if (!legacyRecipes(data)) {
+    switch (data[Meta.Stage]) {
+      case Stage.Handwork: return task('manualMaterials',['manualMaterials'],stock(15,2));
+      case Stage.Bench: return task('connectPower',['connectPower','build','manualMaterials']);
+      case Stage.Feed: case Stage.Working: return task('chooseRecipe',['chooseRecipe','connectPower','slots']);
+      case Stage.Belt: case Stage.BeltFed: return task('automaticFeed',['automaticFeed','belt'],
+        t(data[Meta.Stage]===Stage.BeltFed?'ui.beltIntakeReceived':'ui.beltIntakePending'));
+      case Stage.Expand: return task('drill',['build']);
+      case Stage.Power: return task('poweredMiner',['connectPower','power']);
+      case Stage.Optics: return task('opticalChain',['chooseRecipe','slots']);
+      case Stage.Assemble: return task('mirrorChain',['chooseRecipe','slots']);
+      case Stage.Tracking: return task('calibrationChain',['chooseRecipe','orbit','power']);
+    }
+  }
   switch (data[Meta.Stage]) {
     case Stage.Gather: return task('gather',['gather','map'],stock(1,1));
     case Stage.Craft: case Stage.PlaceMiner:
@@ -47,7 +70,6 @@ export function campaignTask(data:Int32Array) {
     case Stage.Bench: return task('bench',['build','handwork'],stock(4,cost(Kind.Bench)));
     case Stage.Feed: return task('feed',['slots']);
     case Stage.Working: return task('working',['slots']);
-    // TODO(first-miner): the formal automatic-feed task needs a receiving machine's actual intake and recipe production.
     case Stage.Belt: case Stage.BeltFed: return task('depot',['belt','slots'],`${data[Meta.Delivered]} / 1`);
     case Stage.Expand: return data[Meta.Delivered]?task('drill',['build']):task('depot',['belt','slots'],`${data[Meta.Delivered]} / 1`);
     case Stage.Power: return task('power',['power','gather','slots']);

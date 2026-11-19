@@ -12,7 +12,7 @@ pub const WINDOW_GAP: [u32; 3] = [8 * HZ, 3 * HZ, 12 * HZ];
 pub const SOLO: u8 = 0;
 pub const ADJACENT: u8 = 1;
 pub const CAMPAIGN: u8 = 2;
-pub const ROUTE_WORDS: usize = 2 + MATERIAL_ITEMS;
+pub const LEGACY_ROUTE_WORDS: usize = 2 + LEGACY_MATERIAL_ITEMS;
 
 #[derive(Clone, Copy, Default)]
 pub struct Route {
@@ -95,7 +95,7 @@ impl World {
                     route.arrival = self.tick + TRAVEL;
                 }
             }
-            if route.arrival != 0 && self.tick >= route.arrival && self.tick % BELT_TICKS == 0 {
+            if route.arrival != 0 && self.tick >= route.arrival && belt_pulse(self.tick) {
                 let receiver = &mut self.cells[RECEIVERS[i]];
                 if receiver.inv.iter().sum::<u16>() < YARD_CAPACITY {
                     if let Some(item) = route.crate_stock.iter().position(|&count| count > 0) {

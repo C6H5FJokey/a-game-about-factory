@@ -7,5 +7,15 @@
   {"id":"core","icon":"core","tierOneStackLimit":150},
   {"id":"mirror","icon":"mirror","tierOneStackLimit":150},
   {"id":"kit","icon":"kit","tierOneStackLimit":150},
-  {"id":"speed-module","icon":"speed-module","tierOneStackLimit":150}
+  {"id":"speed-module","icon":"speed-module","tierOneStackLimit":150},
+  {"id":"copper","icon":"copper"},
+  {"id":"iron-ingot","icon":"iron-ingot"},
+  {"id":"copper-ingot","icon":"copper-ingot"},
+  {"id":"silica-ingot","icon":"silica-ingot"},
+  {"id":"rivet","icon":"rivet"},
+  {"id":"copper-wire","icon":"copper-wire"},
+  {"id":"optical-blank","icon":"optical-blank"},
+  {"id":"frame","icon":"frame"},
+  {"id":"armature","icon":"armature"},
+  {"id":"ferrosilicon","icon":"ferrosilicon"}
 ]

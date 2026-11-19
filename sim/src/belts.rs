@@ -27,6 +27,7 @@ pub struct Segment {
     pub queue: VecDeque<Cargo>,
     pub exits: [Option<u8>; 2],
     pub interval: u32,
+    pub rate: u32,
     pub next_entry: u32,
     pub next_exit: u32,
     next_motion: u32,
@@ -41,7 +42,7 @@ impl Segment {
         cargo.offset = 0;
         cargo.from = from as u16;
         cargo.since = tick;
-        cargo.ready = tick + self.interval;
+        cargo.ready = belt_deadline(tick, self.interval, self.rate);
         cargo.blocked = false;
         self.queue.push_back(cargo);
         self.next_entry = cargo.ready;
@@ -58,7 +59,7 @@ impl Segment {
 
     pub fn depart(&mut self, tick: u32) {
         self.queue.pop_front();
-        self.next_exit = tick + self.interval;
+        self.next_exit = belt_deadline(tick, self.interval, self.rate);
         self.next_motion = self.next_motion.min(tick);
     }
 
@@ -74,7 +75,7 @@ impl Segment {
                 if cargo.ready <= tick {
                     cargo.from = self.nodes[current] as u16;
                     cargo.since = tick;
-                    cargo.ready = tick + self.interval;
+                    cargo.ready = belt_deadline(tick, self.interval, self.rate);
                     current += 1;
                     cargo.offset = current as u16;
                     cargo.blocked = false;
@@ -123,6 +124,7 @@ impl Belts {
         cargo: &[Cargo],
         previous: Option<&Self>,
         outlets: &[Outlet],
+        legacy: bool,
     ) -> Self {
         let mut segment_at = vec![None; NODES];
         let mut incoming = vec![0u8; NODES];
@@ -193,6 +195,7 @@ impl Belts {
                 queue,
                 exits: belt_outputs(tail.kind, tail.dir, end % 2),
                 interval: belt_interval(kind),
+                rate: if legacy { 0 } else { BELT_RATE[kind as usize] },
                 next_entry: old.map_or(0, |s| s.next_entry),
                 next_exit: old.map_or(0, |s| s.next_exit),
                 next_motion: 0,

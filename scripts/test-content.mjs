@@ -146,11 +146,13 @@ try {
   assert.equal(campaign.signature, base.signature);
   assert.equal(review.signature, variant.signature);
   const original = campaign.save();
-  assert.equal(original[0], 8);
+  assert.equal(original[0], 10);
   const beforeReject = review.save();
   assert.equal(review.restore(original), -25);
   assert.deepEqual(review.save(), beforeReject, 'A save from a different profile must leave the current game intact');
-  const v7 = original.slice(0, original.length - original.at(-1));
+  const beforeExtension=54+56*34*19+4+4+2;
+  const libraryStart=original.length-original.at(-1)-3;
+  const v7 = Int32Array.from([...original.subarray(0,beforeExtension), ...original.subarray(libraryStart,libraryStart+3)]);
   v7[0] = 7;
   v7[23] = 18; // All tests start after the original opening unlocks.
   v7[5] = 375;
@@ -174,7 +176,7 @@ try {
   const deviceStart = snap.at(-1);
   assert.equal(snap[deviceStart], bench);
   assert.equal(review.command(15, -1, bench, 1, [1, 0, snap[deviceStart+1]]), 1);
-  review.step(43);
+  review.step(65);
   assert.equal(review.snapshot()[98+19*bench+13], 0);
   review.step(1);
   assert.equal(review.snapshot()[98+19*bench+13], 1, 'Configured recipe duration drives real production');
@@ -220,7 +222,7 @@ try {
   assert.equal(review.command(1,tile(20,17),1),1);
   assert.equal(review.command(1,tile(23,18),23),1);
   assert.equal(review.command(1,tile(24,18),12),1);
-  review.step(80);
+  review.step(120);
   assert.equal(review.snapshot()[19],2,'Manual and automatically supplied plates both leave through the configured outlet');
 
   const withBlueprint=review.save();

@@ -14,12 +14,19 @@ impl World {
         }
         let cell = self.cells[tile];
         Some(match (cell.kind, item) {
-            (STATION, CORE) => 16,
+            (STATION, CORE) => {
+                if self.legacy_recipes {
+                    16
+                } else {
+                    24
+                }
+            }
             (STATION, MIRROR) => 6,
             (STATION, FUEL) => 12,
             (GENERATOR, FUEL) => 8,
             (FREIGHT_YARD, _) if SENDERS.contains(&tile) => yard_item_capacity(&cell.inv, item),
-            _ if recipe(cell.kind)
+            _ if self
+                .recipe_at(tile)
                 .is_some_and(|r| r.input.iter().any(|&(id, n)| id == item && n > 0)) =>
             {
                 INPUT_CAPACITY[cell.kind as usize]
@@ -124,7 +131,7 @@ impl World {
                     return -12;
                 }
             } else {
-                let Some(r) = recipe(cell.kind) else {
+                let Some(r) = self.recipe_at(tile) else {
                     return -12;
                 };
                 if item != r.output {
@@ -141,6 +148,10 @@ impl World {
                 return -9;
             }
             self.cells[tile].inv[slot] -= moved as u16;
+            if item == IRON_INGOT {
+                let cell = &mut self.cells[tile];
+                cell.belt_iron = cell.belt_iron.min(cell.inv[slot]);
+            }
             self.stock[slot] += moved;
             if role == 2 && self.stage == Stage::Collect && cell.kind == SIMPLE_MINER {
                 self.stage = if self.stock[PLATE as usize] > 0 {
@@ -156,10 +167,13 @@ impl World {
     // Slot records share capacity calculations with the automatic transport.
     pub fn write_slots(&self, tile: usize, out: &mut Vec<i32>) {
         let cell = self.cells[tile];
-        let recipe = recipe(cell.kind);
+        let recipe = self.recipe_at(tile);
         let header = out.len();
         out.push(0);
         for item in 1..MATERIAL_ITEMS as u8 {
+            if item == SPEED_MODULE {
+                continue;
+            }
             let count = cell.inv[item as usize];
             if count == 0
                 && matches!(cell.kind, STATION | DEPOT | FREIGHT_YARD)

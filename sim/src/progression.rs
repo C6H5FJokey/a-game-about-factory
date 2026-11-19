@@ -53,14 +53,14 @@ impl Progression {
 }
 
 pub fn accepts_module(kind: u8) -> bool {
-    miner_grade(kind) == 0 && recipe(kind).is_some()
+    PROCESSING[kind as usize]
 }
 
-pub fn cycle_ticks(base: u16, installed: u16) -> u16 {
+pub fn cycle_ticks(base: u32, installed: u16) -> u32 {
     if installed == 0 {
         base
     } else {
-        (u32::from(base) * 2).div_ceil(3) as u16
+        (base * 2).div_ceil(3)
     }
 }
 

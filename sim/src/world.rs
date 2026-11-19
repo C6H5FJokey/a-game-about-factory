@@ -4,7 +4,11 @@ use crate::campaign::Stage;
 use crate::catalog::*;
 use crate::footprints::{covered, Footprints};
 use crate::progression::{cycle_ticks, Progression};
+use crate::recipes::device_recipe;
 use crate::regions::*;
+
+pub const FUEL_STEPS_PER_TICK: u32 = 2;
+const FUEL_BURN_STEPS: u32 = HZ * FUEL_STEPS_PER_TICK * 5 / 4;
 
 #[derive(Clone, Copy, Default)]
 pub struct Cell {
@@ -15,7 +19,10 @@ pub struct Cell {
     pub cfg: u8,
     pub status: u8,
     pub group: u16,
-    pub progress: u16,
+    pub progress: u32,
+    pub selected_recipe: u16,
+    pub belt_iron: u16,
+    pub belt_batch: bool,
     pub energy: u32,
     pub inv: [u16; ITEMS],
     pub last_kit_delivery: u32,
@@ -34,7 +41,7 @@ pub struct DevicePower {
 
 impl Cell {
     pub fn delivering_kits(&self, tick: u32) -> bool {
-        self.kind == KIT_PRESS
+        matches!(self.kind, KIT_PRESS | SPLICER)
             && self.group != 0
             && self.last_kit_delivery > 0
             && tick - self.last_kit_delivery < DELIVERY_WINDOW
@@ -75,6 +82,8 @@ pub struct Orbit {
 
 pub struct World {
     pub tick: u32,
+    pub legacy_recipes: bool,
+    pub handcraft: Option<(usize, i32, u32)>,
     pub stage: Stage,
     pub progression: Progression,
     pub packed_miners: u16,
@@ -99,9 +108,11 @@ impl World {
     pub fn empty() -> Self {
         let cells = vec![Cell::default(); N];
         let cargo = vec![Cargo::default(); NODES];
-        let belt = Belts::rebuild(&cells, &cargo, None, &[]);
+        let belt = Belts::rebuild(&cells, &cargo, None, &[], true);
         Self {
             tick: 0,
+            legacy_recipes: true,
+            handcraft: None,
             stage: Stage::Gather,
             progression: Progression::default(),
             packed_miners: 0,
@@ -125,6 +136,7 @@ impl World {
 
     pub fn new() -> Self {
         let mut w = Self::empty();
+        w.legacy_recipes = false;
         w.update_grids();
         w
     }
@@ -158,6 +170,7 @@ impl World {
             &self.cargo,
             Some(&self.belt),
             &self.footprints.outlets,
+            self.legacy_recipes,
         );
         self.layout_revision = self.layout_revision.wrapping_add(1);
         self.update_grids();
@@ -242,15 +255,18 @@ impl World {
             cell.status = 0;
             cell.power = DevicePower::default();
             match cell.kind {
-                GENERATOR => {
-                    if cell.progress == 0 && cell.group != 0 && cell.inv[FUEL as usize] > 0 {
+                GENERATOR if cell.group != 0 => {
+                    // Fuel is tracked in half steps so a unit still burns for 1.25 seconds.
+                    if cell.progress < FUEL_STEPS_PER_TICK && cell.inv[FUEL as usize] > 0 {
                         cell.inv[FUEL as usize] -= 1;
-                        cell.progress = 25;
+                        cell.progress += FUEL_BURN_STEPS;
                     }
-                    if cell.progress > 0 && cell.group != 0 {
-                        cell.progress -= 1;
-                        cell.power.generated = GENERATOR_POWER;
-                        grid.generation += u32::from(cell.power.generated);
+                    let burn = cell.progress.min(FUEL_STEPS_PER_TICK);
+                    if burn > 0 {
+                        cell.progress -= burn;
+                        let generated = u32::from(GENERATOR_POWER) * burn / FUEL_STEPS_PER_TICK;
+                        cell.power.generated = generated as u16;
+                        grid.generation += generated;
                         cell.status = 1;
                     } else {
                         cell.status = if cell.group == 0 { 3 } else { 2 };
@@ -305,7 +321,10 @@ impl World {
                     }
                     continue;
                 }
-                let Some(r) = recipe(c.kind) else {
+                let Some(r) = device_recipe(c, self.legacy_recipes) else {
+                    if !self.legacy_recipes && PROCESSING[c.kind as usize] {
+                        c.status = 6;
+                    }
                     continue;
                 };
                 if c.kind == KIT_PRESS && !self.orbit.first_light {
@@ -334,6 +353,11 @@ impl World {
                 c.power.used = r.power;
                 if c.progress == 0 {
                     for (id, count) in r.input {
+                        if id == IRON_INGOT && c.belt_iron > 0 {
+                            let from_belt = count.saturating_sub(c.inv[id as usize] - c.belt_iron);
+                            c.belt_iron -= from_belt;
+                            c.belt_batch = from_belt > 0;
+                        }
                         c.inv[id as usize] -= count;
                     }
                 }
@@ -343,7 +367,13 @@ impl World {
                 }
                 c.inv[r.output as usize] += r.amount;
                 c.progress = 0;
-                self.stage = self.stage.after_production(c.kind);
+                self.stage = if self.legacy_recipes {
+                    self.stage.after_production(c.kind)
+                } else {
+                    self.stage
+                        .after_selected_production(c.kind, r.output, c.belt_batch)
+                };
+                c.belt_batch = false;
             }
         }
 

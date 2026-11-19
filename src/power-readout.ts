@@ -1,4 +1,4 @@
-import { CITY, CityField, Field, Kind, cell, cityValue, mw } from './model';
+import { CITY, CityField, Field, Kind, cell, cityValue, energyMj, mw } from './model';
 import { design, deviceAt } from './sim-data';
 
 export function designPower(kind:number):string {
@@ -15,7 +15,7 @@ export function devicePower(data:Int32Array,tile:number,kind:Kind):[string,strin
   const actual=deviceAt(data,tile), rated=design(kind);
   if (!actual || !rated) return [];
   if (rated.batteryPower) return [
-    ['已储能',`${(cell(data,tile,Field.Energy)/200).toFixed(1)} / ${rated.batteryCapacity/200} MJ`],
+    ['已储能',`${energyMj(cell(data,tile,Field.Energy)).toFixed(1)} / ${energyMj(rated.batteryCapacity)} MJ`],
     ['当前充电',mw(actual.charged)],['当前放电',mw(actual.discharged)],['充放电上限',mw(rated.batteryPower)],
   ];
   if (rated.generation) return [['当前发电',mw(actual.generated)],['额定发电',mw(rated.generation)]];

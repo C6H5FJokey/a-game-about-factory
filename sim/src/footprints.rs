@@ -111,10 +111,11 @@ impl World {
             if is_belt(kind) {
                 continue;
             }
-            let r = recipe(kind);
+            let r = crate::recipes::device_recipe(cell, self.legacy_recipes);
             let input = matches!(kind, DEPOT | GENERATOR | STATION | FREIGHT_YARD)
                 || r.is_some_and(|r| r.input[0].1 != 0);
-            let output = matches!(kind, DEPOT | FREIGHT_YARD) || r.is_some();
+            let output = matches!(kind, DEPOT | FREIGHT_YARD)
+                || (r.is_some() && (kind != SIMPLE_MINER || self.legacy_recipes));
             if let Some(ports) = MATERIAL_PORTS[layout_kind(kind) as usize] {
                 for port in ports {
                     let (offset, side) = rotate_port(kind, cell.dir, port);

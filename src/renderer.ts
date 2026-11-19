@@ -1,4 +1,4 @@
-import { CityField, Field, H, Kind, Meta, Stage, STEP, W, at, cell, cityValue, inBounds, isTransport, xy, type MapLimits, type Mode, type PreviewCell } from './model';
+import { CityField, Field, H, Kind, Meta, Stage, STEP, W, at, cell, cityValue, inBounds, isTransport, legacyRecipes, xy, type MapLimits, type Mode, type PreviewCell } from './model';
 import { cargoIndex, design, transportPorts } from './sim-data';
 import { machineAnchor, machinePortTiles, machineSize, previewPorts } from './machine-layout';
 
@@ -6,8 +6,10 @@ type Color = [number,number,number,number];
 const rgba = (r:number,g:number,b:number,a=1):Color => [r/255,g/255,b/255,a];
 const ink = rgba(12,21,29), frame = rgba(59,84,95), line = rgba(39,60,68), amber = rgba(255,193,109);
 const cyan = rgba(119,225,213), red = rgba(255,145,117), grey = rgba(131,157,168);
-const mineral = [ink,rgba(180,135,112),rgba(133,169,217),rgba(228,157,86),rgba(194,205,207),rgba(167,184,249),rgba(125,222,209),amber,rgba(221,199,152)];
-const shapeForItem = [0,0,3,4,0,3,1,4,1];
+const mineral = [ink,rgba(180,135,112),rgba(133,169,217),rgba(228,157,86),rgba(194,205,207),rgba(167,184,249),rgba(125,222,209),amber,rgba(221,199,152),
+  cyan,rgba(190,111,71),grey,rgba(230,145,83),rgba(145,179,231),rgba(165,175,186),
+  rgba(240,158,94),rgba(157,216,252),rgba(205,196,159),rgba(222,165,110),rgba(137,193,204)];
+const shapeForItem = [0,0,3,4,0,3,1,4,1,1,3,1,1,1,2,2,3,0,4,1];
 
 const vertex = `#version 300 es
 layout(location=0) in vec2 corner;
@@ -173,9 +175,10 @@ export class Renderer {
       this.box(x+dx,y+dy,w,h,opacity===1?color:[color[0],color[1],color[2],color[3]*opacity],shape,angle);
     let mark=grey;
     if ([Kind.Generator,Kind.Battery,Kind.Solar].includes(kind)) mark=cyan;
-    if (kind===Kind.Station || kind===Kind.Assembler) mark=amber;
+    if (kind===Kind.Station || kind===Kind.Assembler || kind===Kind.Splicer) mark=amber;
     if (kind===Kind.Grinder || kind===Kind.Kiln) mark=mineral[5];
     if (kind>=Kind.IronDrill && kind<=Kind.FuelDrill) mark=mineral[kind-1];
+    if (kind===Kind.CopperDrill || kind===Kind.ReinforcedCopperDrill) mark=mineral[10];
     B(.025,.065,.94,.91,rgba(4,10,14,.85),1);
     B(0,0,.92,.91,mark,1);
     B(0,0,.84,.83,rgba(24,41,50),1);
@@ -202,13 +205,14 @@ export class Renderer {
       case Kind.Kiln: B(0,0,.6,.6,mark,3); B(0,0,.42,.42,ink,3); B(0,0,.25,.25,mark,3); break;
       case Kind.Calibrator: B(0,0,.54,.15,cyan,1); B(0,0,.15,.54,cyan,1); break;
       case Kind.Assembler:
+      case Kind.Splicer:
       case Kind.KitPress:
       case Kind.Depot: B(0,0,.62,.55,mark,4); B(0,0,.46,.40,ink,4); B(0,0,.23,.21,mark,4); break;
       case Kind.Yard:
         B(0,.12,.73,.13,grey); B(-.2,-.07,.24,.24,amber,1); B(.12,-.07,.24,.24,amber,1); break;
       case Kind.Bench: case Kind.Smelter:
         B(0,.19,.57,.1,mark,1); B(0,-.19,.57,.1,mark,1); B(0,0,.19,.31,mark,1); break;
-      case Kind.ReinforcedIronDrill: case Kind.ReinforcedSilicaDrill: case Kind.ReinforcedFuelDrill:
+      case Kind.ReinforcedIronDrill: case Kind.ReinforcedSilicaDrill: case Kind.ReinforcedFuelDrill: case Kind.ReinforcedCopperDrill:
         B(0,0,.64,.57,mark,1); B(0,0,.54,.47,ink,1);
         B(-.12,0,.18,.40,mark,1); B(.11,0,.20,.33,mark,1); B(.25,-.25,.13,.13,amber,3); break;
       default:
@@ -441,7 +445,7 @@ export class Renderer {
       if (isTransport(part.kind)) this.transport(part.kind,x+.5,y+.5,part.dir,true,color);
       else if (part.kind>0) {
         this.machineBody(part.kind,x,y,part.dir,0,.68);
-        const ports=[...previewPorts(part.tile,part.kind,part.dir)];
+        const ports=[...previewPorts(part.tile,part.kind,part.dir,legacyRecipes(data))];
         for (const port of ports) {
           const [px,py]=xy(port.tile);
           this.materialPort(px,py,port.side,port.role==='output',

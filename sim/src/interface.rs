@@ -82,10 +82,12 @@ impl World {
 pub extern "C" fn directory() -> usize {
     RUNTIME.with(|rt| {
         let mut runtime = rt.borrow_mut();
-        let out = &mut runtime.output;
+        let Runtime {
+            world, output: out, ..
+        } = &mut *runtime;
         out.clear();
         for kind in 1..=MAX_KIND {
-            let materials = materials(kind);
+            let materials = world.build_materials(kind);
             if materials.is_empty() {
                 continue;
             }
@@ -94,7 +96,11 @@ pub extern "C" fn directory() -> usize {
             let demand = if kind == STATION {
                 LAUNCH_POWER
             } else {
-                recipe.as_ref().map_or(0, |r| r.power)
+                if world.legacy_recipes {
+                    recipe.as_ref().map_or(0, |r| r.power)
+                } else {
+                    MACHINE_POWER[kind as usize]
+                }
             };
             let generation = match kind {
                 GENERATOR => GENERATOR_POWER,
@@ -103,7 +109,12 @@ pub extern "C" fn directory() -> usize {
             };
             let batteries = kind == BATTERY;
             let ore_mask = match kind {
-                INDUSTRIAL_MINER | REINFORCED_MINER => (1 << IRON) | (1 << SILICA) | (1 << FUEL),
+                INDUSTRIAL_MINER | REINFORCED_MINER => {
+                    (1 << IRON)
+                        | (1 << SILICA)
+                        | (1 << FUEL)
+                        | if world.legacy_recipes { 0 } else { 1 << COPPER }
+                }
                 SIMPLE_MINER => 1 << IRON,
                 _ => drill_ore(kind).map_or(0, |ore| 1 << ore),
             };
@@ -122,8 +133,12 @@ pub extern "C" fn directory() -> usize {
                 },
                 recipe.as_ref().map_or(0, |r| r.output.into()),
                 recipe.as_ref().map_or(0, |r| r.amount.into()),
-                recipe.as_ref().map_or(0, |r| r.ticks.into()),
-                if kind == CABLE { CABLE_SPAN as i32 } else { 1 },
+                recipe.as_ref().map_or(0, |r| r.ticks as i32),
+                if kind == CABLE {
+                    world.cable_span() as i32
+                } else {
+                    1
+                },
                 materials.len() as i32,
             ]);
             for &(item, count) in materials {
@@ -134,11 +149,16 @@ pub extern "C" fn directory() -> usize {
                     BELT => 1,
                     FAST_BELT => 2,
                     EXPRESS_BELT => 3,
+                    ULTRA_BELT => 4,
                     _ => 0,
                 },
                 belt_lanes(kind) as i32,
                 if is_belt(kind) {
-                    belt_interval(kind) as i32
+                    if world.legacy_recipes {
+                        belt_interval(kind) as i32
+                    } else {
+                        -(BELT_RATE[kind as usize] as i32)
+                    }
                 } else {
                     0
                 },
@@ -169,7 +189,7 @@ pub extern "C" fn blueprints() -> usize {
         let mut runtime = rt.borrow_mut();
         let Runtime { world, output, .. } = &mut *runtime;
         output.clear();
-        world.blueprints.write_view(output);
+        world.blueprints.write_view(output, world.legacy_recipes);
         output.len()
     })
 }

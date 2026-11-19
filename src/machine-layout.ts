@@ -8,8 +8,8 @@ type Layout = {
 const hasLargeMachine=content.machines.some(row=>Number(row.width)>1 || Number(row.height)>1);
 
 function layout(kind:number):Layout|undefined {
-  if (kind>=Kind.IronDrill && kind<=Kind.FuelDrill) return content.machines[Kind.IndustrialMiner];
-  if (kind>=Kind.ReinforcedIronDrill && kind<=Kind.ReinforcedFuelDrill) return content.machines[Kind.ReinforcedMiner];
+  if (kind===Kind.CopperDrill || kind>=Kind.IronDrill && kind<=Kind.FuelDrill) return content.machines[Kind.IndustrialMiner];
+  if (kind===Kind.ReinforcedCopperDrill || kind>=Kind.ReinforcedIronDrill && kind<=Kind.ReinforcedFuelDrill) return content.machines[Kind.ReinforcedMiner];
   return content.machines[kind];
 }
 
@@ -74,7 +74,8 @@ export function* machinePortTiles(data:Int32Array) {
   }
 }
 
-export function* previewPorts(anchor:number,kind:number,dir:number) {
+export function* previewPorts(anchor:number,kind:number,dir:number,legacy=true) {
+  if (kind===Kind.SimpleMiner && !legacy) return;
   const device=layout(kind);
   if (!device) return;
   const {width,height,ports}=device;

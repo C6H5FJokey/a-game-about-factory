@@ -44,6 +44,56 @@
       "id": "speed-module",
       "code": 9,
       "mineral": false
+    },
+    {
+      "id": "copper",
+      "code": 10,
+      "mineral": true
+    },
+    {
+      "id": "iron-ingot",
+      "code": 11,
+      "mineral": false
+    },
+    {
+      "id": "copper-ingot",
+      "code": 12,
+      "mineral": false
+    },
+    {
+      "id": "silica-ingot",
+      "code": 13,
+      "mineral": false
+    },
+    {
+      "id": "rivet",
+      "code": 14,
+      "mineral": false
+    },
+    {
+      "id": "copper-wire",
+      "code": 15,
+      "mineral": false
+    },
+    {
+      "id": "optical-blank",
+      "code": 16,
+      "mineral": false
+    },
+    {
+      "id": "frame",
+      "code": 17,
+      "mineral": false
+    },
+    {
+      "id": "armature",
+      "code": 18,
+      "mineral": false
+    },
+    {
+      "id": "ferrosilicon",
+      "code": 19,
+      "mineral": false
     }
   ],
   "machines": [
@@ -286,6 +336,33 @@
       "id": "reinforced-miner",
       "code": 30,
       "behavior": "reinforced-miner"
+    },
+    {
+      "id": "splicer",
+      "code": 31,
+      "behavior": "processing",
+      "processingClass": "part-triple"
+    },
+    {
+      "id": "ultra-belt",
+      "code": 32,
+      "behavior": "transport"
+    },
+    {
+      "id": "copper-drill",
+      "code": 33,
+      "behavior": "mining",
+      "legacyRecipe": "mine-copper",
+      "legacyInputs": [],
+      "output": "copper"
+    },
+    {
+      "id": "reinforced-copper-drill",
+      "code": 34,
+      "behavior": "mining",
+      "legacyRecipe": "mine-reinforced-copper",
+      "legacyInputs": [],
+      "output": "copper"
     }
   ]
 }

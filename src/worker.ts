@@ -1,4 +1,4 @@
-import { Op, type Command } from './model';
+import { HZ, Op, type Command } from './model';
 
 type Kernel = WebAssembly.Exports & {
   memory: WebAssembly.Memory;
@@ -6,11 +6,12 @@ type Kernel = WebAssembly.Exports & {
   directory():number; blueprints():number;
   preview_transports(len:number):number;
   reset():void; step(ticks:number):void; max_speed():number;
-  content_signature():number;
+  content_signature():number; tick_rate():number;
   command(op:number,a:number,b:number,c:number,len:number):number;
   save():number; restore(len:number):number;
 };
 type Message = { type:'init'; url:string; signature:number; save?:unknown; legacy?:number[] } | { type:'command'; data:Command } |
+  { type:'cancel-handcraft'; token:number } |
   { type:'speed'; speed:number } | { type:'recycle'; buffer:ArrayBuffer } |
   { type:'restore'; buffer:ArrayBuffer } | { type:'reset' } | { type:'save' } |
   { type:'transport-preview'; request:number; words:number[] };
@@ -24,6 +25,7 @@ let speed = 1;
 let previous = 0;
 let budget = 0;
 const buffers:ArrayBuffer[] = [];
+const TICK_MS = 1000 / HZ;
 
 function input(words:Int32Array | number[]) {
   if (!kernel) return false;
@@ -37,6 +39,12 @@ function publishBlueprints() {
   if (!kernel) return;
   const buffer=copyOutput(kernel.blueprints());
   worker.postMessage({type:'blueprints',buffer},[buffer]);
+}
+
+function publishDirectory() {
+  if (!kernel) return;
+  const buffer=copyOutput(kernel.directory());
+  worker.postMessage({type:'directory',buffer},[buffer]);
 }
 
 function copyOutput(length:number, reusable = false) {
@@ -64,7 +72,8 @@ async function boot(url:string, signature:number, save?:unknown, legacy?:number[
     if (!file.ok) throw new Error(`模拟文件加载失败 (${file.status})`);
     const result = await WebAssembly.instantiate(await file.arrayBuffer());
     const loaded = result.instance.exports as Kernel;
-    if (typeof loaded.content_signature !== 'function' || (loaded.content_signature() >>> 0) !== signature) {
+    if (typeof loaded.content_signature !== 'function' || (loaded.content_signature() >>> 0) !== signature
+      || typeof loaded.tick_rate !== 'function' || loaded.tick_rate() !== HZ) {
       worker.postMessage({type:'error',key:'ui.sameContentRequired'});
       return;
     }
@@ -76,21 +85,21 @@ async function boot(url:string, signature:number, save?:unknown, legacy?:number[
     if (legacy && input(legacy) && kernel.command(Op.MigrateBlueprint,0,0,0,legacy.length)>0) {
       worker.postMessage({type:'legacy-imported'});
     }
-    const catalog=copyOutput(kernel.directory());
-    worker.postMessage({type:'directory',buffer:catalog},[catalog]);
+    publishDirectory();
     publishBlueprints();
     snapshot();
     previous = performance.now();
     setInterval(() => {
       const now = performance.now();
-      budget += Math.min(now - previous,150) * speed;
+      // Accumulate elapsed time scaled by the tick rate, with no fractional tick divisor.
+      budget += Math.min(now - previous,150) * HZ * speed;
       previous = now;
-      const ticks = Math.floor(budget / 50);
+      const ticks = Math.floor(budget / 1000);
       if (!kernel || ticks === 0) return;
-      budget -= ticks * 50;
+      budget -= ticks * 1000;
       kernel.step(ticks);
       snapshot();
-    }, 50);
+    }, TICK_MS);
   } catch (error) { worker.postMessage({type:'error',message:String(error)}); }
 }
 
@@ -99,9 +108,11 @@ worker.onmessage = event => {
   if (message.type === 'init') { void boot(message.url,message.signature,message.save,message.legacy); return; }
   if (!kernel) return;
   switch (message.type) {
+    case 'cancel-handcraft': kernel.command(Op.CancelHandcraft,message.token,0,0,0); return;
     case 'speed': {
       const requested = message.speed;
       if ([0,1,2,4].includes(requested)) speed = Math.min(requested,kernel.max_speed());
+      previous=performance.now();
       budget=0;
       return;
     }
@@ -128,9 +139,9 @@ worker.onmessage = event => {
     case 'restore': {
       const status = restoreSave(message.buffer);
       worker.postMessage({type:status>0 ? 'restored' : 'invalid-save',status});
-      if (status>0) { speed=Math.min(speed,kernel.max_speed()); publishBlueprints(); snapshot(true); }
+      if (status>0) { speed=Math.min(speed,kernel.max_speed()); publishDirectory(); publishBlueprints(); snapshot(true); }
       return;
     }
-    case 'reset': kernel.reset(); speed=Math.min(speed,kernel.max_speed()); publishBlueprints(); snapshot(true); return;
+    case 'reset': kernel.reset(); speed=Math.min(speed,kernel.max_speed()); publishDirectory(); publishBlueprints(); snapshot(true); return;
   }
 };

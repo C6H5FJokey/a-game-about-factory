@@ -69,7 +69,7 @@ fn merger_alternates_skips_empty_and_restarts_after_jam() {
     world.rebuild();
     let mut entries = Vec::new();
     let mut observed = 0;
-    for _ in 0..70 {
+    for _ in 0..simulation_ticks(70) {
         advance(&mut world, 1);
         let cargo = world.cargo[node(out, 0)];
         if cargo.id != 0 && cargo.id != observed {
@@ -81,20 +81,20 @@ fn merger_alternates_skips_empty_and_restarts_after_jam() {
     assert!(entries.len() >= 10);
     assert!(entries.windows(2).all(|pair| pair[0] != pair[1]));
     world.cells[source].cfg = FUEL;
-    advance(&mut world, 25);
+    advance(&mut world, simulation_ticks(25));
     assert_eq!(world.cargo[node(out, 0)].item, IRON);
     assert_eq!(world.cargo[node(junction, 0)].item, IRON);
     world.cells[source].cfg = SILICA;
     world.cells[sink].cfg = FUEL;
-    advance(&mut world, 25);
+    advance(&mut world, simulation_ticks(25));
     let jammed = world.cargo[node(out, 0)];
     assert!(jammed.blocked);
-    advance(&mut world, 20);
+    advance(&mut world, simulation_ticks(20));
     assert_eq!(world.cargo[node(out, 0)].id, jammed.id);
     world.cells[sink].cfg = 0;
-    advance(&mut world, 5);
+    advance(&mut world, simulation_ticks(5));
     assert_ne!(world.cargo[node(out, 0)].id, jammed.id);
-    advance(&mut world, 10);
+    advance(&mut world, simulation_ticks(10));
     assert!([out, junction]
         .into_iter()
         .any(|tile| world.cargo[node(tile, 0)].item == SILICA));
@@ -114,7 +114,7 @@ fn crossing_blocks_one_direction_and_takes_only_the_selected_cargo() {
     place(&mut world, 10, 11, BELT, 1, 0);
     place(&mut world, 10, 12, DEPOT, 0, 0);
     world.rebuild();
-    advance(&mut world, 26);
+    advance(&mut world, simulation_ticks(26));
     let [iron, silica] = [
         world.cargo[node(crossing, 0)],
         world.cargo[node(crossing, 1)],
@@ -136,7 +136,7 @@ fn crossing_blocks_one_direction_and_takes_only_the_selected_cargo() {
         world.take_cargo(crossing, 0, IRON.into(), &[iron.id, device]),
         -22
     );
-    advance(&mut world, 4);
+    advance(&mut world, simulation_ticks(4));
     let replacement = world.cargo[node(crossing, 0)];
     assert_eq!(replacement.item, IRON);
     assert_ne!(replacement.id, iron.id);
@@ -146,7 +146,7 @@ fn crossing_blocks_one_direction_and_takes_only_the_selected_cargo() {
         -22
     );
     world.cells[east].cfg = 0;
-    advance(&mut world, 15);
+    advance(&mut world, simulation_ticks(15));
     for item in [IRON, SILICA] {
         let on_line = world.cargo.iter().filter(|c| c.item == item).count() as u32;
         assert_eq!(world.stock[item as usize] + on_line, 500);
@@ -193,13 +193,13 @@ fn transport_rebuild_is_atomic_and_keeps_order_source_and_lane() {
     let cargo = world.cargo[node(downstream, 1)];
     assert_eq!((cargo.id, cargo.source), (b, source as u16 + 1));
     assert_eq!(world.cargo[node(downstream, 0)].id, 0);
-    advance(&mut world, 15);
+    advance(&mut world, simulation_ticks(15));
     assert!(world.cargo[node(downstream, 1)].blocked);
     world.cells[sink].cfg = 0;
     advance(&mut world, 1);
     assert_eq!(world.delivered, 1);
     assert_eq!(world.cargo[node(downstream, 1)].id, a);
-    advance(&mut world, 5);
+    advance(&mut world, simulation_ticks(5));
     assert_eq!(world.delivered, 2);
 
     let full = place(&mut world, 20, 10, CROSSING, 0, 0);
@@ -231,6 +231,7 @@ fn mixed_segments_obey_the_slower_gate_and_crossing_round_trips() {
         (10, [FAST_BELT; 4]),
         (14, [FAST_BELT, BELT, FAST_BELT, FAST_BELT]),
         (18, [BELT, FAST_BELT, FAST_BELT, FAST_BELT]),
+        (20, [EXPRESS_BELT; 4]),
     ] {
         place(&mut world, 3, y, DEPOT, 0, IRON);
         for (offset, kind) in tiers.into_iter().enumerate() {
@@ -243,9 +244,9 @@ fn mixed_segments_obey_the_slower_gate_and_crossing_round_trips() {
     let a = load(&mut world, crossing, 0, IRON, 0);
     let b = load(&mut world, crossing, 1, SILICA, 0);
     world.rebuild();
-    let mut last = [0; 3];
-    let mut counts = [0; 3];
-    for _ in 0..220 {
+    let mut last = [0; 4];
+    let mut counts = [0; 4];
+    for _ in 0..simulation_ticks(220) {
         advance(&mut world, 1);
         for (i, &end) in ends.iter().enumerate() {
             let id = world.cargo[end].id;
@@ -258,6 +259,7 @@ fn mixed_segments_obey_the_slower_gate_and_crossing_round_trips() {
     assert!((105..=110).contains(&counts[0]), "{counts:?}");
     assert!((40..=44).contains(&counts[1]), "{counts:?}");
     assert!((40..=44).contains(&counts[2]), "{counts:?}");
+    assert!((215..=220).contains(&counts[3]), "{counts:?}");
     assert!(world.cargo[node(index(4, 14), 0)].blocked);
     let mut words = Vec::new();
     world.write_transport_save(&mut words);
@@ -266,7 +268,7 @@ fn mixed_segments_obey_the_slower_gate_and_crossing_round_trips() {
     restored.tick = world.tick;
     restored.stock = world.stock;
     restored.machines.clone_from(&world.machines);
-    assert_eq!(restored.read_transport_save(&words), Some(&[][..]));
+    assert_eq!(restored.read_transport_save(&words, false), Some(&[][..]));
     assert_eq!(restored.cargo[node(crossing, 0)].id, a);
     assert_eq!(restored.cargo[node(crossing, 1)].id, b);
     advance(&mut world, 25);
@@ -288,19 +290,22 @@ fn splitter_projects_the_branch_that_was_really_available() {
     place(&mut world, 10, 10, DEPOT, 0, FUEL);
     let branch = place(&mut world, 9, 11, FAST_BELT, 1, 0);
     world.rebuild();
-    advance(&mut world, 5);
+    advance(&mut world, simulation_ticks(5));
     let item = world.cargo[node(bend, 0)];
     assert_eq!(item.from, node(index(8, 9), 0) as u16);
-    advance(&mut world, 5);
+    advance(&mut world, simulation_ticks(5));
     let through_split = world.cargo[node(split, 0)];
     assert_eq!(through_split.id, item.id);
     assert_eq!(through_split.from, node(bend, 0) as u16);
-    advance(&mut world, 5);
+    advance(&mut world, simulation_ticks(5));
     let selected_branch = world.cargo[node(branch, 0)];
     assert_eq!(selected_branch.id, item.id);
     assert_eq!(selected_branch.from, node(split, 0) as u16);
-    assert_eq!(selected_branch.ready - selected_branch.since, 2);
-    advance(&mut world, 3);
+    assert_eq!(
+        selected_branch.ready - selected_branch.since,
+        simulation_ticks(2)
+    );
+    advance(&mut world, simulation_ticks(3));
     assert!(world.cargo[node(branch, 0)].blocked);
     assert_eq!(world.cargo[node(branch, 0)].id, item.id);
 }
@@ -315,7 +320,7 @@ fn a_full_backpack_blocks_automatic_deposit_until_space_is_available() {
     let cargo_id = load(&mut world, belt, 0, IRON, 0);
     let device = world.cells[belt].identity;
     world.rebuild();
-    advance(&mut world, 10);
+    advance(&mut world, simulation_ticks(10));
     assert_eq!(world.stock[IRON as usize], 0);
     assert_eq!(world.cargo[node(belt, 0)].id, cargo_id);
     assert!(world.cargo[node(belt, 0)].blocked);
@@ -329,4 +334,36 @@ fn a_full_backpack_blocks_automatic_deposit_until_space_is_available() {
     advance(&mut world, 1);
     assert_eq!(world.stock[IRON as usize], 1);
     assert_eq!(world.cargo[node(belt, 0)].id, 0);
+}
+
+#[test]
+fn production_belt_tiers_meet_their_per_minute_rates() {
+    let mut world = World::new();
+    world.stage = Stage::Sunlight;
+    world.stock[IRON as usize] = 800;
+    let tiers = [BELT, FAST_BELT, EXPRESS_BELT, ULTRA_BELT];
+    let lines = tiers.map(|kind| {
+        let y = 8 + tiers.iter().position(|&tier| tier == kind).unwrap() * 3;
+        place(&mut world, 8, y, DEPOT, 0, IRON);
+        for x in 9..=12 {
+            place(&mut world, x, y, kind, 0, 0);
+        }
+        place(&mut world, 13, y, DEPOT, 0, 0);
+        node(index(12, y), 0)
+    });
+    world.rebuild();
+    advance(&mut world, HZ * 10);
+    let mut last = lines.map(|end| world.cargo[end].id);
+    let mut counts = [0; 4];
+    for _ in 0..HZ * 60 {
+        advance(&mut world, 1);
+        for (i, &end) in lines.iter().enumerate() {
+            let id = world.cargo[end].id;
+            if id != 0 && id != last[i] {
+                counts[i] += 1;
+                last[i] = id;
+            }
+        }
+    }
+    assert_eq!(counts, [60, 120, 270, 600]);
 }

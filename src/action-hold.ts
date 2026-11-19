@@ -1,19 +1,22 @@
 export function bindActionHold(root:HTMLElement,actions:{
   attribute:string;
-  duration:number;
+  duration:number | ((target:number)=>number);
   available(target:number):boolean;
   complete(target:number):boolean;
+  begin?(target:number):boolean;
+  cancel?(target:number):void;
   mapMeter?:HTMLElement;
 }) {
   let hold:{target:number; started:number; button?:HTMLButtonElement; pointer?:number; key?:string} | undefined;
   let meter:HTMLElement | undefined;
   const stop=()=>{
+    if (hold) actions.cancel?.(hold.target);
     meter?.style.removeProperty('--harvest');
     meter=undefined;
     hold=undefined;
   };
   const start=(target:number,button?:HTMLButtonElement,pointer?:number,key?:string)=>{
-    if (hold || button?.disabled || !actions.available(target)) return;
+    if (hold || button?.disabled || !actions.available(target) || actions.begin?.(target)===false) return;
     hold={target,started:performance.now(),button,pointer,key};
   };
   const target=(event:Event)=>(event.target as Element | null)?.closest<HTMLButtonElement>(`button[${actions.attribute}]`);
@@ -54,7 +57,8 @@ export function bindActionHold(root:HTMLElement,actions:{
     const nextMeter=hold.button?hold.button.querySelector<HTMLElement>('.harvest-fill') ?? undefined:actions.mapMeter;
     if (meter!==nextMeter) meter?.style.removeProperty('--harvest');
     meter=nextMeter;
-    const fraction=Math.min(1,(now-hold.started)/actions.duration);
+    const duration=typeof actions.duration==='number'?actions.duration:actions.duration(hold.target);
+    const fraction=Math.min(1,(now-hold.started)/duration);
     meter?.style.setProperty('--harvest',String(fraction));
     if (fraction===1 && actions.complete(hold.target)) hold.started=now;
   };
