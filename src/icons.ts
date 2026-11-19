@@ -5,14 +5,14 @@ const itemArt = [
   '',
   '<path fill="#ad775d" d="m3 22 3-10 8-6 11 4 4 9-7 8H10Z"/><path fill="#e6ab83" d="m6 12 8-6 6 6-5 7-9-2Z"/><path d="m15 19 7 8m-2-15 5-2"/>',
   '<path fill="#597ba8" d="m3 25 4-12 6 3 4-12 9 3 3 13-7 7Z"/><path fill="#aedaf9" d="m13 16 4-12 6 6-4 13Z"/><path d="m7 13 3 11m13-14 3-3"/>',
-  '<path fill="#a26739" d="m4 17 8-10 13 2 4 11-9 7-13-3Z"/><path fill="#ecab61" d="m12 7 13 2 4 11-13-3Z"/><path d="m4 17 12 0 4 10"/>',
+  '<path fill="#424950" d="m4 17 8-10 13 2 4 11-9 7-13-3Z"/><path fill="#899097" d="m12 7 13 2 4 11-13-3Z"/><path d="m4 17 12 0 4 10"/>',
   '<path fill="#7894a0" d="m4 20 16-5 8 5-16 6Z"/><path fill="#b1c6cc" d="m4 14 16-6 8 5-16 6Z"/><path fill="#e0eaec" d="m4 10 16-5 8 5-16 6Z"/>',
   '<ellipse cx="16" cy="16" rx="12" ry="9" fill="#797eb3"/><ellipse cx="17" cy="15" rx="9" ry="6" fill="#c6dafb"/><path d="m11 16 4-4m2 6 5-5" stroke="#65739e"/>',
   '<path fill="#5b9d99" d="M6 8h20v16H6z"/><path fill="#a7e2d3" d="M11 12h10v8H11z"/><path d="M3 11h3m-3 5h3m-3 5h3m20-10h3m-3 5h3m-3 5h3"/>',
   '<path fill="#c1924d" d="m5 10 13-6 9 6v13l-13 5-9-5Z"/><path fill="#f8d896" d="m5 10 9 5 13-5M14 15v13"/><path d="m9 13 13-6m-4 13 5-2"/>',
   '<path fill="#b28a58" d="m4 10 12-5 12 5v14l-12 4-12-4Z"/><path fill="#e5c58e" d="m4 10 12 5 12-5"/><path d="M16 15v13m-7-13 4 2m10 3v4"/>',
   '<path fill="#6caba9" d="M5 8h22v17H5z"/><path fill="#dfedd3" d="m9 15 4 3-4 3m6-6 4 3-4 3m6-6 4 3-4 3" stroke-width="2"/>',
-  '<path fill="#b97044" d="m4 23 3-12 9-6 10 7 3 10-8 6H10Z"/><path fill="#efad75" d="m7 11 9-6 10 7-8 3Z"/><path stroke="#ffd9a1" d="m8 20 5-4m8 7 4-4"/>',
+  '<path fill="#348457" d="m4 23 3-12 9-6 10 7 3 10-8 6H10Z"/><path fill="#78ce92" d="m7 11 9-6 10 7-8 3Z"/><path stroke="#b5ebbc" d="m8 20 5-4m8 7 4-4"/>',
   '<path fill="#a6bcc7" d="M4 23l4-10 16-5 5 9-4 7-16 4Z"/><path fill="#e5f0f4" d="m8 13 16-5 5 9-18 6Z"/>',
   '<path fill="#a86239" d="M4 23l4-10 16-5 5 9-4 7-16 4Z"/><path fill="#eaab71" d="m8 13 16-5 5 9-18 6Z"/>',
   '<path fill="#5f80ad" d="M4 23l4-10 16-5 5 9-4 7-16 4Z"/><path fill="#b4d7fc" d="m8 13 16-5 5 9-18 6Z"/>',
@@ -24,6 +24,9 @@ const itemArt = [
   '<path fill="#548397" d="m3 20 6-9 16-4 4 9-4 8-15 4Z"/><path fill="#9ec3ce" d="m9 11 16-4 4 9-17 6Z"/><path stroke="#d5e8ec" d="m16 13 7-2m-8 6 11-3"/>',
 ];
 
+const oreDrillArt = (ore:'iron'|'copper') =>
+  `<path d="M6 23V8h19v15M3 24h26M11 13h9l-5 9Zm4-2V6"/><path class="accent ${ore}" d="m12 26 4-3 5 3-4 3Z"/>`;
+
 const machineArt: Record<number,string> = {
   [Kind.Empty]:'<path d="M4 9h24v14H4z"/>',
   [Kind.Belt]:'<rect x="2" y="9" width="28" height="14" rx="4"/><path d="M8 9v14m16-14v14m-12-7h8m-3-3 3 3-3 3"/>',
@@ -33,9 +36,10 @@ const machineArt: Record<number,string> = {
   [Kind.Splicer]:'<rect x="3" y="5" width="26" height="22" rx="3"/><path class="accent fuel" d="M4 10h5l7 6h12M4 16h12M4 22h5l7-6"/>',
   [Kind.Merger]:'<path d="M3 7h6l9 9h11M3 25h6l9-9m-12-12 3 3-3 3m0 12 3 3-3 3m19-15 4 3-4 3"/>',
   [Kind.Crossing]:'<path d="M4 11h7m10 0h7M4 21h7m10 0h7m-14-17h8v24h-8z"/><path d="M4 16h6m15 0h4m-3-3 3 3-3 3m-9-11v16m-3-4 3 4 3-4"/>',
-  [Kind.IronDrill]:'<path d="M6 23V8h19v15M3 24h26M11 13h9l-5 9Zm4-2V6"/><path class="accent iron" d="m12 26 4-3 5 3-4 3Z"/>',
+  [Kind.IronDrill]:oreDrillArt('iron'),
+  [Kind.CopperDrill]:oreDrillArt('copper'),
   [Kind.SilicaDrill]:'<path d="M4 24h24M7 23V11l9-7 9 7v12m-9-12v11m-5-6 5 6 5-6"/><path class="accent silica" d="m16 24 5 3-5 3-5-3Z"/>',
-  [Kind.FuelDrill]:'<path d="M3 24h26M7 24V9h17v15m-12-6 10-6m-7 6 4 5m5-14h4v5"/><path class="accent fuel" d="m10 25 5-3 5 2 1 4-9 1Z"/>',
+  [Kind.FuelDrill]:'<path d="M3 24h26M7 24V9h17v15m-12-6 10-6m-7 6 4 5m5-14h4v5"/><path class="accent coal" d="m10 25 5-3 5 2 1 4-9 1Z"/>',
   [Kind.Smelter]:'<path d="M5 27V12l4-6h14l4 6v15ZM10 6V3h7v3"/><path class="accent fuel" d="M10 24v-4c0-3 3-4 4-7 1 3 5 4 6 8v3Z"/><path d="M20 10h4"/>',
   [Kind.Grinder]:'<path d="M5 6h22v21H5zM3 24h26"/><circle cx="16" cy="16" r="7"/><path class="accent silica" d="m16 11 4 5-4 5-4-5Z"/>',
   [Kind.Calibrator]:'<rect x="5" y="8" width="22" height="17" rx="2"/><path d="M10 5v3m6-3v3m6-3v3M10 25v3m6-3v3m6-3v3"/><path class="accent cyan" d="M13 12h6v3h3v4h-3v3h-6v-3h-3v-4h3Z"/>',
@@ -62,10 +66,9 @@ export function itemIcon(item:number) {
 export function machineIcon(kind:number) {
   kind=content.machines[kind]?.icon ?? kind;
   if (kind===Kind.IndustrialMiner) kind=Kind.IronDrill;
-  const copper=kind===Kind.CopperDrill || kind===Kind.ReinforcedCopperDrill;
   const reinforced=kind===Kind.ReinforcedCopperDrill || kind>=Kind.ReinforcedIronDrill && kind<=Kind.ReinforcedMiner;
-  if (copper) kind=Kind.IronDrill;
-  if (reinforced && !copper) kind=kind===Kind.ReinforcedMiner?Kind.IronDrill:kind-Kind.ReinforcedIronDrill+Kind.IronDrill;
+  if (kind===Kind.ReinforcedCopperDrill) kind=Kind.CopperDrill;
+  else if (reinforced) kind=kind===Kind.ReinforcedMiner?Kind.IronDrill:kind-Kind.ReinforcedIronDrill+Kind.IronDrill;
   return `<svg class="machine-icon" viewBox="0 0 32 32" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${machineArt[kind] ?? ''}${reinforced?'<path class="accent fuel" d="M22 5h5m-2.5-2.5v5"/>':''}</svg>`;
 }
 

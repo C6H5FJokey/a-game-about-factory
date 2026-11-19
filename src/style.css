@@ -147,8 +147,10 @@ canvas:active { cursor:grabbing; }
 .machine-tool:hover,.machine-tool:focus-visible,.machine-tool[aria-pressed="true"] { background:#223b45; border-color:var(--cyan); }
 .machine-icon { display:block; width:48px; height:48px; flex:none; color:#c5e3e6; }
 .machine-icon .accent.iron { fill:#e0a184; }
+.machine-icon .accent.copper { fill:#78ce92; }
 .machine-icon .accent.silica { fill:#9fbff5; }
 .machine-icon .accent.fuel { fill:#ffbf76; }
+.machine-icon .accent.coal { fill:#899097; }
 .machine-icon .accent.cyan { fill:#82dcd0; }
 .machine-tool[data-unavailable="true"] { background:#131f28; color:#879da6; border-color:#2c414c; }
 .machine-tool[data-unavailable="true"] .machine-icon { filter:saturate(.18); opacity:.55; }

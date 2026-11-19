@@ -258,7 +258,7 @@ function badPlacement(tile:number,kind:number,dir=0) {
     if (place<0 || !inBounds(limits,x,y) || kind && occupiedKind(data,place)) return true;
     if (kind && place!==tile && CITY.some((_,i)=>cityValue(data,i,CityField.Site)===place)) return true;
   }
-  if (kind===Kind.SimpleMiner) return cell(data,tile,Field.Ore)!==1;
+  if (kind===Kind.SimpleMiner) return !cell(data,tile,Field.Ore);
   const site=CITY.findIndex((_,i)=>cityValue(data,i,CityField.Site)===tile);
   if (kind===Kind.Station || site>=0) return kind!==Kind.Station || site<0 || site>=visibleCities();
   if (drillTool(kind)) {
@@ -422,6 +422,13 @@ function createDraft():Draft {
       result.label=variant
         ? `${ITEM[variant.output]} · ${(variant.amount*HZ/variant.ticks).toFixed(2)} 件/秒 · ${mw(variant.demand)}${reason?' · '+reason:''}`
         : reason || '选择一处已开放的矿脉';
+    }
+    if (tool===Kind.SimpleMiner && !result.conflict) {
+      const ore=cell(data,last,Field.Ore), entry=design(tool);
+      if (entry) {
+        const rate=(entry.amount*HZ/entry.ticks).toLocaleString(language(),{minimumFractionDigits:2,maximumFractionDigits:2});
+        result.label=t('ui.simpleMiningPreview',{item:ITEM[ore],rate});
+      }
     }
     result.cells=[{tile:last,kind:variant?.kind ?? tool,dir:direction,conflict:result.conflict}];
     result.command={op:Op.Place,a:last,b:tool,c:direction};
@@ -758,7 +765,7 @@ function regionalMission():string[] {
   if (cell(data,site,Field.Kind)!==Kind.Station) return task('在'+name+'接货','到货站已经就位。从「建造」安放当地地面站，准备接收校准芯。');
   if (!v(CityField.Delivered)) return task('让第一箱货抵达'+name,'在曙港发货站装入校准芯。到货后，由当地的短带把货送出站场。','0 / 1');
   if (!cell(data,site,Field.Grid)) return task('给'+name+'地面站供电','把当地地面站接上电网，或用本地发电机为它供电。');
-  if (data[Meta.Modules]<=city) return task('把镜阵延伸到'+name,'在曙港备好三个镜阵模块和五份燃料，从「轨道」为这座城增发一组镜阵。',`${data[Meta.Modules]} / ${city+1}`);
+  if (data[Meta.Modules]<=city) return task('把镜阵延伸到'+name,textHtml(t('ui.regionalLaunchGoal')),`${data[Meta.Modules]} / ${city+1}`);
   return task(city===1?'点亮谷东':'连续点亮谷东与西岭',city===1?'校准芯到站后，在「轨道」发起第一场跨谷照明。':'从「轨道」安排相邻窗口。谷东窗口结束三秒后，西岭接班。');
 }
 
@@ -928,11 +935,17 @@ function recipePicker(tile:number,kind:number) {
 }
 
 function devicePanel(kind:number) {
-  if (kind===Kind.DevelopmentHub) return [`设备检查 · ${coordinates(selected)}`,'阶段交付站',
-    readings([...machineLayoutRows(selected,kind),['已完成阶段',limits.tier],['背包占用',t('ui.backpack',{used:limits.used,slots:limits.slots})],['堆叠上限',t('ui.individualStacks')],['时间倍速上限',`${limits.speed}×`],
-      ['缩放范围',`${limits.minZoom}–${limits.maxZoom} 像素/格`],['开放地图',`${limits.right-limits.left} × ${limits.bottom-limits.top} 格`]])+
-    signal(limits.tier===0?'下一阶段 · 扩大背包与地图范围，开放重载带和强化采矿机。':'当前阶段已开放全部上限。')+
-    actions(iconButton('拆除设备','remove','hammer'))];
+  if (kind===Kind.DevelopmentHub) {
+    const camera=renderer?.camera;
+    const digits={maximumFractionDigits:1};
+    const min=(camera?.minZoom ?? limits.minZoom).toLocaleString(language(),digits);
+    const max=(camera?.maxZoom ?? limits.maxZoom).toLocaleString(language(),digits);
+    return [`设备检查 · ${coordinates(selected)}`,'阶段交付站',
+      readings([...machineLayoutRows(selected,kind),['已完成阶段',limits.tier],['背包占用',t('ui.backpack',{used:limits.used,slots:limits.slots})],['堆叠上限',t('ui.individualStacks')],['时间倍速上限',`${limits.speed}×`],
+        [t('ui.zoomRange'),t('ui.zoomRangeValue',{min,max})],['开放地图',`${limits.right-limits.left} × ${limits.bottom-limits.top} 格`]])+
+      signal(textHtml(t(limits.tier===0?'ui.nextDevelopmentStage':'ui.allDevelopmentStages')))+
+      actions(iconButton('拆除设备','remove','hammer'))];
+  }
   const device=machineText(kind), status=cell(data,selected,Field.Status), cfg=cell(data,selected,Field.Config);
   const inventory:(readonly [string,string|number])[]=[];
   const actual=deviceAt(data,selected);
@@ -1328,7 +1341,7 @@ function home() {
   const cam=renderer?.camera;
   if (!cam) return;
   const [x,y]=xy(data[Meta.FirstOre]);
-  const zoom=data[Meta.Stage]<Stage.Expand?Math.min(cam.width/8,limits.maxZoom):28;
+  const zoom=data[Meta.Stage]<Stage.Expand?Math.min(cam.width/8,48):28;
   const drawerOffset=portraitDrawer.matches && panel.dataset.expanded==='true'?panel.offsetHeight/2:0;
   cam.aim(x+.5,y+.5+drawerOffset/zoom,zoom);
 }
@@ -1733,11 +1746,13 @@ worker.onerror=()=>fail('模拟没有启动。请刷新页面后重试。');
 
 const mapLabels=[
   { name:'铜矿', x:17.5, y:16.5, stage:Stage.Handwork, oreTile:at(17,17) },
-  { name:'燃料矿', x:23.5, y:15.5, stage:Stage.Bench, oreTile:at(23,16) }, { name:'铁矿', x:22.5, y:18.5,stage:Stage.Expand },
+  { nameKey:'ui.coalDeposit', x:23.5, y:15.5, stage:Stage.Bench, oreTile:at(23,16) }, { name:'铁矿', x:22.5, y:18.5,stage:Stage.Expand },
   { name:'硅矿', x:20.5, y:19.5,stage:Stage.Silica }, { name:'曙港城', x:44, y:5.2,stage:Stage.Launch },
   { name:'谷东城', x:48, y:22.1,stage:Stage.Valley }, { name:'西岭城', x:8, y:22.1,stage:Stage.Highland },
 ].map(label=>{
-  const element=document.createElement('span'); element.className='map-label'; element.textContent=label.name;
+  const element=document.createElement('span'); element.className='map-label';
+  if (label.nameKey) element.dataset.i18n=label.nameKey;
+  else element.textContent=label.name ?? '';
   byId('map-labels').append(element); return {...label,element};
 });
 

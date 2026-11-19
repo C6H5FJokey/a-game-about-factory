@@ -491,7 +491,7 @@ impl World {
                     .iter()
                     .position(|&t| t == tile)
                     .is_some_and(|n| self.city_known(n)))
-            || (kind == SIMPLE_MINER && self.known_ore(tile) != IRON)
+            || (kind == SIMPLE_MINER && self.known_ore(tile) == 0)
         {
             return -3;
         }

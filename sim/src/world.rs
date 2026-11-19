@@ -14,6 +14,7 @@ const FUEL_BURN_STEPS: u32 = HZ * FUEL_STEPS_PER_TICK * 5 / 4;
 #[derive(Clone, Copy, Default)]
 pub struct Cell {
     pub kind: u8,
+    pub mining_ore: u8,
     pub identity: i32,
     pub dir: u8,
     pub wire: bool,
@@ -148,6 +149,9 @@ impl World {
         if cell.kind != 0 {
             cell.identity = self.next_device_id;
             self.next_device_id += 1;
+        }
+        if miner_grade(cell.kind) > 0 {
+            cell.mining_ore = terrain(tile);
         }
         self.cells[tile] = cell;
     }

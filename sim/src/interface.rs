@@ -13,7 +13,7 @@ impl World {
         for &tile in &self.machines {
             let cell = self.cells[tile];
             let grade = miner_grade(cell.kind);
-            let ore = if grade > 0 { terrain(tile) } else { 0 };
+            let ore = cell.mining_ore;
             let p = cell.power;
             out.extend([
                 tile as i32,
@@ -109,13 +109,12 @@ pub extern "C" fn directory() -> usize {
             };
             let batteries = kind == BATTERY;
             let ore_mask = match kind {
-                INDUSTRIAL_MINER | REINFORCED_MINER => {
+                SIMPLE_MINER | INDUSTRIAL_MINER | REINFORCED_MINER => {
                     (1 << IRON)
                         | (1 << SILICA)
                         | (1 << FUEL)
                         | if world.legacy_recipes { 0 } else { 1 << COPPER }
                 }
-                SIMPLE_MINER => 1 << IRON,
                 _ => drill_ore(kind).map_or(0, |ore| 1 << ore),
             };
             out.extend([

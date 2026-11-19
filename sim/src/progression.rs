@@ -19,7 +19,7 @@ const LIMITS: [Limits; 2] = [
         slots: 16,
         speed: 2,
         min_zoom: 9,
-        max_zoom: 48,
+        max_zoom: 64,
     },
     Limits {
         slots: 24,

@@ -1,13 +1,13 @@
 import { CityField, Field, H, Kind, Meta, Stage, STEP, W, at, cell, cityValue, inBounds, isTransport, legacyRecipes, xy, type MapLimits, type Mode, type PreviewCell } from './model';
-import { cargoIndex, design, transportPorts } from './sim-data';
+import { cargoIndex, design, deviceAt, transportPorts } from './sim-data';
 import { machineAnchor, machinePortTiles, machineSize, previewPorts } from './machine-layout';
 
 type Color = [number,number,number,number];
 const rgba = (r:number,g:number,b:number,a=1):Color => [r/255,g/255,b/255,a];
 const ink = rgba(12,21,29), frame = rgba(59,84,95), line = rgba(39,60,68), amber = rgba(255,193,109);
 const cyan = rgba(119,225,213), red = rgba(255,145,117), grey = rgba(131,157,168);
-const mineral = [ink,rgba(180,135,112),rgba(133,169,217),rgba(228,157,86),rgba(194,205,207),rgba(167,184,249),rgba(125,222,209),amber,rgba(221,199,152),
-  cyan,rgba(190,111,71),grey,rgba(230,145,83),rgba(145,179,231),rgba(165,175,186),
+const mineral = [ink,rgba(180,135,112),rgba(133,169,217),rgba(123,130,137),rgba(194,205,207),rgba(167,184,249),rgba(125,222,209),amber,rgba(221,199,152),
+  cyan,rgba(100,193,130),grey,rgba(230,145,83),rgba(145,179,231),rgba(165,175,186),
   rgba(240,158,94),rgba(157,216,252),rgba(205,196,159),rgba(222,165,110),rgba(137,193,204)];
 const shapeForItem = [0,0,3,4,0,3,1,4,1,1,3,1,1,1,2,2,3,0,4,1];
 
@@ -52,20 +52,31 @@ void main(){
 
 export class Camera {
   x=19.7; y=17.2; zoom=26; width=1; height=1;
-  bounds:MapLimits={left:0,top:0,right:W,bottom:H,minZoom:9,maxZoom:48};
+  bounds:MapLimits={left:0,top:0,right:W,bottom:H,minZoom:9,maxZoom:64};
+  get minZoom() {
+    const {left,right,top,bottom,minZoom}=this.bounds;
+    return Math.max(minZoom,this.width/(right-left),this.height/(bottom-top));
+  }
+  get maxZoom() {
+    // Preserve a close view on large screens at every progression tier.
+    return Math.max(this.bounds.maxZoom,this.width/40,this.height/24);
+  }
+  private clampZoom(zoom:number) { return Math.max(this.minZoom,Math.min(this.maxZoom,zoom)); }
   toScreen(x:number,y:number) { return [(x-this.x)*this.zoom+this.width/2,(y-this.y)*this.zoom+this.height/2]; }
   toWorld(x:number,y:number) { return [this.x+(x-this.width/2)/this.zoom,this.y+(y-this.height/2)/this.zoom]; }
   pan(dx:number,dy:number) { this.x-=dx/this.zoom; this.y-=dy/this.zoom; this.limit(); }
   scale(atX:number,atY:number,factor:number) {
+    const zoom=this.clampZoom(this.zoom*factor);
+    if (zoom===this.zoom) return;
     const [x,y] = this.toWorld(atX,atY);
-    this.zoom=Math.max(this.bounds.minZoom,Math.min(this.bounds.maxZoom,this.zoom*factor));
+    this.zoom=zoom;
     const [nextX,nextY]=this.toWorld(atX,atY);
     this.x+=x-nextX; this.y+=y-nextY; this.limit();
   }
   focus(tile:number) { const [x,y]=xy(tile); this.aim(x+.5,y+.5); }
   aim(x:number,y:number,zoom=this.zoom) {
     this.x=x; this.y=y;
-    this.zoom=Math.max(this.bounds.minZoom,Math.min(this.bounds.maxZoom,zoom));
+    this.zoom=this.clampZoom(zoom);
     this.limit();
   }
   tileAt(px:number,py:number) {
@@ -375,11 +386,15 @@ export class Renderer {
         this.machineBody(kind,ax,ay,cell(data,anchor,Field.Direction),cell(data,anchor,Field.Status));
         if (kind===Kind.SimpleMiner) {
           const progress=cell(data,anchor,Field.Progress)/data[Meta.MinerTicks];
+          const ore=cell(data,anchor,Field.Ore);
+          const count=ore<9 ? cell(data,anchor,Field.Inventory+ore-1)
+            : deviceAt(data,anchor)?.slots.find(slot=>slot.role==='output' && slot.item===ore)?.count ?? 0;
+          const color=mineral[ore];
           const stroke=Math.sin(progress*Math.PI*4)*.08;
           this.box(ax+.45,ay+.47+stroke,.16,.38,amber,4);
           this.box(ax+.82,ay+.82,.38,.24,frame,1);
-          if (cell(data,anchor,Field.Inventory)>0) this.box(ax+.82,ay+.79,.22,.18,mineral[1],4);
-          if (progress>.78) this.box(ax+.53+(progress-.78)*1.2,ay+.52+(progress-.78),.13,.13,mineral[1],4);
+          if (count>0) this.box(ax+.82,ay+.79,.22,.18,color,shapeForItem[ore]);
+          if (progress>.78) this.box(ax+.53+(progress-.78)*1.2,ay+.52+(progress-.78),.13,.13,color,shapeForItem[ore]);
         }
       }
     }

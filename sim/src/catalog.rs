@@ -293,7 +293,7 @@ pub fn permitted(kind: u8, pos: usize) -> bool {
         return SENDERS.contains(&pos) || RECEIVERS.contains(&pos);
     }
     if kind == SIMPLE_MINER {
-        return terrain(pos) == IRON;
+        return terrain(pos) != 0;
     }
     drill_ore(kind).is_none_or(|ore| terrain(pos) == ore)
 }

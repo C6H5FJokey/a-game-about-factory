@@ -2,6 +2,11 @@ use crate::catalog::*;
 use crate::world::{Cell, World};
 
 pub fn device_recipe(cell: &Cell, legacy: bool) -> Option<Recipe> {
+    if cell.kind == SIMPLE_MINER {
+        let mut mining = recipe(SIMPLE_MINER)?;
+        mining.output = cell.mining_ore;
+        return (mining.output != 0).then_some(mining);
+    }
     if legacy || !PROCESSING[cell.kind as usize] {
         return recipe(cell.kind);
     }

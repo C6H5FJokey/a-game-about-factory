@@ -293,10 +293,48 @@ function testGroundItems() {
   console.log('P2 passed: overflow, partial pickup, stale IDs, current save round-trip and V10 import.');
 }
 
+function testSimpleMinerDeposits(empty) {
+  const copper=tile(17,17), adjacentBelt=tile(18,17), plain=tile(19,17);
+  const deposits=[[ore,1],[tile(20,20),2],[tile(23,16),3],[copper,10]];
+  const funded=empty.slice();
+  funded[5]=60;
+  funded[8]=2;
+  assert.equal(restore(funded),1);
+  assert.equal(command(1,copper,17),-3,'Copper is hidden at the start.');
+  assert.deepEqual(save(),funded);
+
+  funded[23]=13; // Silica milestone opens all four mineral types.
+  assert.equal(restore(funded),1);
+  const miner=directory().get(17);
+  const [amount,ticks]=miner.slice(9,11);
+  assert.equal(miner[3],deposits.reduce((mask,[,item])=>mask|(1<<item),0));
+  assert.equal(command(1,plain,17),-3,'Bare ground cannot be mined.');
+  for (const [position] of deposits) assert.equal(command(1,position,17),1);
+  assert.equal(command(1,adjacentBelt,1),1);
+
+  advance(Math.floor(ticks/2));
+  const midCycle=save();
+  assert.equal(restore(midCycle),1);
+  assert.deepEqual(save(),midCycle);
+  advance(ticks-Math.floor(ticks/2));
+  for (const [position,item] of deposits) {
+    const {grade,ore,slots}=device(position);
+    assert.equal(grade,1);
+    assert.equal(ore,item);
+    assert.deepEqual(slots.map(slot=>slot.slice(0,3)),[[item,2,amount]]);
+  }
+  advance(ticks);
+  assert.equal(fieldAt(adjacentBelt,4),0,'The simple miner does not feed a belt in a new campaign.');
+  assert.equal(take(copper,1,1),-13);
+  for (const [position,item] of deposits) assert.equal(take(position,item,1),1);
+  console.log('Simple miner passed: all four deposits, manual collection and mid-cycle save restore.');
+}
+
 const modernEmpty=save();
 testProductionOpening();
 assert.equal(restore(modernEmpty),1);
 testGroundItems();
+testSimpleMinerDeposits(modernEmpty);
 assert.equal(restore(legacySave(modernEmpty,9)),1);
 advance(100);
 assert.equal(stage(),0);
@@ -686,7 +724,7 @@ const limits=()=>{
   const offset=frame[frame.at(-1)-1]-13;
   return frame.slice(offset,offset+11);
 };
-assert.deepEqual(limits().slice(0,10),[0,16,0,2,9,48,2,2,54,33]);
+assert.deepEqual(limits().slice(0,10),[0,16,0,2,9,64,2,2,54,33]);
 assert.equal(sim.max_speed(),2);
 assert.equal(command(1,tile(0,10),12),-3);
 assert.equal(command(1,tile(16,22),26),-6);
@@ -723,7 +761,7 @@ assert.deepEqual(legacySave(save(),7),v7);
 const v6=legacySave(recent,6);
 assert.equal(restore(v6),1);
 assert.equal(fieldAt(tile(0,10),0),12);
-assert.deepEqual(limits().slice(0,10),[0,16,0,2,9,48,0,0,56,34]);
+assert.deepEqual(limits().slice(0,10),[0,16,0,2,9,64,0,0,56,34]);
 assert.equal(restore(nextStage),1);
 place(16,23,26);
 place(27,5,30);

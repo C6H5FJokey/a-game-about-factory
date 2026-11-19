@@ -63,7 +63,7 @@ impl Stage {
     pub fn after_selected_production(self, kind: u8, item: u8, belt_batch: bool) -> Self {
         use Stage::*;
         match (self, kind, item) {
-            (Mining, SIMPLE_MINER, IRON) => Collect,
+            (Mining, SIMPLE_MINER, _) => Collect,
             (Feed | Working, BENCH, PLATE) => Belt,
             (BeltFed, BENCH, PLATE) if belt_batch => Expand,
             (Power, IRON_DRILL | COPPER_DRILL, _) => Silica,
