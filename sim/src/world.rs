@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crate::belts::{Belts, Cargo, NODES};
 use crate::blueprints::Library;
 use crate::campaign::Stage;
@@ -7,6 +9,7 @@ use crate::ground::Ground;
 use crate::progression::{cycle_ticks, Progression};
 use crate::recipes::device_recipe;
 use crate::regions::*;
+use crate::transport::BeltArrival;
 
 pub const FUEL_STEPS_PER_TICK: u32 = 2;
 const FUEL_BURN_STEPS: u32 = HZ * FUEL_STEPS_PER_TICK * 5 / 4;
@@ -23,10 +26,11 @@ pub struct Cell {
     pub group: u16,
     pub progress: u32,
     pub selected_recipe: u16,
-    pub belt_iron: u16,
+    pub belt_iron: u32,
     pub belt_batch: bool,
     pub energy: u32,
-    pub inv: [u16; ITEMS],
+    pub inv: [u32; ITEMS],
+    pub used_storage_slots: u32,
     pub last_kit_delivery: u32,
     pub split_turn: bool,
     pub power: DevicePower,
@@ -97,6 +101,7 @@ pub struct World {
     pub footprints: Footprints,
     pub belt: Belts,
     pub cargo: Vec<Cargo>,
+    pub(crate) belt_arrivals: VecDeque<BeltArrival>,
     pub grids: Vec<Grid>,
     pub machines: Vec<usize>,
     pub orbit: Orbit,
@@ -127,6 +132,7 @@ impl World {
             footprints: Footprints::new(),
             belt,
             cargo,
+            belt_arrivals: VecDeque::new(),
             grids: Vec::new(),
             machines: Vec::new(),
             orbit: Orbit::default(),
@@ -141,6 +147,7 @@ impl World {
     pub fn new() -> Self {
         let mut w = Self::empty();
         w.legacy_recipes = false;
+        w.progression.regional_map = true;
         w.update_grids();
         w
     }
@@ -151,7 +158,7 @@ impl World {
             self.next_device_id += 1;
         }
         if miner_grade(cell.kind) > 0 {
-            cell.mining_ore = terrain(tile);
+            cell.mining_ore = terrain(tile, self.progression.regional_map);
         }
         self.cells[tile] = cell;
     }
@@ -240,6 +247,12 @@ impl World {
 
     pub fn step(&mut self) {
         self.tick += 1;
+        if self.progression.regional_map
+            && self.stage == Stage::Silica
+            && self.stock[SILICA as usize] > 0
+        {
+            self.stage = Stage::Optics;
+        }
         if self.stage >= Stage::Valley {
             self.run_freight();
         }
@@ -301,6 +314,7 @@ impl World {
             }
         }
 
+        let stacks = self.progression.stack_limits();
         for priority in (0..=2).rev() {
             for &i in &self.machines {
                 let c = &mut self.cells[i];
@@ -338,15 +352,19 @@ impl World {
                     c.status = 5;
                     continue;
                 }
-                let cap = output_capacity(c.kind);
-                if c.inv[r.output as usize] + r.amount > cap {
+                let output = r.output as usize;
+                if crate::inventory::occupied_slots(
+                    c.inv[output] + u32::from(r.amount),
+                    stacks[output],
+                ) > OUTPUT_SLOTS[c.kind as usize]
+                {
                     c.status = 4;
                     continue;
                 }
                 if c.progress == 0
                     && r.input
                         .iter()
-                        .any(|&(id, count)| c.inv[id as usize] < count)
+                        .any(|&(id, count)| c.inv[id as usize] < u32::from(count))
                 {
                     c.status = 2;
                     continue;
@@ -360,6 +378,7 @@ impl World {
                 c.power.used = r.power;
                 if c.progress == 0 {
                     for (id, count) in r.input {
+                        let count = u32::from(count);
                         if id == IRON_INGOT && c.belt_iron > 0 {
                             let from_belt = count.saturating_sub(c.inv[id as usize] - c.belt_iron);
                             c.belt_iron -= from_belt;
@@ -372,7 +391,7 @@ impl World {
                 if c.progress < cycle_ticks(r.ticks, c.inv[SPEED_MODULE as usize]) {
                     continue;
                 }
-                c.inv[r.output as usize] += r.amount;
+                c.inv[output] += u32::from(r.amount);
                 c.progress = 0;
                 self.stage = if self.legacy_recipes {
                     self.stage.after_production(c.kind)

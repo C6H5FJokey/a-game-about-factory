@@ -1,6 +1,6 @@
 import { content } from './generated-content';
 
-const reviewScenes = ['opening', 'miner', 'first-light', 'three-cities'];
+const reviewScenes = ['opening', 'miner', 'handcraft', 'assembly', 'first-light', 'three-cities'];
 const reviewParam = import.meta.env.DEV && import.meta.env.MODE === 'visual-review'
   ? new URLSearchParams(location.search).get('review')
   : null;

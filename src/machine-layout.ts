@@ -1,5 +1,6 @@
 import { content } from './generated-content';
-import { Field, HEADER, H, Kind, STRIDE, W, at, cell, transportStart } from './model';
+import { Field, HEADER, H, Kind, STEP, STRIDE, W, at, cell, isTransport, transportStart, xy } from './model';
+import { transportPorts } from './sim-data';
 
 type Layout = {
   width:number; height:number; canInput:boolean; canOutput:boolean;
@@ -65,6 +66,34 @@ export function occupiedKind(data:Int32Array,tile:number) {
 export function machineMasks(data:Int32Array,tile:number) {
   const row=spatialIndex(data).get(tile);
   return row===undefined?0:data[row+2];
+}
+
+const beltLinks=new WeakMap<Int32Array,Uint16Array>();
+
+function connectedPort(data:Int32Array,tile:number,flow:number,input:boolean) {
+  if (tile<0) return false;
+  const kind=cell(data,tile,Field.Kind);
+  if (!isTransport(kind)) return Boolean(machineMasks(data,tile)&(1<<(flow+(input?0:4))));
+  const dir=cell(data,tile,Field.Direction);
+  const first=transportPorts(kind,dir,0), second=transportPorts(kind,dir,1);
+  return Boolean((input?first.incoming|second.incoming:first.outgoing|second.outgoing)&(1<<flow));
+}
+
+export function transportLinks(data:Int32Array,tile:number,kind:number,dir:number) {
+  let cache=beltLinks.get(data);
+  if (!cache) { cache=new Uint16Array(W*H); beltLinks.set(data,cache); }
+  if (cache[tile]) return cache[tile]&255;
+  const first=transportPorts(kind,dir,0), second=transportPorts(kind,dir,1);
+  const allowedIn=first.incoming|second.incoming, allowedOut=first.outgoing|second.outgoing;
+  const [x,y]=xy(tile);
+  let links=0;
+  for (let flow=0;flow<4;flow++) {
+    const [dx,dy]=STEP[flow], flag=1<<flow;
+    if ((allowedIn&flag) && connectedPort(data,at(x-dx,y-dy),flow,false)) links|=flag;
+    if ((allowedOut&flag) && connectedPort(data,at(x+dx,y+dy),flow,true)) links|=flag<<4;
+  }
+  cache[tile]=256|links;
+  return links;
 }
 
 export function* machinePortTiles(data:Int32Array) {

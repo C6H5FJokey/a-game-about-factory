@@ -27,10 +27,12 @@
       <h1>视觉评审</h1>
       <p id="startup">在项目目录运行 <code>npm run review:visual</code>，打开本地服务下的 <code>/docs/factory-controls.html</code>。</p>
       <form id="controls" hidden>
-        <label>战役场景
+        <label>游戏场景
           <select id="scene">
             <option value="opening">开场手采</option>
             <option value="miner">第一台采矿机出料</option>
+            <option value="handcraft">手工制作铁锭与铜线</option>
+            <option value="assembly">装配台双击存取</option>
             <option value="first-light">曙港首照失败</option>
             <option value="three-cities">三城验收前</option>
           </select>
@@ -56,10 +58,12 @@
         const stage = document.getElementById('stage');
         const game = document.getElementById('game');
         const instructions = {
-          opening: '查看「任务」的手势说明，长按地图上的矿点，或点矿点后使用「操作」中的采集按钮。',
-          miner: '点采矿机打开「操作」，把出料槽中的铁矿拖到顶部铁矿槽。调量手势可在「手册」回顾。',
-          'first-light': '切到「轨道」查看失败原因，再点「查看电网」和「预览蓄电池」。',
-          'three-cities': '切到「轨道」，比较三座城市的供货、备料和照明入口。',
+          opening: '桌面和竖屏在两侧打开页面，横屏在底栏打开，点高亮按钮可收起。长按地图矿点采集，也可点矿点后在「操作」中长按采集。',
+          miner: '查看简易采矿机的进度和出料。双击或双点出料槽可取回铁矿，也可拖到顶部铁矿槽。',
+          handcraft: '展开铁锭或铜锭配方，长按制作。铜线缺少铜锭时会标红，制作铜锭后可回来看按钮启用。',
+          assembly: '双击或双点背包里的铁锭，装配台会收下容得下的数量。双击进料槽可取回。样本中装配台暂未接电，方便观察两边数量。',
+          'first-light': '旧版存档样本。切到「轨道」查看失败原因，点「查看电网」定位同网发电机，再从发电机详情预览蓄电池。',
+          'three-cities': '旧版存档样本。切到「轨道」，比较三座城市的供货、备料和照明入口。',
         };
         const params = new URLSearchParams(location.search);
         scene.value = [...scene.options].find(option => option.value === params.get('scene'))?.value ?? 'opening';

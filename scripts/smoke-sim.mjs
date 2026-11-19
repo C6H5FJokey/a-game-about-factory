@@ -114,15 +114,43 @@ function legacySave(current,version) {
   const devices=progression+4+data[progression+3];
   const extension=devices+2+data[devices+1];
   const extra=content.frontend.items.length-10;
-  const ground=extension+1+extra*3+(extra+3)*data[devices+1];
+  let ground=extension+1+extra*3;
+  const recipeWords=[...data.subarray(extension,ground)];
+  for (let row=54;row<transport;row+=19) {
+    if (!data[row]) continue;
+    const legacyLimit=data[row]===19?32:24;
+    for (let i=row+10;i<row+18;i++) data[i]=Math.min(data[i],legacyLimit);
+    recipeWords.push(...data.subarray(ground,ground+extra+3));
+    ground+=extra+3;
+    if (data[row]===12) {
+      data.fill(0,row+10,row+18);
+      recipeWords.fill(0,recipeWords.length-extra-2,recipeWords.length-2);
+      ground++;
+    }
+  }
   const [,piles,payments,bundles]=data.subarray(ground,ground+4);
   let library=ground+4+piles*4;
-  for (let n=0;n<payments;n++) library+=3+(data[library+1]===0?data[library+2]*2:0);
-  library+=bundles*3;
+  const oldPayments=[];
+  for (let n=0;n<payments;n++) {
+    const next=library+3+(data[library+1]===0?data[library+2]*2:0);
+    oldPayments.push(data.slice(library,next));
+    library=next;
+  }
+  const oldBundles=new Map();
+  for (let n=0;n<bundles;n++) {
+    const [id,rows,count,item,amount]=data.subarray(library,library+5);
+    if (rows===1 && item===8) oldBundles.set(id,[id,amount,count]);
+    library+=3+rows*2;
+  }
+  const compatible=oldPayments.filter(row=>row[1]!==2 || oldBundles.has(row[2]));
   data[0]=version;
+  data[4]=0;
   return Int32Array.from([
-    ...data.subarray(0,version<7?progression:version<10?extension:ground),
+    ...data.subarray(0,version<7?progression:extension),
     ...(version<7?data.subarray(devices,extension):[]),
+    ...(version>=10?recipeWords:[]),
+    ...(version===11?[data[ground],piles,compatible.length,oldBundles.size,
+      ...data.subarray(ground+4,ground+4+piles*4),...compatible.flatMap(row=>[...row]),...Array.from(oldBundles.values()).flat()]:[]),
     ...data.subarray(library,data.length-data.at(-1)),
     ...(version>=10?content.tag:version>=8?content.legacyTag:[]),
   ]);
@@ -149,7 +177,28 @@ function cable(x,y,endX,endY) {
 
 const place=(x,y,kind,dir=0)=>assert.equal(command(1,tile(x,y),kind,dir),1,`place ${kind} at ${x},${y}`);
 const act=(op,x,y,b=0)=>assert.equal(command(op,tile(x,y),b),1,`command ${op} at ${x},${y}`);
+const warehouseStock=(position,item)=>device(position).slots.find(row=>row[0]===item)?.[2] ?? 0;
+function constructionStock(item) {
+  const frame=snapshot();
+  let total=frame[35+item];
+  for (let i=frame.at(-1);i<frame.length-1;) {
+    const tile=frame[i], slots=frame[i+9];
+    i+=10;
+    if (frame[header+tile*19]===12) {
+      for (let n=0;n<slots;n++) if (frame[i+5*n]===item) total+=frame[i+5*n+2];
+    }
+    i+=5*slots;
+  }
+  return total;
+}
+const takeFromWarehouse=(position,item,count)=>command(15,position,-1,item,[count,device(position).id,0,1]);
+const fundWarehouse=(position,item,count)=>assert.equal(feedByHand(position,item,count),count);
 const stage=()=>snapshot()[29];
+const mapBounds=()=>{
+  const frame=snapshot();
+  const progression=frame[frame.at(-1)-1]-13;
+  return frame.slice(progression+6,progression+10);
+};
 const ore=tile(19,16), bench=tile(21,16);
 function until(test,label,limit=2400) {
   for (let n=0;n<limit && !test();n+=5) advance(5);
@@ -180,14 +229,27 @@ function testProductionOpening() {
     assert.equal(row[15+2*row[12]],-rate);
   }
   assert.equal(tiers.get(17)[14],10);
-  const copper=tile(17,17), generator=tile(20,17), furnace=tile(20,16), table=tile(22,16);
+  const copper=tile(11,16), coal=tile(30,16), silica=tile(33,18);
+  const generator=tile(20,17), furnace=tile(20,16), table=tile(22,16);
+  assert.deepEqual(mapBounds(),[13,10,26,23]);
+  assert.equal(fieldAt(tile(22,19),3),1,'An iron deposit inside the first ring is visible at the start.');
+  assert.equal(command(9,copper),-3);
   for(let n=0;n<10;n++) assert.equal(command(9,ore),1);
   assert.equal(command(1,ore,17),1);
   advance(3*hz);
+  captureReview('miner');
   assert.equal(take(ore,1,1),1);
   assert.equal(stage(),5);
+  assert.deepEqual(mapBounds(),[0,0,56,34]);
+  assert.equal(fieldAt(copper,3),10);
+  assert.equal(fieldAt(coal,3),3);
+  assert.equal(fieldAt(silica,3),2);
+  assert.equal(command(9,coal),1,'Coal can be explored before the power tutorial.');
+  assert.equal(command(9,silica),1,'Silica can be explored before the optics tutorial.');
+  assert.equal(stage(),5,'Exploring does not skip the current tutorial.');
   for(let n=0;n<31;n++) assert.equal(command(9,ore),1);
   for(let n=0;n<8;n++) assert.equal(command(9,copper),1);
+  captureReview('handcraft');
   assert.equal(command(23,key('form-plate'),++token),-6,'A machine-only recipe cannot be made by hand.');
   assert.equal(command(23,key('smelt-iron-ingot'),++token),1);
   advance(7);
@@ -201,6 +263,9 @@ function testProductionOpening() {
   for(let n=0;n<4;n++) craft('draw-copper-wire',120,2);
   assert.equal(heldNew(15),8);
   assert.equal(stage(),6,'Copper wire opens the first grid without electricity.');
+  assert.deepEqual(mapBounds(),[0,0,56,34]);
+  assert.equal(fieldAt(coal,3),3);
+  assert.equal(fieldAt(silica,3),2);
   assert.equal(command(1,generator,9),1);
   assert.equal(command(1,furnace,5),1);
   assert.equal(feedByHand(furnace,1,1),-13,'An unconfigured machine has no material inlet.');
@@ -209,7 +274,7 @@ function testProductionOpening() {
   assert.equal(choose(furnace,'smelt-iron-ingot'),1);
   assert.equal(command(15,-1,furnace,1,[1,0,stale]),-15);
   const refill=()=>{
-    for(let n=0;n<8;n++) assert.equal(command(9,tile(23,16)),1);
+    for(let n=0;n<8;n++) assert.equal(command(9,coal),1);
     assert.ok(feedByHand(generator,3,8)>0);
   };
   refill();
@@ -226,6 +291,15 @@ function testProductionOpening() {
   advance(90);
   assert.equal(take(furnace,11,3),3);
   assert.equal(command(1,table,18),1);
+  if (reviewSaves) {
+    const beforeWiring=save();
+    assert.equal(choose(table,'form-plate'),1);
+    for (let n=0;n<24;n++) assert.equal(command(9,ore),1);
+    for (let n=0;n<12;n++) craft('smelt-iron-ingot',15);
+    assert.equal(command(9,coal),1);
+    captureReview('assembly');
+    assert.equal(restore(beforeWiring),1);
+  }
   cable(20,16,22,16);
   assert.equal(heldNew(15),0);
   assert.equal(choose(table,'form-plate'),1);
@@ -248,7 +322,12 @@ function testProductionOpening() {
   assert.equal(restore(flowing),1);
   assert.deepEqual(save(),flowing);
   until(()=>stage()===11,'Only the batch using automatic intake advances the opening.');
-  assert.equal(available(ore,1,2),conserved,'The simple miner retained its ore.');
+  assert.ok(available(ore,1,2)>=conserved,'The simple miner retained its ore and can continue filling its output slot.');
+  const beforeOptics=save();
+  beforeOptics[23]=13;
+  assert.equal(restore(beforeOptics),1);
+  advance(1);
+  assert.equal(stage(),14,'Silica gathered earlier already satisfies the silica objective.');
   console.log('P1 opening passed: timed handcraft, copper wiring, recipe choice, automatic intake and save restore.');
 }
 
@@ -294,8 +373,8 @@ function testGroundItems() {
 }
 
 function testSimpleMinerDeposits(empty) {
-  const copper=tile(17,17), adjacentBelt=tile(18,17), plain=tile(19,17);
-  const deposits=[[ore,1],[tile(20,20),2],[tile(23,16),3],[copper,10]];
+  const copper=tile(11,16), adjacentBelt=tile(12,16), plain=tile(19,17);
+  const deposits=[[ore,1],[tile(33,18),2],[tile(30,16),3],[copper,10]];
   const funded=empty.slice();
   funded[5]=60;
   funded[8]=2;
@@ -303,8 +382,9 @@ function testSimpleMinerDeposits(empty) {
   assert.equal(command(1,copper,17),-3,'Copper is hidden at the start.');
   assert.deepEqual(save(),funded);
 
-  funded[23]=13; // Silica milestone opens all four mineral types.
+  funded[23]=9; // The full map is accessible, and conveyor construction has unlocked.
   assert.equal(restore(funded),1);
+  assert.deepEqual(mapBounds(),[0,0,56,34]);
   const miner=directory().get(17);
   const [amount,ticks]=miner.slice(9,11);
   assert.equal(miner[3],deposits.reduce((mask,[,item])=>mask|(1<<item),0));
@@ -330,11 +410,134 @@ function testSimpleMinerDeposits(empty) {
   console.log('Simple miner passed: all four deposits, manual collection and mid-cycle save restore.');
 }
 
+function testWarehouseStorage(empty) {
+  const funded=empty.slice();
+  funded[23]=11;
+  funded[17]=1;
+  funded[5]=810;
+  funded[8]=16;
+  funded[12]=2;
+  assert.equal(restore(funded),1);
+  const west=tile(17,21), middle=tile(18,21), east=tile(19,21);
+  place(17,21,12); place(19,21,12);
+  assert.equal(command(4,east,19),1,'Any registered material can be configured before it is obtainable.');
+  assert.deepEqual(device(east).slots,[],'An empty warehouse has no row for its configured export or any other material.');
+  assert.equal(feedByHand(east,1,1),1,'An empty warehouse can take a different material from its export setting.');
+  assert.deepEqual(device(east).slots.map(row=>row.slice(0,3)),[[1,1,1]]);
+  assert.equal(takeFromWarehouse(east,1,1),1);
+  assert.equal(command(4,east,0),1);
+  const later=save();
+  later[23]=18;
+  assert.equal(restore(later),1);
+  assert.deepEqual(device(east).slots,[],'A later stage does not add empty inventory entries.');
+  assert.deepEqual(device(west).slots,[]);
+  assert.equal(feedByHand(west,1,805),800);
+  assert.equal(feedByHand(west,4,1),-14,'Warehouse capacity is shared across items.');
+  assert.equal(warehouseStock(east,1),0);
+  assert.equal(takeFromWarehouse(west,1,5),5);
+  assert.equal(feedByHand(west,4,1),-14,'A partially filled stack still occupies its slot.');
+  fundWarehouse(west,1,5);
+  assert.equal(takeFromWarehouse(west,1,105),105);
+  fundWarehouse(west,4,4); fundWarehouse(east,4,4);
+  fundWarehouse(east,8,2);
+  const provided=save();
+  assert.equal(restore(provided),1);
+  assert.deepEqual(save(),provided);
+  assert.deepEqual(device(west).slots.find(row=>row[0]===1),[1,1,695,100,7]);
+  assert.equal(restore(legacySave(provided,11)),1);
+  assert.equal(snapshot()[36],115,'V11 backpack remains in the backpack.');
+  assert.equal(warehouseStock(west,1),0,'A legacy warehouse starts empty.');
+  assert.equal(restore(provided),1);
+  assert.equal(previewTransports([middle,1,0])[0],1);
+  place(18,21,1);
+  assert.equal(warehouseStock(west,4),3,'Nearest warehouses tie-break by tile.');
+  assert.equal(warehouseStock(east,4),4);
+  assert.equal(command(4,west,1),1);
+  advance(8*hz);
+  assert.ok(warehouseStock(east,1)>0);
+  assert.equal(snapshot()[36],115,'Automatic transfers do not use backpack inventory.');
+  const delivered=snapshot()[20];
+  assert.equal(takeFromWarehouse(east,8,2),2);
+  fundWarehouse(east,8,2);
+  assert.equal(snapshot()[20],delivered,'Manual withdrawals and deposits do not count as deliveries.');
+  const layout=command(16,middle,middle,0,named('Warehouse deployment'));
+  assert.ok(layout>0);
+  assert.equal(deploy(tile(23,21),layout),1);
+  assert.equal(warehouseStock(east,8),2-blueprints().get(layout).cost);
+  const deployed=save();
+  assert.equal(restore(legacySave(deployed,11)),1);
+  assert.equal(command(3,tile(23,21)),1);
+  assert.equal(snapshot()[2],blueprints().get(layout).cost,'V11 bundle receipts still return their kits.');
+  assert.equal(restore(deployed),1);
+  const heldBefore=snapshot()[36], storedBefore=warehouseStock(west,1);
+  assert.equal(command(3,west),1);
+  assert.equal(snapshot()[36],heldBefore+storedBefore);
+  console.log('Warehouse passed: capacity, migration, independent inventory, transfers, construction and return.');
+}
+
+function testCableBatches(empty) {
+  const funded=legacySave(empty,9);
+  funded[23]=13;
+  funded[8]=10;
+  assert.equal(restore(funded),1);
+  const a=tile(17,21), b=a+1, c=a+2, d=a+3, e=a+4;
+  const cut=(...tiles)=>command(28,0,0,0,tiles);
+  place(17,21,1);
+  cable(17,21,20,21);
+  cable(19,21,21,21);
+  assert.equal(snapshot()[39],6);
+  const wired=save();
+  for (const invalid of [[a,c],[a,b,b],[d,e,e+1]]) {
+    assert.equal(cut(...invalid),-1);
+    assert.deepEqual(save(),wired,'Invalid paths leave the entire transaction untouched.');
+  }
+  assert.equal(cut(b,c),1);
+  assert.equal(snapshot()[39],6);
+  const partial=save();
+  assert.equal(restore(partial),1);
+  assert.deepEqual(save(),partial);
+  assert.equal(cut(d,e),1);
+  assert.equal(snapshot()[39],7,'Shared existing wire preserves its original receipt.');
+  assert.equal(cut(a),1);
+  assert.equal(snapshot()[39],9,'The first batch pays back only when its last wire is removed.');
+  assert.equal(fieldAt(a,0),1,'Cable removal leaves the equipment above it.');
+  assert.equal(restore(legacySave(wired,11)),1);
+  assert.equal(cut(a,b,c,d,e),1);
+  assert.equal(snapshot()[39],6,'Unrecorded legacy cable does not create a refund.');
+  assert.equal(restore(wired),1);
+  const full=wired.slice();
+  full[5]=1600;
+  full[8]=0;
+  assert.equal(restore(full),1);
+  assert.equal(cut(a,b,c,d,e),1);
+  assert.equal(snapshot()[39],0);
+  const frame=snapshot(), recipeEnd=frame[frame[frame.at(-1)-1]-14]-1;
+  const groundEnd=frame[recipeEnd]-1;
+  const refunds=[];
+  for (let i=frame[groundEnd];i<groundEnd;i+=4) refunds.push(frame.slice(i,i+4));
+  assert.deepEqual(refunds.map(([tile,item,,count])=>[tile,item,count]),[[d,4,2],[e,4,1]]);
+  console.log('Cable batches passed: validation, reuse, restart, legacy import and overflow refunds.');
+}
+
 const modernEmpty=save();
+const previousMap=modernEmpty.slice();
+previousMap[0]=13;
+previousMap[4]=0;
+previousMap[23]=5;
+assert.equal(restore(previousMap),1);
+assert.deepEqual(mapBounds(),[2,2,54,33]);
+assert.equal(fieldAt(tile(17,17),3),10,'V13 saves keep the original copper deposit.');
+assert.equal(fieldAt(tile(11,16),3),0);
+const migratedMap=save();
+assert.equal(restore(migratedMap),1);
+assert.deepEqual(save(),migratedMap);
+assert.equal(restore(modernEmpty),1);
 testProductionOpening();
 assert.equal(restore(modernEmpty),1);
 testGroundItems();
 testSimpleMinerDeposits(modernEmpty);
+testWarehouseStorage(modernEmpty);
+testCableBatches(modernEmpty);
 assert.equal(restore(legacySave(modernEmpty,9)),1);
 advance(100);
 assert.equal(stage(),0);
@@ -361,8 +564,7 @@ assert.equal(snapshot()[36],0,'The directory placement spends materials directly
 advance(6*hz);
 assert.equal(fieldAt(ore,10),2);
 assert.equal(snapshot()[36],0);
-captureReview('miner');
-assert.deepEqual(device(ore).slots,[[1,2,2,8,2]]);
+assert.deepEqual(device(ore).slots,[[1,2,2,100,2]]);
 assert.equal(take(ore,2,1),-13,'An output slot checks its item.');
 assert.equal(take(ore,1,1),1);
 assert.equal(fieldAt(ore,10),1,'An exact withdrawal leaves the remaining stack.');
@@ -373,24 +575,25 @@ assert.equal(command(12),1); assert.equal(command(12),1);
 place(21,16,18);
 advance(3*hz); act(11,19,16);
 const firstFeed=save();
-for (let i=0;i<12;i++) act(9,19,16);
-assert.deepEqual(device(bench).slots,[[1,1,0,10,3],[4,2,0,5,2],[9,3,0,1,3]]);
-assert.equal(feedByHand(bench,1,6),6,'The first feed uses the normal transfer quantity.');
+for (let i=0;i<102;i++) act(9,19,16);
+const ironBeforeFeed=snapshot()[36];
+assert.deepEqual(device(bench).slots,[[1,1,0,100,7],[4,2,0,100,2],[9,3,0,100,7]]);
+assert.equal(feedByHand(bench,1,96),96,'The first feed uses the normal transfer quantity.');
 assert.equal(stage(),8);
 assert.equal(feedByHand(bench,1,6),4,'Filling the input clamps to remaining capacity.');
 assert.equal(feedByHand(bench,1,1),-14);
-assert.deepEqual(device(bench).slots[0],[1,1,10,10,3]);
-assert.equal(snapshot()[36],3,'The held stack plus the machine inventory is conserved.');
+assert.deepEqual(device(bench).slots[0],[1,1,100,100,3]);
+assert.equal(snapshot()[36],ironBeforeFeed-100,'The held stack plus the machine inventory is conserved.');
 const takeInput=(position,item,count,id=device(position).id)=>command(15,position,-1,item,[count,id,0,1]);
 const beforeTaking=save();
 assert.equal(takeInput(bench,2,2),-13);
 assert.deepEqual(save(),beforeTaking,'An incompatible input withdrawal leaves both inventories unchanged.');
 advance(1);
-assert.equal(device(bench).slots[0][2],9,'The running cycle reserves one item as soon as it starts.');
+assert.equal(device(bench).slots[0][2],99,'The running cycle reserves one item as soon as it starts.');
 assert.equal(takeInput(bench,1,2),2);
-assert.equal(device(bench).slots[0][2],7);
-assert.equal(takeInput(bench,1,20),7);
-assert.equal(snapshot()[36],12);
+assert.equal(device(bench).slots[0][2],97);
+assert.equal(takeInput(bench,1,200),97);
+assert.equal(snapshot()[36],ironBeforeFeed-1);
 const noInput=save();
 assert.equal(takeInput(bench,1,1),-9,'The reserved item cannot be withdrawn.');
 assert.deepEqual(save(),noInput);
@@ -433,9 +636,9 @@ assert.equal(command(1,tile(20,20),20),-19,'Undiscovered ore cannot be drilled.'
 assert.equal(command(1,tile(21,19),20),-3,'An empty tile cannot be drilled.');
 assert.equal(command(1,ore,20),-2,'An occupied ore deposit keeps its machine.');
 assert.deepEqual(save(),beforeDrill,'Rejected construction does not spend materials.');
-const platesBefore=snapshot()[1];
+const platesBefore=constructionStock(4);
 place(22,19,20); assert.equal(stage(),12);
-assert.equal(snapshot()[1],platesBefore-4);
+assert.equal(constructionStock(4),platesBefore-4);
 assert.deepEqual([device(tile(22,19)).grade,device(tile(22,19)).ore],[2,1]);
 assert.equal(command(1,tile(23,16),20),-19,'Fuel mining also waits for a generator.');
 place(24,16,9); place(23,16,20);
@@ -452,6 +655,9 @@ until(()=>stage()===15,'Grinding a lens unlocks mirror assembly.');
 assert.deepEqual([device(tile(20,20)).grade,device(tile(20,20)).ore],[2,2]);
 assert.deepEqual(device(tile(20,20)).slots[0].slice(0,2),[2,2]);
 place(22,20,8); place(22,21,12,3); act(4,22,21,4);
+const plateWarehouse=tile(22,16), mirrorWarehouse=tile(22,21);
+assert.equal(takeFromWarehouse(plateWarehouse,4,24),24);
+fundWarehouse(mirrorWarehouse,4,24);
 until(()=>stage()===16,'Assembling a real mirror opens launch.');
 place(33,15,13); cable(22,20,33,15);
 until(()=>fieldAt(tile(22,20),16)>=3,'Build three mirror modules.');
@@ -464,7 +670,7 @@ const feed=[tile(6,19),3,tile(6,18),3,tile(6,17),3,tile(6,16),3,tile(6,15),3,til
 for(let x=7;x<33;x++) feed.push(tile(x,14),0);
 feed.push(tile(33,14),1);
 assert.equal(command(2,0,0,0,feed),1);
-until(()=>snapshot()[13]===16,'Cores arrive at the station.');
+until(()=>snapshot()[13]>=16,'Cores arrive at the station.');
 assert.equal(command(6),1); advance(5*hz+1); assert.equal(snapshot()[15],1);
 assert.equal(device(tile(33,15)).demand,120);
 assert.equal(device(tile(33,15)).used,0);
@@ -479,7 +685,7 @@ assert.equal(snapshot()[7],1,'Charged storage and continuous supply complete fir
 place(19,28,2); place(21,28,5); place(22,28,14); place(24,28,12);
 assert.equal(command(2,0,0,0,[tile(20,28),0,tile(23,28),0]),1);
 cable(19,28,24,28); cable(23,20,23,28);
-until(()=>snapshot()[2]>=12,'A player-built line delivers new expansion kits.');
+until(()=>snapshot()[20]>=12,'A player-built line delivers new expansion kits.');
 const a=command(16,tile(19,28),tile(24,28),0,named('厂段 A'));
 const b=command(16,tile(24,16),tile(24,16),0,named('厂段 B'));
 assert.ok(a>0 && b>a);
@@ -528,7 +734,9 @@ const legacyInputs=new Map([[5,[[1,1]]],[6,[[2,2]]],[7,[[2,1]]],[8,[[4,2],[5,1]]
 for (let i=0;i<width*34;i++) {
   const row=54+i*19;
   if (v4[row]===20) v4[row]=fieldAt(i,0);
+  if (v4[row]===12) v4.fill(0,row+10,row+18);
   if (v4[row+4]>0) for (const [item,amount] of legacyInputs.get(v4[row]) ?? []) v4[row+9+item]+=amount;
+  for (let j=row+10;j<row+18;j++) v4[j]=Math.min(v4[j],24);
 }
 const drills=[tile(22,19),tile(20,20),tile(23,16)];
 const oldDrills=drills.map(i=>snapshot().slice(header+i*19,header+(i+1)*19));
@@ -536,9 +744,14 @@ assert.equal(restore(v4),1);
 for (const [n,i] of drills.entries()) {
   const migrated=snapshot().slice(header+i*19,header+(i+1)*19);
   assert.deepEqual(migrated.slice(0,4),oldDrills[n].slice(0,4));
-  assert.deepEqual(migrated.slice(7,18),oldDrills[n].slice(7,18));
+  assert.deepEqual(migrated.slice(7,18),oldDrills[n].slice(7,18).map((value,j)=>j>=3?Math.min(value,24):value));
 }
 assert.equal(restore(beforeBlueprint),1);
+// Larger material stacks keep the production lines working concurrently for longer.
+for (const [x,y] of [[5,7],[8,5]]) {
+  place(x,y,4); place(x+1,y,9);
+  cable(x,y,x+1,y); cable(x+1,y,24,16);
+}
 assert.equal(deploy(tile(28,28),a),1);
 for (const [x,y] of [[38,26],[47,21]]) assert.equal(deploy(tile(x,y)),1);
 cable(24,28,28,28);
@@ -592,33 +805,33 @@ advance(20*hz);
 assert.ok(snapshot()[8]<4,'An idle delivery line ages out of the 20-second window.');
 assert.equal(stage(),19);
 
-// Expand reliable baseload and build a separate silica supply for the freight lines.
-for (const [x,y] of [[5,7],[8,5]]) {
-  place(x,y,4); place(x+1,y,9);
-  cable(x,y,x+1,y); cable(x+1,y,24,16);
-}
+// Build a separate silica supply for the freight lines.
 place(46,28,3); place(47,28,12); cable(46,28,47,21);
 place(23,19,5); place(24,19,12); cable(22,19,24,19);
 function deployMirror() {
+  assert.equal(takeFromWarehouse(plateWarehouse,4,12),12);
+  fundWarehouse(mirrorWarehouse,4,12);
   until(()=>fieldAt(tile(22,20),16)>=3,'Three more modules leave the assembly line.');
   act(11,22,20); act(13,33,15,7);
   for(let n=0;n<5;n++) act(9,23,16);
   act(13,33,15,3); assert.equal(command(5),1); advance(10*hz);
 }
 function connectCity(city,x,receiverX) {
-  until(()=>snapshot()[1]>=50,'Produce construction materials for the branch line.',6000);
+  until(()=>constructionStock(4)>=50,'Produce construction materials for the branch line.',6000);
   assert.equal(command(14,city),1);
   place(x,29,13); cable(x,29,33,15);
   const originX=33+city;
   if (city===1) {
     const citySave=save(), sender=tile(originX,18), receiver=tile(receiverX,29);
-    for (let n=0;n<35;n++) act(9,20,20);
+    assert.deepEqual(device(sender).slots,[]);
+    assert.deepEqual(device(receiver).slots,[]);
+    for (let n=0;n<401;n++) act(9,20,20);
     const heldBefore=snapshot()[37];
-    assert.equal(feedByHand(sender,2,35),32);
+    assert.equal(feedByHand(sender,2,401),400);
     assert.equal(feedByHand(sender,2,1),-14);
     assert.equal(feedByHand(sender,1,1),-14,'Freight inputs share their capacity.');
-    assert.equal(snapshot()[37],heldBefore-32);
-    assert.deepEqual(device(sender).slots.find(slot=>slot[0]===2),[2,1,32,32,1]);
+    assert.equal(snapshot()[37],heldBefore-400);
+    assert.deepEqual(device(sender).slots.find(slot=>slot[0]===2),[2,1,400,100,1]);
     assert.equal(feedByHand(tile(x,29),6,1),-12);
     assert.equal(feedByHand(receiver,2,1),-13);
     assert.equal(take(receiver,2,1),-12);
@@ -634,10 +847,13 @@ function connectCity(city,x,receiverX) {
     place(originX,16,12,1); act(4,originX,16,2);
     place(originX,17,7,1); cable(originX,17,33,15);
   }
+  const supply=tile(originX,localProcessing?17:16);
+  for (let n=0;n<100;n++) act(9,20,20);
+  fundWarehouse(supply,2,100);
   const words=[];
   for(let n=firstBelt;n<x;n++) words.push(tile(n,29),0);
   assert.equal(command(2,0,0,0,words),1);
-  until(()=>fieldAt(tile(x,29),15)===16,'A scheduled freight crate feeds the local belt and station.');
+  until(()=>fieldAt(tile(x,29),15)>=16,'A scheduled freight crate feeds the local belt and station.');
 }
 connectCity(1,48,44); deployMirror();
 assert.equal(command(6,1,0),1); advance(18*hz);
@@ -671,7 +887,7 @@ function previewTransports(words) {
 }
 function cargoTracks() {
   const frame=snapshot(), end=frame.at(-1)-1, cargo=new Map();
-  for (let i=frame[end]+1;i<end;i+=8) cargo.set(frame[i],frame.slice(i+1,i+8));
+  for (let i=frame[end]+1;i<end && frame[i]>=0;i+=8) cargo.set(frame[i],frame.slice(i+1,i+8));
   return cargo;
 }
 assert.deepEqual(catalog.get(1).slice(15,19),[1,1,5,1]);
@@ -680,6 +896,8 @@ assert.deepEqual(catalog.get(24).slice(15),[0,2,5,1,1,1,2,2]);
 const cross=tile(18,18), fast=tile(19,18);
 place(17,18,12); act(4,17,18,2);
 place(18,17,12,1); act(4,18,17,8);
+fundWarehouse(tile(17,18),2,10);
+fundWarehouse(tile(18,17),8,10);
 const work=[cross,24,0,fast,22,0];
 const quote=previewTransports(work);
 assert.deepEqual(quote.slice(3),[4,8]);
@@ -722,7 +940,7 @@ const progressStart=saved=>{
 const limits=()=>{
   const frame=snapshot();
   const offset=frame[frame.at(-1)-1]-13;
-  return frame.slice(offset,offset+11);
+  return frame.slice(offset,offset+13);
 };
 assert.deepEqual(limits().slice(0,10),[0,16,0,2,9,64,2,2,54,33]);
 assert.equal(sim.max_speed(),2);
@@ -770,7 +988,8 @@ const moduleStation=tile(17,23);
 place(17,23,18);
 assert.equal(feedByHand(moduleStation,1,1),1);
 assert.equal(command(15,-1,moduleStation,9,[1,0,device(moduleStation).id,3]),1);
-assert.deepEqual(device(moduleStation).slots[2],[9,3,1,1,3]);
+assert.deepEqual(device(moduleStation).slots[2],[9,3,1,150,3]);
+assert.equal(limits()[12],1,'A module in a machine is installed.');
 const equipped=save();
 assert.equal(restore(equipped),1);
 assert.deepEqual(save(),equipped);
@@ -779,7 +998,12 @@ assert.equal(device(moduleStation).slots[1][2],0);
 advance(1);
 assert.equal(device(moduleStation).slots[1][2],1,'The module shortens the 1.5-second cycle to one second.');
 assert.equal(command(15,moduleStation,-1,9,[1,device(moduleStation).id,0,3]),1);
-assert.deepEqual(device(moduleStation).slots[2],[9,3,0,1,3]);
+assert.deepEqual(device(moduleStation).slots[2],[9,3,0,150,7]);
+const moduleDepot=tile(17,24);
+place(17,24,12);
+assert.equal(feedByHand(moduleDepot,9,1),1);
+assert.equal(warehouseStock(moduleDepot,9),1);
+assert.equal(limits()[12],0,'A module stored in a warehouse is not installed.');
 console.log('发展系统通过：满仓限制、阶段交付站、地图与倍速边界、高阶设备、V6 迁移及速度模块。');
 
 if (reviewSaves) {

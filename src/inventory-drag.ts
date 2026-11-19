@@ -1,6 +1,13 @@
 export type SlotRole = 'held' | 'input' | 'output' | 'module' | 'cargo' | 'display';
 export type Slot = { role:SlotRole; item:number; tile:number; identity:number; count:number; canPut:boolean; canTake:boolean; lane:number; cargoId:number };
 export type Selection = Pick<Slot,'item'|'tile'|'identity'|'lane'|'cargoId'> & {role:SlotRole; quantity?:number};
+export type ContainerTarget = Pick<Slot,'tile'|'identity'> & {role:'container'};
+
+export function readContainer(element:Element | null):ContainerTarget | undefined {
+  const container=element?.closest<HTMLElement>('[data-container]');
+  if (!container) return undefined;
+  return {role:'container',tile:Number(container.dataset.tile),identity:Number(container.dataset.identity)};
+}
 
 export function readSlot(button:HTMLButtonElement):Slot {
   const {slot,item,tile,identity,count,put,take,lane,cargoId}=button.dataset;
@@ -18,7 +25,7 @@ export function canSelectSlot(slot:Slot) { return slot.count>0 && (slot.role==='
 export function bindInventoryDrag(root:HTMLElement,ghost:HTMLElement,actions:{
   selected():Selection | undefined;
   select(source:Selection | undefined):void;
-  drop(source:Selection,target:Slot):boolean;
+  drop(source:Selection,target:Slot | ContainerTarget):boolean;
   art(item:number):string;
 }) {
   type Gesture = {
@@ -62,8 +69,13 @@ export function bindInventoryDrag(root:HTMLElement,ghost:HTMLElement,actions:{
       actions.select(g.source);
       return;
     }
-    const button=event && commit && slotAt(document.elementFromPoint(event.clientX,event.clientY));
-    if (button && actions.drop(g.source,readSlot(button))) return;
+    if (event && commit) {
+      const element=document.elementFromPoint(event.clientX,event.clientY);
+      const container=readContainer(element);
+      const button=container?null:slotAt(element);
+      const target=container ?? (button?readSlot(button):undefined);
+      if (target && actions.drop(g.source,target)) return;
+    }
     actions.select(undefined);
   };
   root.addEventListener('pointerdown',event=>{

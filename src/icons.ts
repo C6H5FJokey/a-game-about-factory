@@ -73,9 +73,14 @@ export function machineIcon(kind:number) {
 }
 
 const actionArt = {
+  task:'<rect x="5" y="3" width="14" height="18" rx="2"/><path d="m8 9 1.5 1.5L12 8m-4 7 1.5 1.5L12 14m2-4h2m-2 6h2"/>',
+  guide:'<path d="M12 6c-2.5-2-5.5-2.5-9-1.5v14c3.5-1 6.5-.5 9 1.5 2.5-2 5.5-2.5 9-1.5v-14c-3.5-1-6.5-.5-9 1.5Zm0 0v14M6 9l3 .5M6 13l3 .5m6-4 3-.5m-3 4.5 3-.5"/>',
+  operate:'<path d="M20.6 5.8 17 9.4l-2.4-2.4 3.6-3.6a5.5 5.5 0 0 0-7.5 6.7l-6.6 6.6a2.3 2.3 0 0 0 3.2 3.2l6.6-6.6a5.5 5.5 0 0 0 6.7-7.5Z"/>',
+  build:'<path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Zm0 9v9m0-9 8-4.5M12 12 4 7.5"/>',
   hammer:'<g transform="rotate(24 12 12)" fill="currentColor" stroke="none"><path d="M9 8h4v12.5a2 2 0 0 1-4 0Z"/><path d="M2 3.5h4V5h8c4 0 6.8 2.4 7.7 6.3l-2.8-1.6-.6 2.2c-1.2-2.3-2.8-3.4-5.2-3.4H6V10H2Z"/></g>',
   rotate:'<path d="M20 10a8 8 0 1 0-2.8 8.1M20 4v6h-6"/>',
   cable:'<path d="M5 6h5a4 4 0 0 1 0 8h-1a3 3 0 1 0 0 6h5a3 3 0 0 0 3-3v-3"/><path d="M2 4h3v4H2m13 6V9h4v5Zm1-5V6m2 3V6"/>',
+  'cut-cable':'<path d="M2 4h3v4H2zm3 2h4c3.3 0 4.8 2.6 3.3 5.1"/><path d="M9.1 15.7c-1.1 2 .2 4.3 2.8 4.3H15a3 3 0 0 0 3-3v-3m-2 0V9h4v5zm1-5V6m2 3V6"/>',
 };
 
 export function actionIcon(name:keyof typeof actionArt) {

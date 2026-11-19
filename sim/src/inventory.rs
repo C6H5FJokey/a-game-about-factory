@@ -1,46 +1,89 @@
 use crate::campaign::Stage;
 use crate::catalog::*;
 use crate::progression::accepts_module;
-use crate::regions::YARD_CAPACITY;
-use crate::world::World;
+use crate::world::{Cell, World};
 
 pub const STOCK_TILE: i32 = -1;
 const WRITTEN_SLOT_WORDS: usize = 5;
 
+pub fn occupied_slots(count: u32, stack: u32) -> u32 {
+    count.div_ceil(stack)
+}
+
+pub fn used_slots(stock: &[u32; ITEMS], stacks: &[u32; ITEMS]) -> u32 {
+    stock[1..]
+        .iter()
+        .zip(&stacks[1..])
+        .map(|(&count, &stack)| occupied_slots(count, stack))
+        .fold(0, u32::saturating_add)
+}
+
+pub fn item_room(count: u32, stack: u32, used: u32, slots: u32) -> u32 {
+    if used > slots {
+        return 0;
+    }
+    let tail = (stack - count % stack) % stack;
+    tail + (slots - used) * stack
+}
+
+pub fn dedicated_room(count: u32, stack: u32, slots: u32) -> u32 {
+    item_room(count, stack, occupied_slots(count, stack), slots)
+}
+
+impl Cell {
+    pub fn storage_room(&self, item: u8, stack: u32) -> u32 {
+        item_room(
+            self.inv[item as usize],
+            stack,
+            self.used_storage_slots,
+            STORAGE_SLOTS[self.kind as usize],
+        )
+    }
+
+    pub fn set_material(&mut self, item: u8, count: u32, stack: u32) {
+        let stored = &mut self.inv[item as usize];
+        if matches!(self.kind, DEPOT | FREIGHT_YARD) {
+            self.used_storage_slots -= occupied_slots(*stored, stack);
+            self.used_storage_slots += occupied_slots(count, stack);
+        }
+        *stored = count;
+    }
+}
+
 impl World {
-    pub fn input_capacity(&self, tile: usize, item: u8) -> Option<u16> {
+    pub fn input_room(&self, tile: usize, item: u8) -> Option<u32> {
+        let cell = &self.cells[tile];
+        let stack = self.progression.stack_limit(item);
+        if cell.kind == DEPOT {
+            return Some(cell.storage_room(item, stack));
+        }
         if item == SPEED_MODULE {
             return None;
         }
-        let cell = self.cells[tile];
-        Some(match (cell.kind, item) {
-            (STATION, CORE) => {
-                if self.legacy_recipes {
-                    16
-                } else {
-                    24
-                }
-            }
-            (STATION, MIRROR) => 6,
-            (STATION, FUEL) => 12,
-            (GENERATOR, FUEL) => 8,
-            (FREIGHT_YARD, _) if SENDERS.contains(&tile) => yard_item_capacity(&cell.inv, item),
-            _ if self
-                .recipe_at(tile)
-                .is_some_and(|r| r.input.iter().any(|&(id, n)| id == item && n > 0)) =>
-            {
-                INPUT_CAPACITY[cell.kind as usize]
-            }
-            _ => return None,
+        if cell.kind == FREIGHT_YARD && SENDERS.contains(&tile) {
+            return Some(cell.storage_room(item, stack));
+        }
+        let allowed = matches!(
+            (cell.kind, item),
+            (STATION, CORE | MIRROR | FUEL) | (GENERATOR, FUEL)
+        ) || self
+            .recipe_at(tile)
+            .is_some_and(|r| r.input.iter().any(|&(id, n)| id == item && n > 0));
+        allowed.then(|| {
+            dedicated_room(
+                cell.inv[item as usize],
+                stack,
+                INPUT_SLOTS[cell.kind as usize],
+            )
         })
     }
 
-    fn manual_input(&self, tile: usize, item: u8) -> bool {
-        !STATIONS[1..].contains(&tile) && self.known_item(item)
+    fn manual_input(&self, tile: usize) -> bool {
+        !STATIONS[1..].contains(&tile)
     }
 
-    fn manual_input_take(&self, tile: usize, item: u8) -> bool {
-        self.cells[tile].kind != FREIGHT_YARD && self.manual_input(tile, item)
+    fn manual_input_take(&self, tile: usize) -> bool {
+        self.cells[tile].kind != FREIGHT_YARD && self.manual_input(tile)
     }
 
     pub fn transfer(&mut self, source: i32, destination: i32, item: i32, words: &[i32]) -> i32 {
@@ -75,6 +118,33 @@ impl World {
         let item = item as u8;
         let slot = item as usize;
         let requested = quantity as u32;
+        if cell.kind == DEPOT {
+            if !input && role != 1 || role == 3 || !self.manual_input(tile) {
+                return -13;
+            }
+            let stack = self.progression.stack_limit(item);
+            let (available, room) = if input {
+                (self.stock[slot], cell.storage_room(item, stack))
+            } else {
+                (cell.inv[slot], self.stock_room(item))
+            };
+            if available == 0 {
+                return -9;
+            }
+            if room == 0 {
+                return if input { -14 } else { -24 };
+            }
+            let moved = requested.min(available).min(room);
+            let depot = &mut self.cells[tile];
+            if input {
+                self.stock[slot] -= moved;
+                depot.set_material(item, cell.inv[slot] + moved, stack);
+            } else {
+                self.stock[slot] += moved;
+                depot.set_material(item, cell.inv[slot] - moved, stack);
+            }
+            return moved as i32;
+        }
         if role == 3 || item == SPEED_MODULE {
             if role != 3 || item != SPEED_MODULE || !accepts_module(cell.kind) {
                 return -13;
@@ -101,33 +171,36 @@ impl World {
             return 1;
         }
         if input {
-            let Some(cap) = self.input_capacity(tile, item) else {
+            let Some(room) = self.input_room(tile, item) else {
                 return -13;
             };
-            if !self.manual_input(tile, item) {
+            if !self.manual_input(tile) {
                 return -12;
             }
-            let room = cap.saturating_sub(cell.inv[slot]);
             if room == 0 {
                 return -14;
             }
             let first_feed = self.stage == Stage::Feed && cell.kind == BENCH;
-            let moved = requested.min(room.into()).min(self.stock[slot]);
+            let moved = requested.min(room).min(self.stock[slot]);
             if moved == 0 {
                 return -9;
             }
             self.stock[slot] -= moved;
-            self.cells[tile].inv[slot] += moved as u16;
+            self.cells[tile].set_material(
+                item,
+                cell.inv[slot] + moved,
+                self.progression.stack_limit(item),
+            );
             if first_feed {
                 self.stage = Stage::Working;
             }
             moved as i32
         } else {
             if role == 1 {
-                if self.input_capacity(tile, item).is_none() {
+                if self.input_room(tile, item).is_none() {
                     return -13;
                 }
-                if !self.manual_input_take(tile, item) {
+                if !self.manual_input_take(tile) {
                     return -12;
                 }
             } else {
@@ -138,7 +211,7 @@ impl World {
                     return -13;
                 }
             }
-            let available = u32::from(cell.inv[slot]);
+            let available = cell.inv[slot];
             let room = self.stock_room(item);
             if available > 0 && room == 0 {
                 return -24;
@@ -147,7 +220,7 @@ impl World {
             if moved == 0 {
                 return -9;
             }
-            self.cells[tile].inv[slot] -= moved as u16;
+            self.cells[tile].inv[slot] -= moved;
             if item == IRON_INGOT {
                 let cell = &mut self.cells[tile];
                 cell.belt_iron = cell.belt_iron.min(cell.inv[slot]);
@@ -171,57 +244,69 @@ impl World {
         let header = out.len();
         out.push(0);
         for item in 1..MATERIAL_ITEMS as u8 {
-            if item == SPEED_MODULE {
+            if item == SPEED_MODULE && cell.kind != DEPOT {
                 continue;
             }
             let count = cell.inv[item as usize];
-            if count == 0
-                && matches!(cell.kind, STATION | DEPOT | FREIGHT_YARD)
-                && !self.known_item(item)
-                && cell.cfg != item
-            {
+            if count == 0 && matches!(cell.kind, DEPOT | FREIGHT_YARD) {
                 continue;
             }
-            if let Some(cap) = self.input_capacity(tile, item) {
+            let stack = self.progression.stack_limit(item) as i32;
+            if let Some(room) = self.input_room(tile, item) {
                 out.extend([
                     item as i32,
                     1,
-                    count.into(),
-                    cap.into(),
-                    self.manual_input(tile, item) as i32
-                        | ((self.manual_input_take(tile, item) as i32) << 1),
+                    count as i32,
+                    stack,
+                    self.manual_input(tile) as i32
+                        | ((self.manual_input_take(tile) as i32) << 1)
+                        | ((i32::from(room > 0)) << 2),
                 ]);
-            } else if cell.kind == DEPOT && cell.cfg == 0 {
-                out.extend([item as i32, 1, 0, -1, 0]);
             }
             if cell.kind == FREIGHT_YARD && RECEIVERS.contains(&tile) {
-                let cap = yard_item_capacity(&cell.inv, item);
-                out.extend([item as i32, 2, count.into(), cap.into(), 0]);
-            } else if cell.kind == DEPOT && cell.cfg == item {
-                out.extend([item as i32, 2, self.stock[item as usize] as i32, -1, 0]);
+                out.extend([item as i32, 2, count as i32, stack, 0]);
             } else if recipe.as_ref().is_some_and(|r| r.output == item) {
-                out.extend([
-                    item as i32,
-                    2,
-                    count.into(),
-                    output_capacity(cell.kind).into(),
-                    2,
-                ]);
+                out.extend([item as i32, 2, count as i32, stack, 2]);
             }
         }
         if accepts_module(cell.kind) {
             out.extend([
                 SPEED_MODULE.into(),
                 3,
-                cell.inv[SPEED_MODULE as usize].into(),
-                1,
-                3,
+                cell.inv[SPEED_MODULE as usize] as i32,
+                self.progression.stack_limit(SPEED_MODULE) as i32,
+                3 | (i32::from(cell.inv[SPEED_MODULE as usize] == 0) << 2),
             ]);
         }
         out[header] = ((out.len() - header - 1) / WRITTEN_SLOT_WORDS) as i32;
     }
 }
 
-fn yard_item_capacity(inv: &[u16; ITEMS], item: u8) -> u16 {
-    YARD_CAPACITY.saturating_sub(inv.iter().sum::<u16>() - inv[item as usize])
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn miner_pauses_until_its_output_stack_has_room() {
+        let mut world = World::new();
+        world.stock[IRON as usize] = 10;
+        assert_eq!(world.place(FIRST_ORE, SIMPLE_MINER.into(), 0), 1);
+        let stack = world.progression.stack_limit(IRON);
+        world.cells[FIRST_ORE].inv[IRON as usize] = stack;
+        for _ in 0..MINER_TICKS {
+            world.step();
+        }
+        assert_eq!(world.cells[FIRST_ORE].status, 4);
+        assert_eq!(world.cells[FIRST_ORE].progress, 0);
+        let id = world.cells[FIRST_ORE].identity;
+        assert_eq!(
+            world.transfer(FIRST_ORE as i32, STOCK_TILE, IRON.into(), &[1, id, 0, 2]),
+            1
+        );
+        for _ in 0..MINER_TICKS {
+            world.step();
+        }
+        assert_eq!(world.cells[FIRST_ORE].inv[IRON as usize], stack);
+        assert_eq!(world.stage as u8, Stage::Collect as u8);
+    }
 }

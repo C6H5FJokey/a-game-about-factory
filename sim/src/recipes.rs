@@ -99,6 +99,9 @@ mod tests {
         for tick in 0..HZ * 60 {
             if tick % (HZ * 7) == 0 {
                 for tile in generators {
+                    if world.cells[tile].inv[FUEL as usize] >= 8 {
+                        continue;
+                    }
                     assert!(
                         world.transfer(
                             STOCK_TILE,
@@ -137,11 +140,11 @@ mod tests {
                             *tile as i32,
                             STOCK_TILE,
                             recipe.output.into(),
-                            &[count.into(), cell.identity, 0]
+                            &[count as i32, cell.identity, 0]
                         ),
-                        i32::from(count)
+                        count as i32
                     );
-                    *made += u32::from(count);
+                    *made += count;
                 }
             }
         }
@@ -331,7 +334,7 @@ impl World {
         out.push(self.legacy_recipes as i32);
         out.extend(self.stock[10..].iter().map(|&n| n as i32));
         for route in &self.routes {
-            out.extend(route.crate_stock[10..].iter().map(|&n| i32::from(n)));
+            out.extend(route.crate_stock[10..].iter().map(|&n| n as i32));
         }
         for cell in self.cells.iter().filter(|cell| cell.kind != 0) {
             out.push(if cell.selected_recipe == 0 {
@@ -339,12 +342,16 @@ impl World {
             } else {
                 RECIPES[cell.selected_recipe as usize - 1].key
             });
-            out.extend(cell.inv[10..].iter().map(|&n| i32::from(n)));
-            out.extend([i32::from(cell.belt_iron), cell.belt_batch as i32]);
+            out.extend(cell.inv[10..].iter().map(|&n| n as i32));
+            out.extend([cell.belt_iron as i32, cell.belt_batch as i32]);
+            if cell.kind == DEPOT {
+                out.push(cell.inv[SPEED_MODULE as usize] as i32);
+            }
         }
     }
 
-    pub fn read_recipe_save<'a>(&mut self, data: &'a [i32]) -> Option<&'a [i32]> {
+    pub fn read_recipe_save<'a>(&mut self, data: &'a [i32], version: i32) -> Option<&'a [i32]> {
+        let warehouse_stock = version >= crate::WAREHOUSE_SAVE_VERSION;
         let (&legacy, mut rest) = data.split_first()?;
         if !matches!(legacy, 0 | 1) {
             return None;
@@ -359,9 +366,11 @@ impl World {
         for route in &mut self.routes {
             let (counts, tail) = rest.split_at_checked(extra)?;
             for (slot, &amount) in route.crate_stock[10..].iter_mut().zip(counts) {
-                *slot = u16::try_from(amount)
-                    .ok()
-                    .filter(|&n| n <= crate::regions::CRATE_SIZE)?;
+                *slot = crate::saved_container_item(
+                    amount,
+                    version,
+                    crate::regions::LEGACY_CRATE_PIECES,
+                )?;
             }
             rest = tail;
         }
@@ -380,13 +389,18 @@ impl World {
                 cell.selected_recipe = (index + 1) as u16;
             }
             let (counts, tail) = tail.split_at_checked(extra)?;
+            let old_max = if warehouse_stock && cell.kind == DEPOT {
+                crate::LEGACY_WAREHOUSE_PIECES
+            } else {
+                32
+            };
             for (slot, &amount) in cell.inv[10..].iter_mut().zip(counts) {
-                *slot = u16::try_from(amount).ok().filter(|&n| n <= 32)?;
+                *slot = crate::saved_container_item(amount, version, old_max)?;
             }
             let [belt_iron, belt_batch, next @ ..] = tail else {
                 return None;
             };
-            cell.belt_iron = u16::try_from(*belt_iron)
+            cell.belt_iron = u32::try_from(*belt_iron)
                 .ok()
                 .filter(|&n| n <= cell.inv[IRON_INGOT as usize])?;
             cell.belt_batch = match belt_batch {
@@ -417,7 +431,14 @@ impl World {
                     return None;
                 }
             }
-            rest = next;
+            rest = if warehouse_stock && cell.kind == DEPOT {
+                let (&modules, next) = next.split_first()?;
+                cell.inv[SPEED_MODULE as usize] =
+                    crate::saved_container_item(modules, version, old_max)?;
+                next
+            } else {
+                next
+            };
         }
         Some(rest)
     }

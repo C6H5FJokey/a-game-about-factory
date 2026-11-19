@@ -208,10 +208,6 @@ pub fn layout_kind(kind: u8) -> u8 {
     }
 }
 
-pub fn output_capacity(kind: u8) -> u16 {
-    OUTPUT_CAPACITY[kind as usize]
-}
-
 #[derive(Clone, Copy)]
 pub struct Recipe {
     pub input: [(u8, u16); 3],
@@ -253,9 +249,30 @@ pub fn recipe(kind: u8) -> Option<Recipe> {
 
 include!(concat!(env!("OUT_DIR"), "/content.rs"));
 
-pub fn terrain(pos: usize) -> u8 {
+pub fn terrain(pos: usize, regional_map: bool) -> u8 {
     let x = pos % W;
     let y = pos / W;
+    if regional_map {
+        return match (x, y) {
+            (19, 16)
+            | (22, 19)
+            | (11, 12)
+            | (19, 28)
+            | (28, 28)
+            | (5, 13)
+            | (38, 26)
+            | (47, 21)
+            | (27, 5)
+            | (41, 30)
+            | (4, 28)
+            | (31, 30)
+            | (41, 18) => IRON,
+            (11, 16) | (26, 20) | (20, 24) | (34, 28) | (15, 28) | (35, 9) => COPPER,
+            (30, 16) | (10, 6) | (22, 27) | (5, 7) | (8, 5) | (12, 5) | (39, 19) => FUEL,
+            (33, 18) | (5, 20) | (4, 22) | (12, 30) | (46, 28) => SILICA,
+            _ => 0,
+        };
+    }
     if matches!(
         (x, y),
         (19, 16)
@@ -285,7 +302,7 @@ pub fn terrain(pos: usize) -> u8 {
     0
 }
 
-pub fn permitted(kind: u8, pos: usize) -> bool {
+pub fn permitted(kind: u8, pos: usize, regional_map: bool) -> bool {
     if kind == STATION || STATIONS.contains(&pos) {
         return STATIONS.contains(&pos) && kind == STATION;
     }
@@ -293,7 +310,7 @@ pub fn permitted(kind: u8, pos: usize) -> bool {
         return SENDERS.contains(&pos) || RECEIVERS.contains(&pos);
     }
     if kind == SIMPLE_MINER {
-        return terrain(pos) != 0;
+        return terrain(pos, regional_map) != 0;
     }
-    drill_ore(kind).is_none_or(|ore| terrain(pos) == ore)
+    drill_ore(kind).is_none_or(|ore| terrain(pos, regional_map) == ore)
 }

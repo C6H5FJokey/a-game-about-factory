@@ -11,7 +11,7 @@
     <div id="app" class="shell" aria-busy="true">
       <header class="masthead">
         <div class="brand"><span class="sunmark" aria-hidden="true"></span><h1>把白昼送回去</h1></div>
-        <div id="balances" class="balances" aria-label="持有物资" data-i18n-label="ui.stock"></div>
+        <div id="balances" class="balances" aria-label="持有物资" data-i18n-label="ui.stock" data-container data-tile="-1" data-identity="0"></div>
         <button class="button quiet archive" type="button" data-action="archive" data-i18n="ui.archive">档案</button>
       </header>
 
@@ -36,17 +36,30 @@
           <div id="loading" class="loading" role="status"><span class="sunmark" aria-hidden="true"></span><p>正在接入曙港矿区…</p></div>
         </section>
 
-        <aside id="panel" class="panel" data-expanded="false" aria-label="工厂检查器">
-          <button id="panel-toggle" class="panel-toggle" type="button" data-action="toggle-panel" aria-label="工厂面板" aria-controls="panel-surface" aria-expanded="false"><span aria-hidden="true">•••</span></button>
+        <nav class="drawer-rail drawer-rail--reference" aria-label="任务与手册" data-i18n-label="ui.referenceDrawer">
+          <button type="button" class="mode drawer-link" data-mode="task" data-nav-icon="task" aria-controls="reference-surface" aria-pressed="false"><span data-i18n="ui.tasks">任务</span></button>
+          <button type="button" class="mode drawer-link" data-mode="guide" data-nav-icon="guide" aria-controls="reference-surface" aria-pressed="false"><span data-i18n="ui.guide">手册</span></button>
+        </nav>
+        <nav class="drawer-rail" aria-label="工厂操作与建造" data-i18n-label="ui.factoryDrawer">
+          <button type="button" class="mode drawer-link" data-mode="view" data-nav-icon="operate" aria-controls="panel-surface" aria-pressed="false"><span data-i18n="ui.operations">操作</span></button>
+          <button type="button" class="mode drawer-link" data-mode="build" data-nav-icon="build" aria-controls="panel-surface" aria-pressed="false"><span data-i18n="ui.build">建造</span></button>
+        </nav>
+
+        <aside id="reference-panel" class="panel panel--reference" data-expanded="false" aria-label="任务与手册" data-i18n-label="ui.referenceDrawer">
+          <div class="panel-surface" id="reference-surface" inert>
+            <div class="panel-heading">
+              <div><span class="panel-tag" id="reference-tag"></span><h2 id="reference-title">任务</h2></div>
+            </div>
+            <div class="panel-body" id="reference-body"></div>
+          </div>
+        </aside>
+
+        <aside id="panel" class="panel" data-expanded="false" aria-label="工厂操作与建造" data-i18n-label="ui.factoryDrawer">
           <div class="panel-surface" id="panel-surface" inert>
-            <div class="panel-heading"><div><span class="panel-tag" id="panel-tag">任务通讯</span><h2 id="panel-title">矿站启动</h2></div><div id="panel-tools"></div></div>
-            <nav class="modes drawer-modes" aria-label="工厂页面">
-              <button type="button" class="mode" data-mode="task" data-i18n="ui.tasks" aria-pressed="true">任务</button>
-              <button type="button" class="mode" data-mode="view" data-i18n="ui.operations" aria-pressed="false">操作</button>
-              <button type="button" class="mode" data-mode="build" data-i18n="ui.build" aria-pressed="false">建造</button>
-              <button type="button" class="mode" data-mode="power" data-i18n="ui.grid" aria-pressed="false">电网</button>
-              <button type="button" class="mode" data-mode="guide" data-i18n="ui.guide" aria-pressed="false">手册</button>
-            </nav>
+            <div class="panel-heading">
+              <div><span class="panel-tag" id="panel-tag"></span><h2 id="panel-title">操作</h2></div>
+              <div id="panel-tools"></div>
+            </div>
             <nav id="panel-tabs" class="panel-tabs" aria-label="建造栏目" hidden></nav>
             <div class="panel-body" id="panel-body"></div>
           </div>
@@ -55,7 +68,13 @@
 
       <footer class="console">
         <nav class="modes" aria-label="轨道入口">
-          <button type="button" class="mode" data-mode="orbit" aria-pressed="false"><span aria-hidden="true">◔</span><span data-i18n="ui.orbit">轨道</span></button>
+          <button type="button" class="mode" data-mode="orbit" aria-controls="panel-surface" aria-pressed="false"><span aria-hidden="true">◔</span><span data-i18n="ui.orbit">轨道</span></button>
+        </nav>
+        <nav class="drawer-dock" aria-label="工厂页面" data-i18n-label="ui.factoryPages">
+          <button type="button" class="mode drawer-link" data-mode="task" data-nav-icon="task" aria-controls="reference-surface" aria-pressed="false"><span data-i18n="ui.tasks">任务</span></button>
+          <button type="button" class="mode drawer-link" data-mode="guide" data-nav-icon="guide" aria-controls="reference-surface" aria-pressed="false"><span data-i18n="ui.guide">手册</span></button>
+          <button type="button" class="mode drawer-link" data-mode="view" data-nav-icon="operate" aria-controls="panel-surface" aria-pressed="false"><span data-i18n="ui.operations">操作</span></button>
+          <button type="button" class="mode drawer-link" data-mode="build" data-nav-icon="build" aria-controls="panel-surface" aria-pressed="false"><span data-i18n="ui.build">建造</span></button>
         </nav>
         <div class="run-state" aria-label="模拟时间">
           <span id="clock">00:00</span>
@@ -68,13 +87,13 @@
 
     <dialog id="archive-dialog" class="dialog" aria-labelledby="archive-title">
       <div class="dialog-head"><h2 id="archive-title" data-i18n="ui.archiveTitle">矿站档案</h2><button class="button quiet" type="button" data-action="close-dialog" data-i18n="ui.close">关闭</button></div>
-      <p data-i18n="ui.archiveCompatibility">支持导入 V4 至 V10 战役。V11 保存地面物品与建造支付记录。</p>
+      <p data-i18n="ui.archiveCompatibility">支持导入 V4 至 V13 存档。</p>
       <label class="language-setting"><span data-i18n="ui.language">语言</span><select id="language-select"></select></label>
-      <p id="save-status" role="status" data-i18n="ui.saveStatus">当前战役会自动保存到此浏览器。</p>
+      <p id="save-status" role="status" data-i18n="ui.saveStatus">本局进度会自动保存到此浏览器。</p>
       <div class="dialog-actions"><button class="button" type="button" data-action="save">立即保存</button><button class="button" type="button" data-action="export">导出存档</button><button class="button" type="button" data-action="import">导入存档</button></div>
       <input id="save-file" type="file" accept=".dawn,application/octet-stream" hidden />
-      <div class="dialog-actions"><button class="button" type="button" data-action="pause">暂停模拟</button><button class="button danger" type="button" data-action="reset-confirm">新战役</button></div>
-      <p id="reset-warning" hidden>开始新战役将替换当前本地进度。<button class="button danger" type="button" data-action="reset">确认重新开始</button></p>
+      <div class="dialog-actions"><button class="button" type="button" data-action="pause">暂停模拟</button><button class="button danger" type="button" data-action="reset-confirm" data-i18n="ui.newGame">新游戏</button></div>
+      <p id="reset-warning" hidden><span data-i18n="ui.resetWarning">开始新游戏会替换当前本地进度。</span><button class="button danger" type="button" data-action="reset" data-i18n="ui.resetGame">确认重新开始</button></p>
     </dialog>
     <dialog id="blueprint-dialog" class="dialog" aria-labelledby="blueprint-dialog-title">
       <form id="blueprint-form">

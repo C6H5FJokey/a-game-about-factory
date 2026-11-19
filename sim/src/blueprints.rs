@@ -371,7 +371,7 @@ impl World {
         if !self.orbit.first_light {
             return -6;
         }
-        if a >= N || b >= N || !self.progression.contains(a) || !self.progression.contains(b) {
+        if a >= N || b >= N || !self.map_contains(a) || !self.map_contains(b) {
             return -1;
         }
         let Some(name) = name(words) else {
@@ -458,7 +458,7 @@ impl World {
                 return -3;
             }
             let tile = index(x as usize, y as usize);
-            if !self.progression.contains(tile) {
+            if !self.map_contains(tile) {
                 return -3;
             }
             let kind = if matches!(part.kind, INDUSTRIAL_MINER | REINFORCED_MINER) {
@@ -470,9 +470,7 @@ impl World {
                 part.kind
             };
             if kind != 0 {
-                if !self.unlocked(kind)
-                    || kind == DEPOT && part.config != 0 && !self.known_item(part.config as u8)
-                {
+                if !self.unlocked(kind) {
                     return -6;
                 }
                 if let Err(error) = self.validate_footprint(tile, kind, part.dir, None) {
@@ -516,13 +514,13 @@ impl World {
         if members.is_empty() {
             return -2;
         }
-        if self.stock[KIT as usize] < price {
+        let cost = [(KIT, price)];
+        if !self.spend_construction(anchor, &cost) {
             return -5;
         }
-        self.stock[KIT as usize] -= price;
         self.materialize();
         self.ground
-            .record_bundle(self.next_device_id, price, members.into_iter());
+            .record_bundle(self.next_device_id, &cost, members);
         self.next_device_id += 1;
         for (tile, kind, dir, wire, cfg, selected_recipe) in plan {
             let wire = self.cells[tile].wire || wire;

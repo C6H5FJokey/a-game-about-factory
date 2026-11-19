@@ -5,16 +5,16 @@ use crate::world::World;
 
 const MAX_COUNT: u32 = i32::MAX as u32;
 type Materials = [u32; ITEMS];
+type MaterialRows = Box<[(u8, u32)]>;
 
 enum Payment {
-    Materials(Box<[(u8, u32)]>),
+    Materials(MaterialRows),
     PackedMiner,
     Bundle(i32),
 }
 
-#[derive(Clone, Copy)]
 struct Bundle {
-    kits: u32,
+    materials: MaterialRows,
     remaining: usize,
 }
 
@@ -33,6 +33,25 @@ pub struct Ground {
 
 pub fn cable_payment_site(tile: usize) -> usize {
     N + tile
+}
+
+fn read_materials(data: &[i32], len: i32, max: i32) -> Option<(MaterialRows, &[i32])> {
+    if !(1..ITEMS as i32).contains(&len) {
+        return None;
+    }
+    let (rows, tail) = data.split_at_checked(len as usize * 2)?;
+    let mut seen = [false; ITEMS];
+    let mut materials = Vec::with_capacity(len as usize);
+    for &[item, count] in rows.as_chunks::<2>().0 {
+        if !(1..ITEMS as i32).contains(&item)
+            || !(1..=max).contains(&count)
+            || std::mem::replace(&mut seen[item as usize], true)
+        {
+            return None;
+        }
+        materials.push((item as u8, count as u32));
+    }
+    Some((materials.into_boxed_slice(), tail))
 }
 
 impl Default for Ground {
@@ -56,14 +75,25 @@ impl Ground {
         self.payments.insert(tile, payment);
     }
 
-    pub fn record_bundle(&mut self, id: i32, kits: u32, devices: impl Iterator<Item = usize>) {
+    pub fn record_bundle(
+        &mut self,
+        id: i32,
+        materials: &[(u8, u32)],
+        sites: impl IntoIterator<Item = usize>,
+    ) {
         let mut remaining = 0;
-        for tile in devices {
-            self.payments.insert(tile, Payment::Bundle(id));
+        for site in sites {
+            self.payments.insert(site, Payment::Bundle(id));
             remaining += 1;
         }
         if remaining > 0 {
-            self.bundles.insert(id, Bundle { kits, remaining });
+            self.bundles.insert(
+                id,
+                Bundle {
+                    materials: materials.into(),
+                    remaining,
+                },
+            );
         }
     }
 
@@ -115,7 +145,10 @@ impl Ground {
             }
         }
         for (&id, bundle) in &self.bundles {
-            out.extend([id, bundle.kits as i32, bundle.remaining as i32]);
+            out.extend([id, bundle.materials.len() as i32, bundle.remaining as i32]);
+            for &(item, count) in &bundle.materials {
+                out.extend([item.into(), count as i32]);
+            }
         }
     }
 }
@@ -143,11 +176,13 @@ impl World {
                     }
                 }
                 Some(Payment::Bundle(id)) => {
-                    let bundle = self.ground.bundles[id];
+                    let bundle = &self.ground.bundles[id];
                     let remaining = groups.entry(*id).or_insert(bundle.remaining);
                     *remaining -= 1;
                     if *remaining == 0 {
-                        returned[KIT as usize] += bundle.kits;
+                        for &(item, count) in &bundle.materials {
+                            returned[item as usize] += count;
+                        }
                     }
                 }
                 Some(Payment::PackedMiner) => packed = packed.checked_add(1).ok_or(-24)?,
@@ -196,7 +231,7 @@ impl World {
     }
 
     pub fn drop_held(&mut self, tile: usize, item: i32, count: i32) -> i32 {
-        if tile >= N || !self.progression.contains(tile) {
+        if tile >= N || !self.map_contains(tile) {
             return -3;
         }
         if !(1..ITEMS as i32).contains(&item) || count <= 0 {
@@ -217,7 +252,7 @@ impl World {
     }
 
     pub fn pick_ground(&mut self, tile: usize, item: i32, identity: i32) -> i32 {
-        if tile >= N || !self.progression.contains(tile) {
+        if tile >= N || !self.map_contains(tile) {
             return -3;
         }
         if !(1..ITEMS as i32).contains(&item) {
@@ -246,7 +281,11 @@ impl World {
         picked as i32
     }
 
-    pub fn read_ground_save<'a>(&mut self, data: &'a [i32]) -> Option<&'a [i32]> {
+    pub fn read_ground_save<'a>(
+        &mut self,
+        data: &'a [i32],
+        grouped_materials: bool,
+    ) -> Option<&'a [i32]> {
         let [next_id, piles, payments, bundles, rest @ ..] = data else {
             return None;
         };
@@ -268,7 +307,7 @@ impl World {
             };
             let tile = usize::try_from(*tile).ok()?;
             if tile >= N
-                || !self.progression.contains(tile)
+                || !self.map_contains(tile)
                 || !(1..ITEMS as i32).contains(item)
                 || !(1..*next_id).contains(id)
                 || *count <= 0
@@ -306,21 +345,10 @@ impl World {
             }
             rest = tail;
             let payment = match kind {
-                0 if (1..ITEMS as i32).contains(value) => {
-                    let (rows, tail) = rest.split_at_checked(*value as usize * 2)?;
+                0 => {
+                    let (materials, tail) = read_materials(rest, *value, u16::MAX.into())?;
                     rest = tail;
-                    let mut seen = [false; ITEMS];
-                    let mut materials = Vec::with_capacity(*value as usize);
-                    for &[item, count] in rows.as_chunks::<2>().0 {
-                        if !(1..ITEMS as i32).contains(&item)
-                            || !(1..=65535).contains(&count)
-                            || std::mem::replace(&mut seen[item as usize], true)
-                        {
-                            return None;
-                        }
-                        materials.push((item as u8, count as u32));
-                    }
-                    Payment::Materials(materials.into_boxed_slice())
+                    Payment::Materials(materials)
                 }
                 1 if *value == 0 && cell.kind == SIMPLE_MINER => Payment::PackedMiner,
                 2 if (1..self.next_device_id).contains(value) => {
@@ -334,21 +362,32 @@ impl World {
             }
         }
         for _ in 0..bundles {
-            let [id, kits, count, tail @ ..] = rest else {
+            let [id, value, count, tail @ ..] = rest else {
                 return None;
             };
             let remaining = membership.remove(id)?;
-            if remaining as i32 != *count || !(1..=N as i32).contains(kits) {
+            if remaining as i32 != *count {
                 return None;
             }
+            rest = tail;
+            let materials = if grouped_materials {
+                let (materials, tail) =
+                    read_materials(rest, *value, i32::from(u16::MAX) * N as i32)?;
+                rest = tail;
+                materials
+            } else {
+                if !(1..=N as i32).contains(value) {
+                    return None;
+                }
+                Box::new([(KIT, *value as u32)])
+            };
             self.ground.bundles.insert(
                 *id,
                 Bundle {
-                    kits: *kits as u32,
+                    materials,
                     remaining,
                 },
             );
-            rest = tail;
         }
         membership.is_empty().then_some(rest)
     }
@@ -358,6 +397,31 @@ impl World {
 mod tests {
     use super::*;
     use crate::campaign::Stage;
+
+    #[test]
+    fn a_failed_cable_refund_leaves_the_route_and_all_receipts_intact() {
+        let mut world = World::new();
+        world.stage = Stage::Power;
+        let first = index(18, 19);
+        world.stock[COPPER_WIRE as usize] = 10;
+        assert_eq!(
+            world.route(true, &[first as i32, 0, (first + 1) as i32, 0]),
+            1
+        );
+        assert_eq!(world.route(true, &[(first + 2) as i32, 0]), 1);
+        world.stock = [0; ITEMS];
+        world.stock[IRON as usize] = 1600;
+        world.ground.add(first + 2, COPPER_WIRE, MAX_COUNT);
+        let path = [first as i32, (first + 1) as i32, (first + 2) as i32];
+        assert_eq!(world.remove_cables(&path), -29);
+        assert!(world.cells[first..first + 3].iter().all(|cell| cell.wire));
+        assert_eq!(world.ground.piles.len(), 1);
+        assert_eq!(world.stock[COPPER_WIRE as usize], 0);
+        world.ground.piles.remove(&(first + 2, COPPER_WIRE));
+        assert_eq!(world.remove_cables(&path), 1);
+        assert_eq!(world.ground.piles[&(first + 1, COPPER_WIRE)].count, 4);
+        assert_eq!(world.ground.piles[&(first + 2, COPPER_WIRE)].count, 2);
+    }
 
     #[test]
     fn dismantling_fills_partial_stack_and_keeps_overflow() {
@@ -414,7 +478,7 @@ mod tests {
         let mut saved = Vec::new();
         world.ground.write_save(&mut saved);
         world.ground = Ground::default();
-        assert_eq!(world.read_ground_save(&saved), Some(&[][..]));
+        assert_eq!(world.read_ground_save(&saved, true), Some(&[][..]));
         assert_eq!(
             world.build_transports(
                 world.layout_revision,

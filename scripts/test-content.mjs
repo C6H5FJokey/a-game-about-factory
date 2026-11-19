@@ -25,10 +25,12 @@ async function write(name, value) {
 try {
   const items = await json(baseFiles.items);
   items.find(row => row.id === 'iron').stackLimit = 25;
+  items.find(row => row.id === 'copper').stackLimit = 1;
   items.reverse();
   const recipeFile = await json(baseFiles.recipes);
   recipeFile.find(row => row.id === 'press-plate').baseTicks = 44;
   const machines = await json(baseFiles.machines);
+  machines.find(row => row.id === 'depot').storageSlots = 2;
   const benchLayout = machines.find(row => row.id === 'bench');
   benchLayout.size = [2, 3];
   benchLayout.ports = [
@@ -146,7 +148,7 @@ try {
   assert.equal(campaign.signature, base.signature);
   assert.equal(review.signature, variant.signature);
   const original = campaign.save();
-  assert.equal(original[0], 11);
+  assert.equal(original[0], 14);
   const repricedMachines = await json(baseFiles.machines);
   repricedMachines.find(row => row.id==='simple-miner').nextMaterials[0].amount=17;
   const repricedConfig=await write('repriced.json',{
@@ -175,6 +177,43 @@ try {
   const beforeReject = review.save();
   assert.equal(review.restore(original), -25);
   assert.deepEqual(review.save(), beforeReject, 'A save from a different profile must leave the current game intact');
+  const warehouseStart=beforeReject.slice();
+  warehouseStart[23]=13;
+  warehouseStart[5]=26;
+  warehouseStart[8]=10;
+  assert.equal(review.restore(warehouseStart),1);
+  const warehouse=19*56+17, copper=16*56+11;
+  assert.equal(review.command(1,warehouse,12),1);
+  const warehouseView=review.snapshot();
+  const warehouseId=warehouseView[warehouseView.at(-1)+1];
+  const put=(item,amount)=>review.command(15,-1,warehouse,item,[amount,0,warehouseId,1]);
+  const take=(item,amount)=>review.command(15,warehouse,-1,item,[amount,warehouseId,0,1]);
+  for (let n=0;n<3;n++) assert.equal(review.command(9,copper),1);
+  assert.equal(put(1,24),24);
+  assert.equal(put(10,3),1,'Each unstackable copper occupies one of the two warehouse slots');
+  assert.equal(put(4,1),-14,'Other items cannot use the partially filled iron slot');
+  assert.equal(put(1,2),1,'The last iron still fits its own stack');
+
+  const legacyWarehouse=review.save();
+  legacyWarehouse[0]=12;
+  legacyWarehouse[4]=0;
+  legacyWarehouse[54+19*warehouse+10]=24;
+  const transport=54+56*34*19;
+  const progress=transport+4+legacyWarehouse[transport+2]*8+legacyWarehouse[transport+3]*3;
+  const devices=progress+4+legacyWarehouse[progress+3];
+  const recipes=devices+2+legacyWarehouse[devices+1];
+  const extraItems=variant.items.length-10;
+  legacyWarehouse[recipes+1+extraItems*3+1]=2; // V12 stored both copper items in the same warehouse.
+  assert.equal(review.restore(legacyWarehouse),1);
+  const migratedWarehouse=review.save();
+  assert.equal(migratedWarehouse[0],14);
+  assert.equal(review.restore(migratedWarehouse),1);
+  assert.deepEqual(review.save(),migratedWarehouse);
+  assert.equal(put(1,1),-14,'An overfull legacy warehouse must free a slot before accepting more');
+  assert.equal(take(10,1),1);
+  assert.equal(put(1,1),1,'Removing one unstackable item returns the warehouse to its slot limit');
+  assert.equal(take(10,1),1,'Both legacy copper items survive migration');
+  assert.equal(put(4,1),1,'The empty slot can now take a different item');
   const beforeExtension=54+56*34*19+4+4+2;
   const libraryStart=original.length-original.at(-1)-3;
   const v7 = Int32Array.from([...original.subarray(0,beforeExtension), ...original.subarray(libraryStart,libraryStart+3)]);
@@ -236,18 +275,43 @@ try {
   assert.deepEqual(occupied(tile(21,17)),[bench,32],'The east outlet becomes a south outlet');
   for (let i=0;i<3;i++) assert.equal(review.command(8,bench),1);
 
+  const fillIronWarehouse = position => {
+    const view=review.snapshot();
+    for (let i=view.at(-1);i<view.length-1;i+=10+5*view[i+9]) {
+      if (view[i]===position) return review.command(15,-1,position,1,[1,0,view[i+1],1]);
+    }
+    throw new Error('Missing iron warehouse');
+  };
   const falseFeed=tile(20,16);
   assert.equal(review.command(1,falseFeed,12),1);
   assert.equal(review.command(4,falseFeed,1),1);
-  const ironBefore=review.snapshot()[36];
+  assert.equal(fillIronWarehouse(falseFeed),1);
   review.step(10);
-  assert.equal(review.snapshot()[36],ironBefore,'A side without an inlet cannot accept goods');
+  assert.equal(review.snapshot()[98+19*falseFeed+10],1,'A side without an inlet cannot accept goods');
   assert.equal(review.command(1,tile(19,17),12),1);
   assert.equal(review.command(4,tile(19,17),1),1);
+  assert.equal(review.command(9,iron),1);
+  assert.equal(fillIronWarehouse(tile(19,17)),1);
   assert.equal(review.command(1,tile(20,17),1),1);
   assert.equal(review.command(1,tile(23,18),23),1);
   assert.equal(review.command(1,tile(24,18),12),1);
-  review.step(120);
+  let inletArrival;
+  let steps=0;
+  while (!inletArrival && steps<120) {
+    review.step(1);
+    steps++;
+    const frame=review.snapshot(), end=frame.at(-1)-1;
+    for (let i=frame[end]+1;i<end;i+=8) {
+      if (frame[i]<0 && frame[i+3]===inlet) {
+        inletArrival=Array.from(frame.subarray(i,i+8));
+        break;
+      }
+    }
+  }
+  assert.ok(inletArrival,'A successful delivery projects an animation to the configured inlet');
+  assert.equal(inletArrival[0],-1-tile(20,17)*2,'The animation starts at the last belt cell');
+  assert.equal(inletArrival[4],0,'The receipt keeps the actual direction into the west inlet');
+  review.step(120-steps);
   assert.equal(review.snapshot()[19],2,'Manual and automatically supplied plates both leave through the configured outlet');
 
   const withBlueprint=review.save();

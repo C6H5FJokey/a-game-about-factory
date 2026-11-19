@@ -150,25 +150,15 @@ impl World {
             }
     }
 
-    pub fn known_item(&self, item: u8) -> bool {
-        self.stage
-            >= match item {
-                COPPER | 11..=15 if !self.legacy_recipes => Stage::Handwork,
-                16..=19 if !self.legacy_recipes => Stage::Silica,
-                IRON | PLATE => Stage::Gather,
-                SILICA => Stage::Silica,
-                FUEL if !self.legacy_recipes => Stage::Bench,
-                FUEL => Stage::Power,
-                LENS => Stage::Assemble,
-                MIRROR => Stage::Launch,
-                CORE => Stage::Tracking,
-                KIT => Stage::Sunlight,
-                _ => return false,
-            }
-    }
-
     pub fn known_ore(&self, tile: usize) -> u8 {
-        match terrain(tile) {
+        if self.progression.regional_map {
+            return if self.map_contains(tile) {
+                terrain(tile, true)
+            } else {
+                0
+            };
+        }
+        match terrain(tile, false) {
             IRON if tile == FIRST_ORE || self.stage >= Stage::Expand => IRON,
             FUEL if self.stage >= Stage::Power => FUEL,
             FUEL if !self.legacy_recipes && self.stage >= Stage::Bench => FUEL,
@@ -180,7 +170,7 @@ impl World {
 
     pub fn gather(&mut self, tile: usize) -> i32 {
         let item = self.known_ore(tile);
-        if item == 0 || !self.progression.contains(tile) {
+        if item == 0 || !self.map_contains(tile) {
             return -3;
         }
         if self.stock_room(item) == 0 {

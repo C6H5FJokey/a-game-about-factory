@@ -1,11 +1,11 @@
 use crate::campaign::Stage;
 use crate::catalog::*;
+use crate::inventory::{item_room, occupied_slots};
 use crate::world::{Cell, World};
 
 pub const HEADWAY: u32 = 12 * HZ;
 pub const TRAVEL: u32 = 4 * HZ;
-pub const CRATE_SIZE: u16 = 16;
-pub const YARD_CAPACITY: u16 = 32;
+pub const LEGACY_CRATE_PIECES: u32 = 16;
 pub const WINDOW_LENGTH: [u32; 3] = [WINDOW, 12 * HZ, 12 * HZ];
 pub const TRACKING_POWER: [u32; 3] = [120, 110, 135];
 pub const WINDOW_GAP: [u32; 3] = [8 * HZ, 3 * HZ, 12 * HZ];
@@ -17,7 +17,7 @@ pub const LEGACY_ROUTE_WORDS: usize = 2 + LEGACY_MATERIAL_ITEMS;
 #[derive(Clone, Copy, Default)]
 pub struct Route {
     pub arrival: u32,
-    pub crate_stock: [u16; MATERIAL_ITEMS],
+    pub crate_stock: [u32; MATERIAL_ITEMS],
     pub delivered: u32,
 }
 
@@ -58,7 +58,7 @@ impl World {
         {
             return -2;
         }
-        if !self.spend(materials(FREIGHT_YARD), 1) {
+        if !self.spend_construction(SENDERS[i], materials(FREIGHT_YARD)) {
             return -4;
         }
         self.materialize();
@@ -77,6 +77,7 @@ impl World {
     }
 
     pub fn run_freight(&mut self) {
+        let stacks = self.progression.stack_limits();
         for i in 0..2 {
             if self.cells[SENDERS[i]].kind != FREIGHT_YARD {
                 continue;
@@ -84,27 +85,36 @@ impl World {
             let route = &mut self.routes[i];
             if route.arrival == 0 && self.tick % HEADWAY == 0 {
                 let sender = &mut self.cells[SENDERS[i]];
-                let mut space = CRATE_SIZE;
-                for (slot, stored) in route.crate_stock.iter_mut().zip(&mut sender.inv).skip(1) {
-                    let count = space.min(*stored);
+                let mut free = CRATE_SLOTS;
+                for (item, slot) in route.crate_stock.iter_mut().enumerate().skip(1) {
+                    let stored = sender.inv[item];
+                    let count = item_room(0, stacks[item], 0, free).min(stored);
                     *slot = count;
-                    *stored -= count;
-                    space -= count;
+                    if count != 0 {
+                        sender.set_material(item as u8, stored - count, stacks[item]);
+                        free -= occupied_slots(count, stacks[item]);
+                    }
                 }
-                if space < CRATE_SIZE {
+                if free < CRATE_SLOTS {
                     route.arrival = self.tick + TRAVEL;
                 }
             }
             if route.arrival != 0 && self.tick >= route.arrival && belt_pulse(self.tick) {
                 let receiver = &mut self.cells[RECEIVERS[i]];
-                if receiver.inv.iter().sum::<u16>() < YARD_CAPACITY {
-                    if let Some(item) = route.crate_stock.iter().position(|&count| count > 0) {
-                        route.crate_stock[item] -= 1;
-                        receiver.inv[item] += 1;
-                    }
-                    if route.crate_stock.iter().all(|&v| v == 0) {
-                        route.arrival = 0;
-                    }
+                if let Some((item, count)) =
+                    route
+                        .crate_stock
+                        .iter_mut()
+                        .enumerate()
+                        .find(|&(item, ref count)| {
+                            **count > 0 && receiver.storage_room(item as u8, stacks[item]) > 0
+                        })
+                {
+                    *count -= 1;
+                    receiver.set_material(item as u8, receiver.inv[item] + 1, stacks[item]);
+                }
+                if route.crate_stock.iter().all(|&v| v == 0) {
+                    route.arrival = 0;
                 }
             }
         }
@@ -168,7 +178,7 @@ impl World {
                     let (cores, energy) = reserve(n);
                     let group = site.group as usize;
                     reserved[group] += energy;
-                    if site.inv[CORE as usize] < cores
+                    if site.inv[CORE as usize] < u32::from(cores)
                         || site.group == 0
                         || self.grids[group].stored < reserved[group]
                     {
@@ -198,5 +208,54 @@ impl World {
         if city == 0 && self.stage < Stage::Valley {
             o.next_window = self.tick + 45 * HZ;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn freight_uses_slots_and_unloads_into_a_matching_partial_stack() {
+        let mut world = World::new();
+        world.stage = Stage::Valley;
+        let stacks = world.progression.stack_limits();
+        for tile in [SENDERS[0], RECEIVERS[0]] {
+            world.install(
+                tile,
+                Cell {
+                    kind: FREIGHT_YARD,
+                    ..Cell::default()
+                },
+            );
+        }
+        let sender = &mut world.cells[SENDERS[0]];
+        sender.set_material(IRON, 99, stacks[IRON as usize]);
+        sender.set_material(SILICA, 1, stacks[SILICA as usize]);
+        sender.set_material(PLATE, 1, stacks[PLATE as usize]);
+        let receiver = &mut world.cells[RECEIVERS[0]];
+        receiver.set_material(IRON, 100, stacks[IRON as usize]);
+        receiver.set_material(SILICA, 99, stacks[SILICA as usize]);
+        receiver.set_material(FUEL, 200, stacks[FUEL as usize]);
+        world.tick = HEADWAY;
+        world.run_freight();
+        assert_eq!(world.routes[0].crate_stock[IRON as usize], 99);
+        assert_eq!(world.routes[0].crate_stock[SILICA as usize], 1);
+        assert_eq!(world.cells[SENDERS[0]].inv[PLATE as usize], 1);
+        world.tick += TRAVEL;
+        while !belt_pulse(world.tick) {
+            world.tick += 1;
+        }
+        world.run_freight();
+        assert_eq!(world.cells[RECEIVERS[0]].inv[SILICA as usize], 100);
+        assert_eq!(world.routes[0].crate_stock[IRON as usize], 99);
+        world.cells[RECEIVERS[0]].set_material(FUEL, 100, stacks[FUEL as usize]);
+        world.tick += 1;
+        while !belt_pulse(world.tick) {
+            world.tick += 1;
+        }
+        world.run_freight();
+        assert_eq!(world.cells[RECEIVERS[0]].inv[IRON as usize], 101);
+        assert_eq!(world.routes[0].crate_stock[IRON as usize], 98);
     }
 }

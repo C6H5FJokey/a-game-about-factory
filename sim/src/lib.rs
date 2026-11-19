@@ -31,6 +31,14 @@ const SAVE_WORDS: usize = SAVE_HEADER + N * SAVE_CELL_WORDS;
 const TAGGED_SAVE_VERSION: i32 = 8;
 const PRE_RECIPE_SAVE_VERSION: i32 = 9;
 const RECIPE_SAVE_VERSION: i32 = 10;
+const GROUND_SAVE_VERSION: i32 = 11;
+const WAREHOUSE_SAVE_VERSION: i32 = 12;
+const WIDE_CONTAINER_SAVE_VERSION: i32 = 13;
+const REGIONAL_MAP_SAVE_VERSION: i32 = 14;
+const LEGACY_WAREHOUSE_PIECES: u32 = 200;
+const LEGACY_YARD_PIECES: u32 = 32;
+// The format supports any inventory reachable with the largest data-defined slot and stack settings.
+const MAX_SAVED_CONTAINER_ITEM: u32 = 64_000_000;
 const BUFFER: usize = 48_000;
 const MAX_INPUT: usize = 1_000_000;
 
@@ -147,6 +155,7 @@ pub extern "C" fn command(op: i32, a: i32, b: i32, c: i32, len: usize) -> i32 {
             25 => world.finish_handcraft(a),
             26 => world.drop_held(tile, b, c),
             27 => world.pick_ground(tile, b, c),
+            28 => world.remove_cables(words),
             _ => -1,
         }
     })
@@ -196,7 +205,7 @@ pub extern "C" fn snapshot() -> usize {
             world.packed_miners as i32,
             world.build_materials(SIMPLE_MINER)[0].1 as i32,
             MINER_TICKS as i32,
-            MINER_CAPACITY as i32,
+            OUTPUT_SLOTS[SIMPLE_MINER as usize] as i32,
             (1..=SPLICER)
                 .filter(|&kind| world.unlocked(kind))
                 .fold(0, |mask, kind| mask | (1 << kind)),
@@ -216,7 +225,7 @@ pub extern "C" fn snapshot() -> usize {
             o.fault_city as i32,
             HEADWAY as i32,
             TRAVEL as i32,
-            CRATE_SIZE as i32,
+            CRATE_SLOTS as i32,
             LINE_COST as i32,
         ]);
         for (n, &tile) in STATIONS.iter().enumerate() {
@@ -246,7 +255,7 @@ pub extern "C" fn snapshot() -> usize {
                 } else {
                     r.arrival.saturating_sub(world.tick) as i32
                 },
-                r.crate_stock.iter().sum::<u16>() as i32,
+                inventory::used_slots(&r.crate_stock, world.progression.stack_limits()) as i32,
                 r.delivered as i32,
                 g.generation as i32,
                 g.demand as i32,
@@ -322,9 +331,11 @@ pub extern "C" fn save() -> usize {
             world.tick as i32,
             world.delivered as i32,
             world.kit_total as i32,
+            // This word previously held the unused stock entry for item zero.
+            world.progression.regional_map as i32,
         ]);
         output.extend(
-            world.stock[..LEGACY_MATERIAL_ITEMS]
+            world.stock[1..LEGACY_MATERIAL_ITEMS]
                 .iter()
                 .map(|&v| v as i32),
         );
@@ -354,7 +365,7 @@ pub extern "C" fn save() -> usize {
             output.extend(
                 r.crate_stock[..LEGACY_MATERIAL_ITEMS]
                     .iter()
-                    .map(|&v| i32::from(v)),
+                    .map(|&v| v as i32),
             );
         }
         for (i, c) in world.cells.iter().enumerate() {
@@ -392,12 +403,10 @@ pub extern "C" fn restore(len: usize) -> i32 {
         let Some(words) = runtime.input.get(..len) else {
             return -1;
         };
-        let data = if matches!(
-            words.first().copied(),
-            Some(
-                TAGGED_SAVE_VERSION | PRE_RECIPE_SAVE_VERSION | RECIPE_SAVE_VERSION | SAVE_VERSION
-            )
-        ) {
+        let data = if words
+            .first()
+            .is_some_and(|version| (TAGGED_SAVE_VERSION..=SAVE_VERSION).contains(version))
+        {
             let Some(end) = words
                 .last()
                 .and_then(|&size| usize::try_from(size).ok())
@@ -439,9 +448,18 @@ fn saved_ticks(value: i32, legacy_clock: bool) -> Option<u32> {
     (ticks <= i32::MAX as u32).then_some(ticks)
 }
 
+fn saved_container_item(value: i32, version: i32, old_max: u32) -> Option<u32> {
+    let max = if version >= WIDE_CONTAINER_SAVE_VERSION {
+        MAX_SAVED_CONTAINER_ITEM
+    } else {
+        old_max
+    };
+    u32::try_from(value).ok().filter(|&count| count <= max)
+}
+
 impl World {
     fn drill_at(&self, tile: usize, layout: u8) -> Result<u8, i32> {
-        let Some(kind) = drill_kind(layout, terrain(tile)) else {
+        let Some(kind) = drill_kind(layout, terrain(tile, self.progression.regional_map)) else {
             return Err(-3);
         };
         if self.known_ore(tile) == 0 || !self.unlocked(kind) {
@@ -484,8 +502,8 @@ impl World {
             }
             self.build_materials(kind)
         };
-        if !self.progression.contains(tile)
-            || !permitted(kind, tile)
+        if !self.map_contains(tile)
+            || !permitted(kind, tile, self.progression.regional_map)
             || (kind == STATION
                 && !STATIONS
                     .iter()
@@ -501,7 +519,7 @@ impl World {
         if let Err(error) = self.validate_footprint(tile, kind, dir as u8, None) {
             return error;
         }
-        if !self.spend(materials, 1) {
+        if !self.spend_construction(tile, materials) {
             return -4;
         }
         self.materialize();
@@ -544,25 +562,73 @@ impl World {
             return -6;
         }
         let mut seen = vec![false; N];
-        let mut new_tiles = 0u32;
+        let mut new_tiles = Vec::new();
         for p in words.chunks_exact(2) {
             let tile = p[0] as usize;
             if tile >= N || std::mem::replace(&mut seen[tile], true) || !(0..4).contains(&p[1]) {
                 return -1;
             }
-            if !self.progression.contains(tile) {
+            if !self.map_contains(tile) {
                 return -3;
             }
-            new_tiles += u32::from(!self.cells[tile].wire);
+            if !self.cells[tile].wire {
+                new_tiles.push(tile);
+            }
         }
-        if !self.spend(
-            self.build_materials(CABLE),
-            new_tiles.div_ceil(self.cable_span()),
-        ) {
+        if new_tiles.is_empty() {
+            return 1;
+        }
+        let copies = (new_tiles.len() as u32).div_ceil(self.cable_span());
+        let materials: Vec<_> = self
+            .build_materials(CABLE)
+            .iter()
+            .map(|&(item, count)| (item, count * copies))
+            .collect();
+        if !self.spend_construction(words[0] as usize, &materials) {
             return -4;
         }
-        for p in words.chunks_exact(2) {
-            self.cells[p[0] as usize].wire = true;
+        if !materials.is_empty() {
+            self.ground.record_bundle(
+                self.next_device_id,
+                &materials,
+                new_tiles.iter().copied().map(ground::cable_payment_site),
+            );
+            self.next_device_id += 1;
+        }
+        for tile in new_tiles {
+            self.cells[tile].wire = true;
+        }
+        self.update_grids();
+        1
+    }
+
+    fn remove_cables(&mut self, tiles: &[i32]) -> i32 {
+        if tiles.is_empty() || tiles.len() > N {
+            return -1;
+        }
+        let mut seen = [false; N];
+        for &tile in tiles {
+            let tile = tile as usize;
+            if tile >= N || std::mem::replace(&mut seen[tile], true) || !self.cells[tile].wire {
+                return -1;
+            }
+            if !self.map_contains(tile) {
+                return -3;
+            }
+        }
+        if tiles.windows(2).any(|pair| {
+            !(0..4).any(|dir| neighbor(pair[0] as usize, dir) == Some(pair[1] as usize))
+        }) {
+            return -1;
+        }
+        let payments = tiles
+            .iter()
+            .map(|&tile| (ground::cable_payment_site(tile as usize), [0; ITEMS]));
+        if let Err(status) = self.settle_removals(self.stock, payments) {
+            return status;
+        }
+        for &tile in tiles {
+            self.cells[tile as usize].wire = false;
         }
         self.update_grids();
         1
@@ -570,17 +636,7 @@ impl World {
 
     fn remove(&mut self, tile: usize, wire: bool) -> i32 {
         if wire {
-            if !self.cells[tile].wire {
-                return -1;
-            }
-            if let Err(status) =
-                self.settle_removals(self.stock, [(ground::cable_payment_site(tile), [0; ITEMS])])
-            {
-                return status;
-            }
-            self.cells[tile].wire = false;
-            self.update_grids();
-            return 1;
+            return self.remove_cables(&[tile as i32]);
         }
         let tile = self.footprints.owner(tile).unwrap_or(tile);
         let c = self.cells[tile];
@@ -603,7 +659,7 @@ impl World {
             }
         }
         for (i, &count) in c.inv.iter().enumerate() {
-            returned[i] += u32::from(count);
+            returned[i] += count;
         }
         if let Err(error) = self.settle_removals(self.stock, [(tile, returned)]) {
             return error;
@@ -628,9 +684,6 @@ impl World {
 
     fn configure(&mut self, tile: usize, value: i32) -> i32 {
         if self.stage < Stage::Expand {
-            return -6;
-        }
-        if self.cells[tile].kind == DEPOT && value != 0 && !self.known_item(value as u8) {
             return -6;
         }
         let c = &mut self.cells[tile];
@@ -674,7 +727,7 @@ impl World {
             5 if data.len() > SAVE_WORDS => INDUSTRIAL_MINER,
             6 if data.len() > SAVE_WORDS => CROSSING,
             7..=PRE_RECIPE_SAVE_VERSION if data.len() > SAVE_WORDS => REINFORCED_MINER,
-            RECIPE_SAVE_VERSION | SAVE_VERSION if data.len() > SAVE_WORDS => MAX_KIND,
+            RECIPE_SAVE_VERSION..=SAVE_VERSION if data.len() > SAVE_WORDS => MAX_KIND,
             _ => return None,
         };
         let legacy_clock = version < PRE_RECIPE_SAVE_VERSION;
@@ -708,6 +761,12 @@ impl World {
         }
         let mut w = Self::empty();
         w.stage = Stage::from_word(data[23])?;
+        if version >= REGIONAL_MAP_SAVE_VERSION {
+            if !flag(data[4]) {
+                return None;
+            }
+            w.progression.regional_map = data[4] == 1;
+        }
         w.packed_miners = u16::try_from(data[24]).ok()?;
         if !(0..=3).contains(&data[25])
             || !(0..=2).contains(&data[26])
@@ -722,7 +781,7 @@ impl World {
         w.tick = tick;
         w.delivered = data[2] as u32;
         w.kit_total = data[3] as u32;
-        for (slot, &value) in w.stock.iter_mut().zip(&data[4..13]) {
+        for (slot, &value) in w.stock[1..].iter_mut().zip(&data[5..13]) {
             *slot = value as u32;
         }
         w.orbit = Orbit {
@@ -752,10 +811,7 @@ impl World {
             r.arrival = ticks(words[0])?;
             r.delivered = u32::try_from(words[1]).ok()?;
             for (slot, &count) in r.crate_stock.iter_mut().zip(&words[2..]) {
-                *slot = u16::try_from(count).ok()?;
-                if *slot > CRATE_SIZE {
-                    return None;
-                }
+                *slot = saved_container_item(count, version, LEGACY_CRATE_PIECES)?;
             }
         }
         for (i, s) in data[SAVE_HEADER..SAVE_WORDS]
@@ -774,16 +830,13 @@ impl World {
                 || last_kit_delivery > tick
                 || !(0..MATERIAL_ITEMS as i32).contains(&s[8])
                 || ticks(s[9])? >= clock_limit
-                || s[10..18]
-                    .iter()
-                    .any(|x| !(0..=if s[0] == FREIGHT_YARD as i32 { 32 } else { 24 }).contains(x))
                 || !(0..=i32::from(RETIRED_SOURCE)).contains(&s[18])
             {
                 return None;
             }
             let kind = s[0] as u8;
             let kind = if matches!(kind, INDUSTRIAL_MINER | REINFORCED_MINER) {
-                drill_kind(kind, terrain(i))?
+                drill_kind(kind, terrain(i, w.progression.regional_map))?
             } else {
                 kind
             };
@@ -796,7 +849,7 @@ impl World {
             if !(0..=max).contains(&s[3])
                 || (kind != 0
                     && ((version < RECIPE_SAVE_VERSION && !w.stage.allows(kind))
-                        || !permitted(kind, i)))
+                        || !permitted(kind, i, w.progression.regional_map)))
                 || (s[8] != 0 && !is_belt(kind))
                 || (s[6] != 0 && !matches!(kind, KIT_PRESS | SPLICER))
                 || (s[18] != 0 && !matches!(s[8] as u8, KIT | PLATE))
@@ -804,8 +857,13 @@ impl World {
                 return None;
             }
             let mut inv = [0; ITEMS];
+            let old_max = match kind {
+                DEPOT if version >= WAREHOUSE_SAVE_VERSION => LEGACY_WAREHOUSE_PIECES,
+                FREIGHT_YARD => LEGACY_YARD_PIECES,
+                _ => 24,
+            };
             for (slot, &value) in inv[1..MATERIAL_ITEMS].iter_mut().zip(&s[10..18]) {
-                *slot = value as u16;
+                *slot = saved_container_item(value, version, old_max)?;
             }
             if version < TAGGED_SAVE_VERSION && progress > 0 {
                 if let Some(r) = recipe(kind) {
@@ -815,7 +873,8 @@ impl World {
                     }
                     if data[0] < 6 {
                         for (item, count) in legacy {
-                            inv[item as usize] = inv[item as usize].checked_sub(count)?;
+                            inv[item as usize] =
+                                inv[item as usize].checked_sub(u32::from(count))?;
                         }
                     }
                 }
@@ -849,7 +908,7 @@ impl World {
                 .cells
                 .iter()
                 .enumerate()
-                .any(|(tile, c)| (c.kind != 0 || c.wire) && !w.progression.contains(tile));
+                .any(|(tile, c)| (c.kind != 0 || c.wire) && !w.map_contains(tile));
         }
         if data[0] >= 6 {
             let rest = &data[SAVE_WORDS..];
@@ -862,7 +921,7 @@ impl World {
             };
             if w.cells.iter().enumerate().any(|(tile, c)| {
                 (c.kind != 0 || c.wire)
-                    && (!w.progression.contains(tile)
+                    && (!w.map_contains(tile)
                         || w.progression.tier == 0
                             && matches!(
                                 c.kind,
@@ -874,12 +933,12 @@ impl World {
             }
             let rest = w.read_saved_devices(rest, true)?;
             let rest = if version >= RECIPE_SAVE_VERSION {
-                w.read_recipe_save(rest)?
+                w.read_recipe_save(rest, version)?
             } else {
                 rest
             };
-            let rest = if version == SAVE_VERSION {
-                w.read_ground_save(rest)?
+            let rest = if version >= GROUND_SAVE_VERSION {
+                w.read_ground_save(rest, version >= WAREHOUSE_SAVE_VERSION)?
             } else {
                 rest
             };
@@ -896,6 +955,20 @@ impl World {
                 let rest = w.read_saved_devices(&data[SAVE_WORDS..], false)?;
                 w.blueprints = blueprints::Library::read_save(rest)?;
             }
+        }
+        let stacks = w.progression.stack_limits();
+        for cell in w
+            .cells
+            .iter_mut()
+            .filter(|cell| matches!(cell.kind, DEPOT | FREIGHT_YARD))
+        {
+            if version == WAREHOUSE_SAVE_VERSION
+                && cell.kind == DEPOT
+                && cell.inv.iter().sum::<u32>() > LEGACY_WAREHOUSE_PIECES
+            {
+                return None;
+            }
+            cell.used_storage_slots = inventory::used_slots(&cell.inv, stacks);
         }
         Some(w)
     }

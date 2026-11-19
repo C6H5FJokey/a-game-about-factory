@@ -1,12 +1,12 @@
 import './style.css';
-import { bindMapInput, orthogonal } from './input';
-import { beltTerminal, detourLockedCrossing, dragTiles, findBeltPath, projectBeltPath } from './belt-route';
+import { bindMapInput } from './input';
+import { beltTerminal, detourLockedCrossing, dragTiles, findBeltPath, findCablePath, flowTo, projectBeltPath } from './belt-route';
 import { bindActionHold } from './action-hold';
-import { bindInventoryDrag, canSelectSlot, readSlot, sameSlot, type Selection, type Slot, type SlotRole } from './inventory-drag';
+import { bindInventoryDrag, canSelectSlot, readContainer, readSlot, sameSlot, type ContainerTarget, type Selection, type Slot, type SlotRole } from './inventory-drag';
 import { bindGroundMarkers, groundPiles, type GroundPile } from './ground-items';
 import {
   DIRECTION, Field, H, HEADER, HZ, Kind, Meta, Op, energyMj, legacyRecipes, selectedRecipe,
-  STATION, STATUS, STEP, STRIDE, Stage, W, SPEED_MODULE, at, cell, drillTool, held, inBounds, isTransport, plainBelt, progression, stackLimit, mw, time, unlocked, xy, CITY, CityField, cityValue, knownItems,
+  STATION, STATUS, STEP, STRIDE, Stage, W, SPEED_MODULE, at, cell, drillTool, held, inBounds, isTransport, plainBelt, progression, stackLimit, mw, time, unlocked, xy, CITY, CityField, cityValue,
   type Command, type Mode, type PreviewCell, type Tool,
 } from './model';
 import { Renderer } from './renderer';
@@ -14,7 +14,7 @@ import { campaignTask, contents, firstMachine, guideText, handbook, visibleGuide
 import { clearLegacyBlueprint, downloadSave, legacyBlueprint, persistSave, resumeSave, reviewScene } from './storage';
 import { actionIcon, itemIcon, machineIcon } from './icons';
 import { devicePower, designPower } from './power-readout';
-import { cargoAt, design, deviceAt, drillVariant, layoutRevision, preparedMaterials, readBlueprints, readDirectory, transportPorts, type Blueprint, type CargoTrack, type Material, type SlotData } from './sim-data';
+import { cargoAt, constructionAvailable, constructionSources, design, deviceAt, drillVariant, layoutRevision, preparedMaterials, readBlueprints, readDirectory, transportPorts, type Blueprint, type CargoTrack, type Material, type SlotData } from './sim-data';
 import { ERRORS, ITEM, MACHINE, itemDescription } from './catalog-text';
 import { content } from './generated-content';
 import { language, languages, onLanguageChange, setLanguage, t, textHtml } from './i18n';
@@ -25,6 +25,20 @@ function byId<T extends HTMLElement = HTMLElement>(id:string) { return document.
 const app=byId('app'), canvas=byId<HTMLCanvasElement>('world'), loading=byId('loading');
 const panel=byId('panel'), panelBody=byId('panel-body'), draft=byId('draft');
 const panelTabs=byId('panel-tabs');
+const referencePanel=byId('reference-panel'), referenceBody=byId('reference-body');
+const drawers={
+  factory:{panel,surface:byId('panel-surface')},
+  reference:{panel:referencePanel,surface:byId('reference-surface')},
+};
+type Drawer = keyof typeof drawers;
+type ReferencePage = 'task' | 'guide';
+type NavigationPage = Mode | ReferencePage;
+const drawerOpen:Record<Drawer,boolean>={factory:false,reference:false};
+const pageButtons=[...document.querySelectorAll<HTMLButtonElement>('.mode[data-mode]')];
+for (const button of document.querySelectorAll<HTMLButtonElement>('[data-nav-icon]')) {
+  button.insertAdjacentHTML('afterbegin',actionIcon(button.dataset.navIcon as Parameters<typeof actionIcon>[0]));
+}
+let activeDrawer:Drawer='reference', referencePage:ReferencePage='task';
 const dialog=byId<HTMLDialogElement>('archive-dialog'), saveFile=byId<HTMLInputElement>('save-file');
 const blueprintDialog=byId<HTMLDialogElement>('blueprint-dialog'), transferDialog=byId<HTMLDialogElement>('transfer-dialog');
 const dropDialog=byId<HTMLDialogElement>('drop-dialog');
@@ -33,15 +47,15 @@ const worker=new Worker(new URL('./worker.ts',import.meta.url),{type:'module'});
 let renderer:Renderer | undefined;
 let data=new Int32Array(HEADER+W*H*STRIDE);
 let limits=progression(data);
-let ready=false, mode:Mode='task', tool:Tool | undefined, selected=-1, focus=-1, inspectingTile=false;
-let guideOpen=false, guideReturnScroll=0;
+let ready=false, mode:Mode='view', tool:Tool | undefined, selected=-1, focus=-1, inspectingTile=false;
 let manualWork=false, handcraftExpanded:number|undefined;
 let gainUntil=0, gainTile=-1, recenter=true;
 const gain=byId('ore-gain'), mapHarvest=byId('map-harvest');
 const portraitDrawer=window.matchMedia('(max-width: 720px) and (orientation: portrait)');
+const landscapeDock=window.matchMedia('(pointer: coarse) and (orientation: landscape), (max-height: 520px) and (orientation: landscape)');
 let traced:[number,number][]=[];
-let anchors:number[]=[], direction=0, verticalFirst=false, lastSnapshot=0, lastPanelRender=0;
-let catalogTool=false, beltStarted=false, beltFacing=false, pathMessage='';
+let anchors:number[]=[], direction=0, lastSnapshot=0, lastPanelRender=0;
+let catalogTool=false, pathStarted=false, beltFacing=false, pathMessage='';
 let dragOrigin:{anchors:number[]; started:boolean; facing:boolean; direction:number; message:string} | undefined;
 let pausedPhase=0;
 let blueprints:Blueprint[]=[];
@@ -60,11 +74,15 @@ type Draft = { cells:PreviewCell[]; command?:Command; materials:Material[]; labe
 let ghost:Draft={cells:[],materials:[],label:'',conflict:false};
 
 let selectedItem:Selection | undefined;
+const INVENTORY_DOUBLE_CLICK_MS=350;
+type InventoryDevice=Pick<Slot,'tile'|'identity'>;
+type InventoryClick={slot:Slot; device:InventoryDevice; at:number; singleTransfer?:()=>void};
+let inventoryClick:InventoryClick | undefined;
 let dropItem=0, groundTile=-1;
 let dropDraft:{item:number;count:number}|undefined;
 const groundMarkers=bindGroundMarkers(byId('ground-markers'),openGroundMarker);
 let infoKey='', infoPinned=false, infoTile=-1;
-let balanceItems='';
+let balanceItems='\0';
 
 const languageSelect=byId<HTMLSelectElement>('language-select');
 languageSelect.replaceChildren(...languages.map(locale=>{
@@ -96,7 +114,7 @@ const amountBadge=(role:SlotRole,item:number,tile:number,track?:CargoTrack)=>(sl
 const slotData=(role:SlotRole,item:number,count:number,tile:number,lane=0)=>`data-slot="${role}" data-item="${item}" data-tile="${tile}" data-count="${count}" data-quick="${slotKey(role,item,tile,lane)}" aria-label="${textHtml(slotLabel(role,item,count))}"`;
 const itemSlot=(role:SlotRole,item:number,count:number,tile=-1,context='',slot?:SlotData,track?:CargoTrack)=>`
   <button type="button" class="item-slot" ${slotData(role,item,count,tile,(track?.location ?? 0)%2)}
-    ${slot?`data-identity="${deviceIdentity(tile)}" data-capacity="${slot.capacity}" data-put="${slot.canPut}" data-take="${slot.canTake}"`:''}
+    ${slot?`data-identity="${deviceIdentity(tile)}" data-stack="${slot.stack}" data-room="${slot.room}" data-put="${slot.canPut}" data-take="${slot.canTake}"`:''}
     ${track?`data-identity="${track.identity}" data-lane="${track.location%2}" data-cargo-id="${track.id}" data-take="true"`:''}
     ${role==='held'||slot?.canTake||track?`aria-pressed="${slotSelected(role,item,tile,track)}" data-selected-count="${amountBadge(role,item,tile,track) ?? ''}"`:''}
     ${context?`data-context="${textHtml(context)}"`:''}>${slotArt(item,count)}</button>`;
@@ -104,8 +122,8 @@ const slotRow=(title:string,slots:string)=>slots?`<div class="slot-row"><span cl
 
 const button=(name:string,action:string,primary=false,disabled=false)=>
   `<button type="button" class="button${primary?' primary':''}" data-action="${action}"${disabled?' disabled':''}>${textHtml(name)}</button>`;
-const iconButton=(name:string,action:string,icon:Parameters<typeof actionIcon>[0])=>
-  `<button type="button" class="button icon-button icon-button--${icon}" data-action="${action}" aria-label="${textHtml(name)}" title="${textHtml(name)}">${actionIcon(icon)}</button>`;
+const iconButton=(name:string,action:string,icon:Parameters<typeof actionIcon>[0],pressed?:boolean)=>
+  `<button type="button" class="button icon-button icon-button--${icon}" data-action="${action}" aria-label="${textHtml(name)}" title="${textHtml(name)}"${pressed===undefined?'':` aria-pressed="${pressed}"`}>${actionIcon(icon)}</button>`;
 const harvestMeter='<span class="harvest-meter" aria-hidden="true"><span class="harvest-fill"></span></span>';
 const holdButton=(label:string,attribute:string,target:number,disabled=false)=>
   `<button type="button" class="button harvest-button" ${attribute}="${target}"${disabled?' disabled':''}>${textHtml(label)}${harvestMeter}</button>`;
@@ -137,7 +155,7 @@ const hasHandcraftMaterial=(key:number)=>handRecipe(key)?.inputs.every(row=>held
 let handToken=0, handStarted=0;
 const handcraft=bindActionHold(app,{
   attribute:'data-handcraft', duration:key=>(handRecipe(key)?.ticks ?? HZ)*1000/(HZ*speed),
-  available:key=>holdAvailable() && mode==='view' && manualWork && handcraftExpanded===key && !guideOpen &&
+  available:key=>holdAvailable() && mode==='view' && manualWork && handcraftExpanded===key &&
     panel.dataset.expanded==='true' && hasHandcraftMaterial(key),
   begin:key=>key===0 || submit({op:Op.StartHandcraft,a:key,b:++handToken},
     ()=>{handStarted=data[Meta.Tick];},()=>{handcraft.stop();}),
@@ -154,8 +172,8 @@ const handcraft=bindActionHold(app,{
 
 bindInventoryDrag(app,byId('item-drag'),{
   selected:()=>selectedItem,
-  select:source=>{ selectedItem=source; closeInfo(); refresh(); },
-  drop:transferSlot,
+  select:source=>{ inventoryClick=undefined; selectedItem=source; closeInfo(); refresh(); },
+  drop:(source,target)=>target.role==='container'?transferToContainer(source,target):transferSlot(source,target),
   art:itemIcon,
 });
 const blueprintById=(id:number)=>blueprints.find(entry=>entry.id===id);
@@ -163,7 +181,7 @@ const activeBlueprint=()=>{
   const selection=stamping;
   return selection && blueprints.find(entry=>entry.id===selection.id && entry.version===selection.version);
 };
-const affordable=(materials:Material[])=>materials.every(({item,count})=>held(data,item)>=count);
+const affordable=(materials:Material[])=>materials.every(({item,count})=>constructionAvailable(data,item)>=count);
 const buildMaterials=(kind:number)=>preparedMaterials(kind,Boolean(data[Meta.Packed]));
 
 function say(message:string,error=false) {
@@ -177,42 +195,68 @@ function fail(message:string) {
   app.setAttribute('aria-busy','false');
 }
 
-function setPanel(open:boolean) {
-  panel.dataset.expanded=String(open);
-  byId('panel-toggle').setAttribute('aria-expanded',String(open));
-  byId('panel-surface').inert=!open;
-  if (!open && infoKey && panel.querySelector(`[data-quick="${infoKey}"]`)) closeInfo();
+function syncDrawers() {
+  if (portraitDrawer.matches && drawerOpen[activeDrawer]) {
+    drawerOpen[activeDrawer==='reference'?'factory':'reference']=false;
+  }
+  for (const name of ['factory','reference'] as const) {
+    const {panel,surface}=drawers[name];
+    const visible=drawerOpen[name];
+    panel.dataset.expanded=String(visible);
+    if (!visible && surface.contains(document.activeElement)) {
+      const targetDrawer=drawerOpen[activeDrawer]?activeDrawer:name;
+      const page=targetDrawer==='reference'?referencePage:operationPage();
+      pageButtons.find(button=>button.dataset.mode===page && button.getClientRects().length)
+        ?.focus({preventScroll:true});
+    }
+    surface.inert=!visible;
+  }
+  if (panel.dataset.expanded!=='true') {
+    inventoryClick=undefined;
+    if (infoKey && panel.querySelector(`[data-quick="${infoKey}"]`)) closeInfo();
+  }
+}
+
+function setDrawer(name:Drawer,open:boolean) {
+  drawerOpen[name]=open;
+  if (open) activeDrawer=name;
+  syncDrawers();
+}
+
+function setPanel(open:boolean) { setDrawer('factory',open); }
+
+function selectReference(next:ReferencePage) {
+  const switched=referencePage!==next;
+  referencePage=next;
+  setDrawer('reference',true);
+  refresh();
+  if (switched) referenceBody.scrollTop=0;
+}
+
+function resetDrawers() {
+  referencePage='task';
+  setPanel(false);
+  setDrawer('reference',!landscapeDock.matches);
+  referenceBody.scrollTop=0;
 }
 
 function operationPage():Mode {
   return inspectingTile && tool===undefined?'view':mode;
 }
 
-function closeGuide() {
-  guideOpen=false;
-  refresh();
-  panelBody.scrollTop=guideReturnScroll;
-}
-
-function selectMode(next:Mode,crafting=false) {
+function selectMode(next:NavigationPage,crafting?:boolean) {
+  if (next==='task' || next==='guide') { selectReference(next); return; }
   if (!modeAvailable(next)) return;
-  if (next==='guide') {
-    if (guideOpen) { closeGuide(); return; }
-    guideReturnScroll=panelBody.scrollTop;
-    guideOpen=true;
-    closeInfo();
-    setPanel(true);
-    refresh();
-    panelBody.scrollTop=0;
-    return;
+  if (next===operationPage() && crafting===undefined) {
+    setPanel(true); refresh(); return;
   }
-  if (guideOpen && next===operationPage() && !crafting) { closeGuide(); return; }
+  if (tool==='cut' && pending) return;
+  inventoryClick=undefined;
   dropDraft=undefined;
   groundTile=-1;
-  guideOpen=false;
   clearDraft();
   mode=next;
-  manualWork=crafting;
+  manualWork=crafting ?? false;
   inspectingTile=false;
   traced=[];
   setPanel(true);
@@ -220,9 +264,20 @@ function selectMode(next:Mode,crafting=false) {
   panelBody.scrollTop=0;
 }
 
+function togglePage(page:NavigationPage) {
+  const reference=page==='task' || page==='guide';
+  const drawer=reference?'reference':'factory';
+  if (drawerOpen[drawer] && page===(reference?referencePage:operationPage())) {
+    setDrawer(drawer,false);
+    refresh();
+  } else {
+    selectMode(page);
+  }
+}
+
 function clearDraft() {
   tool=undefined; anchors=[];
-  catalogTool=false; beltStarted=false; beltFacing=false; pathMessage=''; dragOrigin=undefined;
+  catalogTool=false; pathStarted=false; beltFacing=false; pathMessage=''; dragOrigin=undefined;
   transportPreview=undefined; confirmTransport=0;
   ghost={cells:[],materials:[],label:'',conflict:false};
   canvas.removeAttribute('data-tool');
@@ -238,13 +293,13 @@ function choose(next:Tool,anchor=-1,fromCatalog=false) {
   clearDraft();
   catalogTool=fromCatalog;
   if (fromCatalog) draft.dataset.catalog='true';
-  tool=next; anchors=anchor>=0?[anchor]:[]; direction=0; verticalFirst=false;
-  beltStarted=!fromCatalog && plainBelt(next) && anchor>=0;
+  tool=next; anchors=anchor>=0?[anchor]:[]; direction=0;
+  pathStarted=!fromCatalog && plainBelt(next) && anchor>=0;
   if (anchor>=0 && typeof tool==='number' && isTransport(tool) && isTransport(cell(data,anchor,Field.Kind))) {
     direction=cell(data,anchor,Field.Direction);
   }
   inspectingTile=false;
-  mode=!fromCatalog && (next==='wire' || next==='cut') ? 'power' : 'build';
+  mode='build';
   closeInfo(); canvas.dataset.tool='active';
   if (!fromCatalog) setPanel(false);
   updateDraft(); refresh();
@@ -308,6 +363,30 @@ function activeToolText() {
   return ({wire:'铺电缆',stamp:activeBlueprint()?.name ?? '蓝图',capture:'框选蓝图',remove:'拆除设备',cut:'拆除电缆','valley-line':'谷东班线','highland-line':'西岭班线'} as const)[tool ?? 'wire'];
 }
 
+function cableTool(value:Tool | undefined):value is 'wire'|'cut' { return value==='wire' || value==='cut'; }
+
+function cableDraft(result:Draft) {
+  const removing=tool==='cut';
+  result.cells=anchors.map((tile,index)=>{
+    const dir=flowTo(tile,anchors[index+1] ?? tile);
+    const [x,y]=xy(tile);
+    const invalid=!inBounds(limits,x,y) || removing && !cell(data,tile,Field.Wire);
+    result.conflict ||= invalid;
+    return {tile,dir:Math.max(0,dir),kind:0,wire:true,conflict:removing || invalid};
+  });
+  result.label=pathMessage?t(pathMessage):result.conflict?t('ui.invalidCablePath'):!anchors.length?t('ui.chooseCableStart'):
+    !pathStarted?t('ui.lockCableStart'):t('ui.cablePathLength',{count:anchors.length});
+  if (removing) {
+    if (pathStarted && !result.conflict && anchors.length) result.command={op:Op.RemoveCables,words:anchors};
+    return result;
+  }
+  const entry=design(Kind.Cable);
+  const newTiles=anchors.filter(tile=>!cell(data,tile,Field.Wire)).length;
+  if (entry && newTiles) result.materials=entry.materials.map(({item,count})=>({item,count:count*Math.ceil(newTiles/entry.span)}));
+  if (pathStarted && anchors.length) result.command={op:Op.Route,a:1,words:result.cells.flatMap(({tile,dir})=>[tile,dir])};
+  return result;
+}
+
 function createDraft():Draft {
   const result:Draft={cells:[],materials:[],label:'',conflict:false};
   const last=anchors.at(-1) ?? -1;
@@ -317,46 +396,21 @@ function createDraft():Draft {
     const sites=[CityField.Sender,CityField.Receiver].map(f=>cityValue(data,city,f));
     result.cells=sites.map(tile=>({tile,kind:Kind.Yard,dir:0,conflict:Boolean(occupiedKind(data,tile))}));
     result.conflict=result.cells.some(c=>c.conflict);
-    result.materials=buildMaterials(Kind.Yard); result.label='两端各建一座站场 · 每班 '+data[Meta.CrateSize]+' 件';
+    result.materials=buildMaterials(Kind.Yard); result.label=t('ui.freightBuild',{slots:data[Meta.CrateSlots]});
     result.command={op:Op.OpenLine,a:city}; return result;
   }
   if (plainBelt(tool)) {
     const {cells,terminal,conflict}=projectBeltPath(data,anchors,Number(tool),direction,beltFacing);
     result.cells=cells; result.conflict=conflict;
-    result.label=pathMessage || (conflict?'路径与端口或交叉条件不符':last<0?'点地图选起点':
-      !beltStarted?'再点虚影选定起点':terminal>=0?'再点接入设备确认':'可继续选点，再点终点确认');
+    result.label=pathMessage?t(pathMessage):(conflict?'路径与端口或交叉条件不符':last<0?'点地图选起点':
+      !pathStarted?'再点虚影选定起点':terminal>=0?'再点接入设备确认':'可继续选点，再点终点确认');
     if (!conflict) transportDraft(result);
     if (terminal>=0 || last>=0 && !cells.length) {
       result.cells.push({tile:last,kind:0,dir:0,conflict:result.conflict});
     }
     return result;
   }
-  if (tool==='wire') {
-    result.label=anchors.length?'可继续点转折或确认':'点起点，再点终点';
-    const tiles=orthogonal(anchors,verticalFirst);
-    const duplicate=new Set(tiles).size!==tiles.length;
-    const words:number[]=[];
-    let newTiles=0;
-    for (const [i,tile] of tiles.entries()) {
-      const next=tiles[i+1], prev=tiles[i-1];
-      let dir=direction;
-      const from=next===undefined ? prev : tile, to=next??tile;
-      if (from!==undefined && from!==to) {
-        const [x,y]=xy(from),[nx,ny]=xy(to);
-        const found=STEP.findIndex(([dx,dy])=>dx===nx-x && dy===ny-y);
-        if (found>=0) dir=found;
-      }
-      const conflict=duplicate;
-      result.cells.push({tile,dir,kind:0,wire:true,conflict});
-      result.conflict ||= conflict;
-      if (!cell(data,tile,Field.Wire)) newTiles++;
-      words.push(tile,dir);
-    }
-    const entry=design(Kind.Cable);
-    if (entry && newTiles) result.materials=entry.materials.map(({item,count})=>({item,count:count*Math.ceil(newTiles/entry.span)}));
-    if (words.length) result.command={op:Op.Route,a:1,words};
-    return result;
-  }
+  if (cableTool(tool)) return cableDraft(result);
   if (tool==='stamp') {
     const entry=activeBlueprint();
     if (!entry) { result.conflict=true; result.label='蓝图已删除或布局版本已变化'; return result; }
@@ -395,16 +449,16 @@ function createDraft():Draft {
     } else if (last>=0) result.cells=[{tile:last,kind:0,dir:0}];
     return result;
   }
-  if (tool==='remove' || tool==='cut') {
-    result.label='点选要拆除的格子';
+  if (tool==='remove') {
+    result.label='点设备预览拆除';
     if (last>=0) {
-      const wire=tool==='cut',anchor=wire?last:machineAnchor(data,last);
+      const anchor=machineAnchor(data,last);
       const kind=anchor>=0?cell(data,anchor,Field.Kind):0;
-      result.conflict=wire?!cell(data,last,Field.Wire):!kind || [Kind.Station,Kind.Yard].includes(kind);
-      const tiles=wire || anchor<0?[last]:[...footprint(anchor,kind,cell(data,anchor,Field.Direction))];
-      result.cells=tiles.map(tile=>({tile,kind:0,dir:0,wire,conflict:true}));
-      result.command={op:Op.Remove,a:last,b:Number(wire)};
-      result.label=`拆除 ${wire?'电缆':machineText(kind).name} · ${coordinates(last)}`;
+      result.conflict=!kind || kind===Kind.Station || kind===Kind.Yard;
+      const tiles=anchor<0?[last]:[...footprint(anchor,kind,cell(data,anchor,Field.Direction))];
+      result.cells=tiles.map(tile=>({tile,kind:0,dir:0,conflict:true}));
+      if (!result.conflict) result.command={op:Op.Remove,a:anchor};
+      result.label=result.conflict?'该格没有可拆除的设备':`${machineText(kind).name} · 再点预览确认拆除`;
     }
     return result;
   }
@@ -440,14 +494,21 @@ function updateDraft() {
   if (tool===undefined) return;
   ghost=createDraft();
   const cannotPay=!affordable(ghost.materials);
-  const info=ghost.conflict && !(typeof tool==='number' && drillTool(tool)) && tool!=='capture' && tool!=='stamp' && !(typeof tool==='number' && isTransport(tool))
+  const info=ghost.conflict && typeof tool==='number' && !drillTool(tool) && !isTransport(tool)
     ? '目标被占用、路线重叠或矿点不匹配' : ghost.label;
-  const cost=ghost.materials.map(({item,count})=>` <span class="inline-cost${held(data,item)<count?' missing':''}" aria-label="${textHtml(ITEM[item])} ${held(data,item)} / ${count}">${itemIcon(item)}${held(data,item)} / ${count}</span>`).join('');
+  const cost=ghost.materials.map(({item,count})=>{
+    const available=constructionAvailable(data,item);
+    return ` <span class="inline-cost${available<count?' missing':''}" aria-label="${textHtml(ITEM[item])} ${available} / ${count}">${itemIcon(item)}${available} / ${count}</span>`;
+  }).join('');
+  const sourceTile=ghost.command?.op===Op.Blueprint?ghost.command.a:ghost.cells[0]?.tile;
+  const sources=sourceTile===undefined || sourceTile<0?[]:constructionSources(data,ghost.materials,sourceTile);
+  const supply=sources.map(({tile,used})=>t('ui.constructionWarehouse',{
+    site:coordinates(tile), materials:used.map(({item,count})=>`${ITEM[item]} ×${count}`).join(' · '),
+  })).join(' / ');
   const canConfirm=Boolean(ghost.command || ghost.capture) && !ghost.conflict && !cannotPay && !pending;
   draft.hidden=false;
-  const html=`<div class="draft-text"><strong>${textHtml(activeToolText())}${cost}</strong> · ${textHtml(info)}${cannotPay?' · '+textHtml(t('ui.unavailable')):''}</div>`+
-    (tool==='wire' && anchors.length>1?button('换弯','turn-path'):'')+
-    ((tool==='wire' || plainBelt(tool)) && anchors.length>1?button('退一步','back-path'):'')+
+  const html=`<div class="draft-text"><strong>${textHtml(activeToolText())}${cost}</strong> · ${textHtml(info)}${cannotPay?' · '+textHtml(t('ui.unavailable')):''}${supply?`<br>${textHtml(supply)}`:''}</div>`+
+    ((cableTool(tool) || plainBelt(tool)) && anchors.length>1?button('退一步','back-path'):'')+
     (canRotateDraft()?iconButton('旋转','rotate-draft','rotate'):'')+
     button('取消','cancel-draft')+button(tool===Kind.SimpleMiner?'安放':tool==='capture'?'保存蓝图':'确认','confirm-draft',true,!canConfirm);
   if (draft.innerHTML!==html) draft.innerHTML=html;
@@ -483,20 +544,31 @@ function extendBelt(tile:number) {
   const prefix=beltTerminal(data,anchors)>=0?anchors.slice(0,-1):anchors;
   const suffix=findBeltPath(data,limits,prefix,tile,beltFacing?direction:undefined);
   if (!suffix) {
-    pathMessage='到该格没有可铺设的路线';
-    say(pathMessage,true);
+    pathMessage='ui.noBuildPath';
+    say(t(pathMessage),true);
     return false;
   }
   anchors=[...prefix,...suffix]; beltFacing=false;
   return true;
 }
 
-function tapBelt(tile:number) {
+function extendPath(tile:number) {
+  if (!cableTool(tool)) return extendBelt(tile);
+  const suffix=findCablePath(limits,anchors,tile,cellId=>tool==='wire' || !!cell(data,cellId,Field.Wire));
+  if (!suffix) {
+    pathMessage=tool==='cut'?'ui.noConnectedCablePath':'ui.noBuildPath';
+    return false;
+  }
+  anchors=[...anchors,...suffix];
+  return true;
+}
+
+function tapPath(tile:number) {
   const last=anchors.at(-1);
   pathMessage='';
-  if (!beltStarted) {
+  if (!pathStarted) {
     confirmTransport=0;
-    if (tile===last) beltStarted=true;
+    if (tile===last) pathStarted=tool!=='cut' || !!cell(data,tile,Field.Wire);
     else {
       anchors=[tile]; beltFacing=false;
       direction=isTransport(cell(data,tile,Field.Kind))?cell(data,tile,Field.Direction):0;
@@ -507,17 +579,17 @@ function tapBelt(tile:number) {
     confirmTransport=0;
     const index=anchors.lastIndexOf(tile);
     if (index>=0) { anchors=anchors.slice(0,index+1); beltFacing=false; }
-    else extendBelt(tile);
+    else extendPath(tile);
   }
   updateDraft();
 }
 
 function startPathDrag(tile:number) {
-  if (pending || !plainBelt(tool) && tool!=='wire') return false;
+  if (pending || !plainBelt(tool) && !cableTool(tool) || tool==='cut' && !cell(data,tile,Field.Wire)) return false;
   confirmTransport=0;
-  dragOrigin={anchors,started:beltStarted,facing:beltFacing,direction,message:pathMessage};
+  dragOrigin={anchors,started:pathStarted,facing:beltFacing,direction,message:pathMessage};
   pathMessage='';
-  if (tool==='wire' || !beltStarted || !anchors.length) {
+  if (!pathStarted || !anchors.length) {
     if (anchors.at(-1)!==tile) beltFacing=false;
     anchors=[tile];
   } else {
@@ -525,9 +597,9 @@ function startPathDrag(tile:number) {
     if (index>=0) {
       if (index!==anchors.length-1) beltFacing=false;
       anchors=anchors.slice(0,index+1);
-    } else if (!extendBelt(tile)) { dragOrigin=undefined; updateDraft(); return false; }
+    } else if (!extendPath(tile)) { dragOrigin=undefined; updateDraft(); return false; }
   }
-  beltStarted=true;
+  pathStarted=true;
   return true;
 }
 
@@ -539,9 +611,12 @@ function drawPath(from:number,to:number) {
       else anchors.push(tile);
     }
     beltFacing=false;
-  } else if (tool==='wire') {
-    const start=anchors[0];
-    anchors=start===to?[start]:[start,to];
+  } else if (cableTool(tool)) {
+    for (const tile of dragTiles(from,to)) {
+      const index=anchors.lastIndexOf(tile);
+      if (index>=0) anchors=anchors.slice(0,index+1);
+      else anchors.push(tile);
+    }
   }
   updateDraft();
 }
@@ -555,7 +630,7 @@ function finishPathDrag(keep:boolean) {
     if (detour) { anchors=detour; updateDraft(); }
     return;
   }
-  anchors=prior.anchors; beltStarted=prior.started; beltFacing=prior.facing;
+  anchors=prior.anchors; pathStarted=prior.started; beltFacing=prior.facing;
   direction=prior.direction; pathMessage=prior.message;
   updateDraft();
 }
@@ -574,17 +649,15 @@ function tap(tile:number) {
   }
   if (tool!==undefined) {
     if (pending) return;
-    if (plainBelt(tool)) { tapBelt(tile); return; }
-    if (typeof tool==='number' && overlapsDraft(tile) || catalogTool && tool==='wire' && anchors.at(-1)===tile) {
+    if (plainBelt(tool) || cableTool(tool)) { tapPath(tile); return; }
+    if (typeof tool==='number' && overlapsDraft(tile) || tool==='remove' && ghost.cells.some(part=>part.tile===tile)) {
       confirmDraft(); return;
     }
     confirmTransport=0;
     if (typeof tool==='number' && isTransport(tool) && !anchors.length && isTransport(cell(data,tile,Field.Kind))) {
       direction=cell(data,tile,Field.Direction);
     }
-    if (tool==='wire') {
-      if (anchors.at(-1)!==tile) anchors.push(tile);
-    } else if (tool==='capture') {
+    if (tool==='capture') {
       if (anchors.length===2) anchors=[];
       anchors.push(tile);
     } else anchors=[tile];
@@ -597,11 +670,12 @@ function tap(tile:number) {
     const cam=renderer.camera;
     cam.aim(cam.x,cam.y,19);
   }
-  guideOpen=false;
   selected=tile;
   manualWork=false;
   inspectingTile=!!cell(data,tile,Field.Kind) || (mode!=='build' && !!cell(data,tile,Field.Ore));
-  focus=-1; traced=[]; setPanel(true); refresh();
+  focus=-1; traced=[];
+  if (inspectingTile) setPanel(true);
+  refresh();
   inspectMap(tile,true);
 }
 
@@ -630,12 +704,13 @@ function confirmDraft() {
   }
   const keepCatalog=catalogTool, isStamp=tool==='stamp';
   confirmTransport=0;
-  if (submit(plan.command,()=>{
+  const finish=()=>{
     focus=-1;
     clearDraft(); mode=isStamp||keepCatalog?'build':'view'; inspectingTile=false;
     if (!keepCatalog) setPanel(true);
     refresh();
-  })) updateDraft();
+  };
+  if (plan.command && submit(plan.command,finish)) updateDraft();
 }
 
 function gatherAt(tile:number) {
@@ -662,8 +737,6 @@ function handcraftPanel() {
 }
 
 function inspectors() {
-  if (guideOpen) return ['',t('ui.guide'),(Object.keys(handbook) as (keyof typeof handbook)[]).filter(
-    id=>visibleGuide(data,id)).map(id=>guideEntry(id,true)).join(''),button(t('ui.guideReturn'),'close-guide')];
   if (mode==='view' && manualWork) {
     return [t('ui.operations'),t('ui.handcraft'),handcraftPanel()];
   }
@@ -676,10 +749,14 @@ function inspectors() {
     if (selected>=0 && cell(data,selected,Field.Ore)) return [t('ui.oreDeposit'),ITEM[cell(data,selected,Field.Ore)],actions(harvestButton(selected))];
   }
   if (mode==='orbit') return data[Meta.Stage]>=Stage.Valley?regionalPanel():orbitPanel();
-  if (mode==='power') return powerPanel();
   if (mode==='build') return buildPanel();
-  if (mode==='view') return ['操作','选择设备','<p class="lead">点地图上的设备、矿点或输送带。</p>'];
-  return missionPanel();
+  return ['操作','选择设备','<p class="lead">点地图上的设备、矿点或输送带。</p>'];
+}
+
+function referenceContent() {
+  if (referencePage==='task') return missionPanel();
+  return ['',t('ui.guide'),(Object.keys(handbook) as (keyof typeof handbook)[]).filter(
+    id=>visibleGuide(data,id)).map(id=>guideEntry(id,true)).join('')];
 }
 
 function pickGround(pile:GroundPile) {
@@ -702,7 +779,7 @@ function openGroundMarker(tiles:number[]) {
   if (piles.length===1) pickGround(piles[0]);
   if (piles.length<2) return;
   groundTile=tile;
-  mode='view'; inspectingTile=false; manualWork=false; guideOpen=false;
+  mode='view'; inspectingTile=false; manualWork=false;
   closeInfo(); setPanel(true); refresh();
 }
 
@@ -731,9 +808,8 @@ function missionPanel() {
   const legacy=legacyRecipes(data);
   const kitMachine=legacy?Kind.KitPress:Kind.Splicer;
   if (!data[Meta.KitTotal] && firstMachine(data,kitMachine)<0) {
-    const detail=legacy?'给套件装配机供应结构件，并把产物送进建造仓。':
-      '在拼接站选择标准设备套件，送入框架、电枢和结构件。用短带把套件交给建造仓。';
-    return ['曙港 · 扩建','做出第一套扩建设备',`<p class="lead">${detail}</p>`];
+    const detail=t(legacy?'tutorial.warehouseKitsLegacy':'tutorial.warehouseKits');
+    return ['曙港 · 扩建','做出第一套扩建设备',`<p class="lead">${textHtml(detail)}</p>`];
   }
   const blocks=data[Meta.RequiredBlocks], kits=data[Meta.RequiredKits], seconds=data[Meta.DeliverySeconds];
   const deliveries:[string,string][]=[];
@@ -775,11 +851,11 @@ function yardPanel():string[] {
   const sending=selected===v(CityField.Sender);
   return ['跨谷班线 · '+CITY[city],sending?'曙港发货站':CITY[city]+'到货站',
     '<p class="lead">'+(sending?'将物料带接入本站，或把手中物料装箱。':'把当地输送带接到出料箭头上，通向地面站或加工设备。')+'</p>'+
-    readings([['距下班发车',time(data[Meta.Headway]-data[Meta.Tick]%data[Meta.Headway])],['每班容量',data[Meta.CrateSize]+' 件'],['单程',time(data[Meta.Travel])],
-      ['在途或卸货',v(CityField.InTransit)+' 件'],['当地已接收',v(CityField.Delivered)+' 件']])+
+    readings([['距下班发车',time(data[Meta.Headway]-data[Meta.Tick]%data[Meta.Headway])],['单程',time(data[Meta.Travel])],
+      [t('ui.freightInTransit'),t('ui.containerUsage',{used:v(CityField.InTransitSlots),slots:data[Meta.CrateSlots]})],['当地已接收',v(CityField.Delivered)+' 件']])+
     readings(machineLayoutRows(selected,Kind.Yard))+machineSlots(selected,Kind.Yard)+
     actions(sending?'':button('预览末端短带','lastmile-'+city,true),
-      sending?button('查看到货站','receiver-'+city):iconButton('旋转出料口','rotate-device','rotate'),button('任务进度','mission'))];
+      sending?button('查看到货站','receiver-'+city):iconButton('旋转出料口','rotate-device','rotate'))];
 }
 
 function regionalPanel():string[] {
@@ -813,7 +889,7 @@ function regionalPanel():string[] {
       button('单站试照 · '+CITY[city],'window-'+city+'-0',city>0,trialBlocked || data[Meta.Modules]<=city),
       launch?button('增发镜阵','launch',true,trialBlocked || data[Meta.Mirrors]<3 || data[Meta.Fuel]<5):'')+
     machineSlots(site,Kind.Station)+reserves+readings([...machineLayoutRows(site,Kind.Station),...rows,...devicePower(data,site,Kind.Station)])+
-    actions(...cities.map((name,n)=>button(name+'地面站','site-'+n)),...(city>0?[button('发货站','sender-'+city),button('到货站','receiver-'+city)]:[]),button('查看电网','power-map'),button('任务进度','mission'))];
+    actions(...cities.map((name,n)=>button(name+'地面站','site-'+n)),...(city>0?[button('发货站','sender-'+city),button('到货站','receiver-'+city)]:[]),gridShortcut(site))];
 }
 
 function orbitPanel() {
@@ -826,37 +902,60 @@ function orbitPanel() {
   const nextButton=!inOrbit ? button(launch?'发射进行中':'发射试验镜','launch',true,!canLaunch||Boolean(launch)) :
     button(phase===4?'复演窗口':'开始试照','trial',true,phase===1||phase===2);
   return ['轨道控制台','曙港地面站',signal(label,phase===4)+
-    actions(nextButton,button('查看电网','power-map'))+
+    actions(nextButton,gridShortcut(STATION))+
     machineSlots(STATION,Kind.Station)+readings([...machineLayoutRows(STATION,Kind.Station),...devicePower(data,STATION,Kind.Station)])+
     readings([['主网当前可给',mw(dispatch)]])+
     (inOrbit?readings([['试照需求','24 秒 · 12 MW'],['运行耗料','1 枚 / 秒']]):'')+
     (phase===2?bar(24*HZ-data[Meta.WindowTicks],24*HZ):'')+
-    (inOrbit&&!data[Meta.FirstLight] ? `<p class="lead">为蓄电池留出充电时间。地面站的进料带须在整个窗口持续补给。</p>`:'')+
-    actions(button('任务进度','mission'))];
+    (inOrbit&&!data[Meta.FirstLight] ? `<p class="lead">为蓄电池留出充电时间。地面站的进料带须在整个窗口持续补给。</p>`:'')];
 }
 
-function powerPanel() {
-  const origin=selected>=0?selected:unlocked(data,Kind.Station)?STATION:firstMachine(data,Kind.Generator);
-  const group=origin>=0?cell(data,origin,Field.Grid):0;
+function isGenerator(kind:number) { return kind===Kind.Generator || kind===Kind.Solar; }
+
+function gridGenerator(origin:number) {
+  const group=cell(data,origin,Field.Grid);
+  return group?nearest(origin,i=>cell(data,i,Field.Grid)===group && isGenerator(cell(data,i,Field.Kind))):-1;
+}
+
+function gridShortcut(origin:number) {
+  return gridGenerator(origin)>=0?button('查看电网','power-map'):'';
+}
+
+function gridDetails(group:number) {
+  if (!group) return signal('未接入电网');
   const faults:number[]=[];
   for (let i=0;i<W*H && faults.length<5;i++) {
-    if (cell(data,i,Field.Status)===3 && (group===0 || cell(data,i,Field.Grid)===group)) faults.push(i);
+    if (cell(data,i,Field.Status)===3 && cell(data,i,Field.Grid)===group) faults.push(i);
   }
   const index=HEADER+W*H*STRIDE+group*4;
-  const rows:[string,string][]=[['当前发电',mw(data[index])],['请求负荷',mw(data[index+1])]];
-  if (unlocked(data,Kind.Battery)) rows.push(['电池可放电',mw(data[index+2])],['已储能',Math.floor(energyMj(data[index+3]))+' MJ']);
-  const details=group?readings(rows):signal('所选格未接通电缆',true);
-  return ['电网诊断',group?'供电区 '+group:'接线检查',details+
-    actions(iconButton('铺电缆','wire','cable'),unlocked(data,Kind.Battery)?button('预览蓄电池','battery'):'',button('拆电缆','cut'))+
+  const rows:[string,string][]=[['电网总发电',mw(data[index])],['请求负荷',mw(data[index+1])],
+    ['电池可放电',mw(data[index+2])],['电网储能',energyMj(data[index+3]).toFixed(1)+' MJ']];
+  return `<section class="grid-details"><h3>供电区 #${group}</h3>`+readings(rows)+
     (faults.length ? `<div class="fault-list">${faults.map(i=>`<button type="button" class="button" data-fault="${i}">${textHtml(MACHINE[cell(data,i,Field.Kind)].name)}<small>${coordinates(i)} · 缺电</small></button>`).join('')}</div>`:'')+
-    actions(unlocked(data,Kind.Station)?button('地面站','station'):'',button('任务进度','mission'))];
+    (unlocked(data,Kind.Battery)?actions(button('预览蓄电池','battery')):'')+'</section>';
 }
 
 function machineSlots(tile:number,kind:Kind) {
   if (tile<0 || cell(data,tile,Field.Kind)!==kind) return '';
   const slots=deviceAt(data,tile)?.slots ?? [];
-  return slotRow(kind===Kind.Yard?'装箱':'进料',slots.filter(slot=>slot.role==='input').map(slot=>machineSlot(tile,slot)).join(''))+
-    slotRow(kind===Kind.Yard?'到货':'出料',slots.filter(slot=>slot.role==='output').map(slot=>machineSlot(tile,slot)).join(''))+
+  const {inputSlots,outputSlots,storageSlots}=content.machines[kind];
+  const label=(title:string,items:SlotData[],capacity:number)=>{
+    const used=items.reduce((sum,slot)=>sum+Math.ceil(slot.count/slot.stack),0);
+    return textHtml(`${title} · ${t('ui.containerUsage',{used,slots:capacity})}`);
+  };
+  if (kind===Kind.Depot || kind===Kind.Yard) {
+    const warehouse=kind===Kind.Depot;
+    const canPut=warehouse || CITY.some((_,city)=>city>0 && cityValue(data,city,CityField.Sender)===tile);
+    const title=warehouse?t('ui.warehouseStock'):canPut?'装箱':'到货';
+    return `<div class="slot-row"${canPut?` data-container data-tile="${tile}" data-identity="${deviceIdentity(tile)}"`:''}>
+      <span class="slot-label">${label(title,slots,storageSlots)}</span>
+      <div class="slots">${slots.map(slot=>machineSlot(tile,slot)).join('')}
+        ${canPut?`<button type="button" class="container-put" data-container-put>${textHtml(t('ui.putInStorage'))}</button>`:''}
+      </div></div>`;
+  }
+  const input=slots.filter(slot=>slot.role==='input'), output=slots.filter(slot=>slot.role==='output');
+  return slotRow(label('进料',input,input.length*inputSlots),input.map(slot=>machineSlot(tile,slot)).join(''))+
+    slotRow(label('出料',output,outputSlots),output.map(slot=>machineSlot(tile,slot)).join(''))+
     slotRow('速度模块',slots.filter(slot=>slot.role==='module').map(slot=>machineSlot(tile,slot)).join(''));
 }
 
@@ -886,9 +985,8 @@ function transportRating(kind:number) {
   return entry?.interval?`${entry.interval<0?-entry.interval:content.contentHz/entry.interval*60} 件/分钟/通道 · ${entry.lanes} 条通道`:'';
 }
 
-function modeAvailable(next:Mode) {
-  if (next==='power') return unlocked(data,Kind.Cable);
-  return data[Meta.Stage]>=({task:Stage.Gather,view:Stage.Gather,build:Stage.Gather,guide:Stage.Gather,power:Stage.Power,orbit:Stage.Launch})[next];
+function modeAvailable(next:NavigationPage) {
+  return next!=='orbit' || data[Meta.Stage]>=Stage.Launch;
 }
 
 function deviceName(kind:number) {
@@ -953,7 +1051,9 @@ function devicePanel(kind:number) {
   const transport=isTransport(kind);
   if (transport) inventory.push(['额定吞吐',transportRating(kind)]);
   else inventory.push(...machineLayoutRows(selected,kind));
-  if (kind===Kind.Depot) inventory.push(['收发设置',cfg?`输出${ITEM[cfg]}`:'收货']);
+  if (kind===Kind.Depot) {
+    inventory.push([t('ui.warehouseMode'),cfg?t('ui.warehouseExport',{item:ITEM[cfg]}):t('ui.warehouseReceive')]);
+  }
   if (kind===Kind.Splitter) inventory.push(['分流',cfg?'直行优先':'轮流分配']);
   inventory.push(['方向',DIRECTION[cell(data,selected,Field.Direction)]]);
   if (actual?.grade) {
@@ -961,21 +1061,21 @@ function devicePanel(kind:number) {
     inventory.push(['矿种',ITEM[actual.ore]]);
     if (rating?.ticks) inventory.push(['采矿速率',`${(rating.amount*HZ/rating.ticks).toFixed(2)} 件/秒`]);
   }
-  if (unlocked(data,Kind.Cable) && (design(kind)?.demand || design(kind)?.generation || design(kind)?.batteryPower))
+  if (unlocked(data,Kind.Cable) && !isGenerator(kind) && (design(kind)?.demand || design(kind)?.batteryPower))
     inventory.push(['供电区',group?`#${group}`:'未连接']);
   const hasPriority=(actual?.grade ?? 0)>=2 || content.machines[kind]?.processing;
   if (hasPriority) inventory.push(['供电顺序',['普通','优先','最高'][cfg]]);
   return [`设备检查 · ${coordinates(selected)}`,deviceName(kind),`<div class="device-summary">${machineIcon(kind)}<p class="lead">${textHtml(device.detail)}</p></div>`+
     (transport?'':signal(STATUS[status],status>=2&&status<=4))+recipePicker(selected,kind)+machineCycle(selected,kind)+readings([...inventory,...devicePower(data,selected,kind)])+
     (transport?transportReadout(selected,kind,true):machineSlots(selected,kind))+
+    (isGenerator(kind)?gridDetails(group):'')+
     actions(cell(data,selected,Field.Ore)?harvestButton(selected):'',iconButton('旋转设备','rotate-device','rotate'),
       hasPriority && data[Meta.Stage]>=Stage.Expand?button('切换优先级','configure'):'',
       kind===Kind.Splitter?button('切换分流','configure'):'',
-      kind===Kind.Depot && data[Meta.Stage]>=Stage.Expand?button('切换收发','configure'):'',
+      kind===Kind.Depot && data[Meta.Stage]>=Stage.Expand?button(t('ui.warehouseConfigure'),'configure'):'',
       kind!==Kind.Generator && kind!==Kind.Battery && kind!==Kind.Solar ? button('沿货流定位','trace-cargo'):'',
-      unlocked(data,Kind.Cable)&&!transport?(group?button('查看电网','power-map'):iconButton('接线','wire','cable')):'',
-      iconButton('拆除设备','remove','hammer'))+
-    actions(button('任务进度','mission'))];
+      unlocked(data,Kind.Cable)&&!transport&&!group?iconButton('接线','wire','cable'):'',
+      iconButton('拆除设备','remove','hammer'))];
 }
 
 function canBuild(kind:number) {
@@ -1005,7 +1105,10 @@ function machineLayoutRows(tile:number,kind:number) {
 }
 
 function materialLines(requirements:Material[]) {
-  return requirements.map(({item,count})=>`<p class="requirement${held(data,item)<count?' missing':''}">${itemIcon(item)}<span>${textHtml(ITEM[item])} <b>${held(data,item)} / ${count}</b></span></p>`).join('');
+  return requirements.map(({item,count})=>{
+    const available=constructionAvailable(data,item);
+    return `<p class="requirement${available<count?' missing':''}">${itemIcon(item)}<span>${textHtml(ITEM[item])} <b>${available} / ${count}</b></span></p>`;
+  }).join('');
 }
 
 function buildCatalog() {
@@ -1039,9 +1142,11 @@ function buildPanel() {
     const lines=CITY.slice(1,visibleCities()).flatMap((name,index)=>{
       const city=index+1;
       return cell(data,cityValue(data,city,CityField.Sender),Field.Kind)===Kind.Yard?[]:
-        [button('开通'+name+'班线 · '+data[Meta.LineCost]+' 结构件','line-'+city,false,held(data,4)<data[Meta.LineCost])];
+        [button('开通'+name+'班线 · '+data[Meta.LineCost]+' 结构件','line-'+city,false,constructionAvailable(data,4)<data[Meta.LineCost])];
     });
-    return ['建造','建筑目录',buildCatalog()+(lines.length?actions(...lines):''),iconButton('拆除设备','remove-tool','hammer'),tabs];
+    const removeTools=(unlocked(data,Kind.Cable)?iconButton('拆除电缆','cut','cut-cable',tool==='cut'):'')+
+      iconButton('拆除设备','remove-tool','hammer',tool==='remove');
+    return ['建造','建筑目录',buildCatalog()+(lines.length?actions(...lines):''),removeTools,tabs];
   }
   if (!data[Meta.FirstLight]) return ['建造','蓝图','<p class="lead">完成曙港首照后开放蓝图。</p>','',tabs];
   const card=(entry:Blueprint)=>`<div class="blueprint-entry"><strong>${textHtml(entry.name)}</strong>`+
@@ -1083,12 +1188,9 @@ function positionInfo(rect:DOMRect,preferLeft=false) {
 
 function quickMachineStock(tile:number,kind:Kind) {
   if (isTransport(kind)) return transportReadout(tile,kind);
-  const items=ITEM.slice(1,SPEED_MODULE).flatMap((_,index)=>{
-    const item=index+1, count=contents(data,tile,item);
-    return count>0?[[item,count]]:[];
-  });
-  if (!items.length) return '<p>内部无物资</p>';
-  return `<div class="quick-stock">${items.map(([item,count])=>
+  const stock=new Map(deviceAt(data,tile)?.slots.filter(slot=>slot.count>0).map(slot=>[slot.item,slot.count]));
+  if (!stock.size) return `<p>${textHtml(t('ui.emptyMachineStock'))}</p>`;
+  return `<div class="quick-stock">${[...stock].map(([item,count])=>
     `<span>${itemIcon(item)}${textHtml(ITEM[item])} <b>${count}</b></span>`).join('')}</div>`;
 }
 
@@ -1126,25 +1228,26 @@ function syncInfo() {
       (requirements.length?materialLines(requirements):'<p>已制作，可直接安放。</p>');
   } else {
     const slot=readSlot(anchor);
-    const {role,item,count,canPut,canTake}=slot, cap=Number(anchor.dataset.capacity ?? -1);
-    const quantityHint='滚轮或长按后左右滑动可调数量。';
-    const take=count?'点选后点持有栏的同种槽位，也可直接拖过去。':'槽位为空。';
+    const {role,item,count,canPut,canTake}=slot;
+    const quantityHint=t('ui.adjustSlotQuantity');
+    const take=t(count?'ui.takeToBackpackHint':'ui.emptySlot');
     const help:Record<SlotRole,string>={
-      held:count?`点选或拖到对应的进料槽。${quantityHint}`:'',
-      input:(canPut?(cap>=0 && count>=cap?'进料槽已满。':`可从持有栏送入${ITEM[item]}。`):'由物流设备补给。')+
-        (canTake?(count?`可取回尚未投入生产的物资。${take}${quantityHint}`:take):''),
-      output:canTake?take+(count?quantityHint:''):'由物流设备取货。',
-      module:`安装后，生产周期缩短至原来的约 2/3。${count?take:'可从背包安装一件速度模块。'}`,
+      held:count?[t('ui.putFromBackpackHint'),quantityHint].join(' '):'',
+      input:[
+        canPut?t(anchor.dataset.room==='false'?'ui.noSlotRoom':'ui.feedFromBackpack',{item:ITEM[item]}):t('ui.automaticFeed'),
+        ...(canTake?(count?[take,quantityHint]:[take]):[]),
+      ].join(' '),
+      output:canTake?(count?[take,quantityHint].join(' '):take):t('ui.automaticPickup'),
+      module:[t('ui.moduleEffect'),count?take:t('ui.installFromBackpack')].join(' '),
       cargo:take,
       display:'',
     };
     const description=itemDescription(item);
-    const stack=stackLimit(data,item);
+    const stack=Number(anchor.dataset.stack ?? stackLimit(data,item));
     html=`<strong>${textHtml(ITEM[item])} <span class="quick-count">×${count}</span></strong>`+
       (description?`<p>${textHtml(description)}</p>`:'')+
       (anchor.dataset.context?`<p>${textHtml(anchor.dataset.context)}</p>`:'')+
-      (cap>=0?`<p>${textHtml(t('ui.capacity',{count,capacity:cap}))}</p>`:'')+
-      (role==='held'?`<p>${textHtml(t('ui.stackUsage',{used:Math.ceil(count/stack),limit:stack}))}</p>`:'')+
+      ((role==='held' || role==='input' || role==='output')?`<p>${textHtml(t('ui.stackUsage',{used:Math.ceil(count/stack),limit:stack}))}</p>`:'')+
       (help[role]?`<p>${textHtml(help[role])}</p>`:'')+
       (infoPinned && count>1 && sameSlot(selectedItem,slot)?button(selectedItem?.quantity?`数量 ${selectedItem.quantity}`:'指定数量','transfer-amount'):'')+
       (infoPinned && role==='held' && count>0?button(t('ui.dropTitle'),`drop-item-${item}`):'');
@@ -1163,7 +1266,9 @@ function revealInfo(anchor:HTMLButtonElement,pin=false) {
   infoTile=-1; infoKey=anchor.dataset.quick; infoPinned=pin; syncInfo();
 }
 
-function transferSlot(source:Selection,target:Slot) {
+type TransferTarget=Pick<Slot,'role'|'item'|'tile'|'identity'|'canPut'>;
+
+function transferSlot(source:Selection,target:TransferTarget) {
   const {role,item,tile,identity,canPut}=target;
   const insert=source.role==='held' && (role==='input' || role==='module') && canPut;
   const extract=role==='held' && (source.role==='input' || source.role==='output' || source.role==='module' || source.role==='cargo');
@@ -1180,6 +1285,10 @@ function transferSlot(source:Selection,target:Slot) {
   });
 }
 
+function transferToContainer(source:Selection,{tile,identity}:ContainerTarget) {
+  return transferSlot(source,{role:tile===-1?'held':'input',item:source.item,tile,identity,canPut:true});
+}
+
 function takeCargo(tile:number,lane:number,item:number,cargoId:number,identity:number) {
   return submit({op:Op.TakeCargo,a:tile,b:lane,c:item,words:[cargoId,identity]},()=>{
     selectedItem=undefined;
@@ -1187,12 +1296,62 @@ function takeCargo(tile:number,lane:number,item:number,cargoId:number,identity:n
   });
 }
 
-function activateSlot(anchor:HTMLButtonElement) {
+function openInventory() {
+  if (panel.dataset.expanded!=='true') return undefined;
+  const container=readContainer(panelBody.querySelector('[data-container]'));
+  if (container) return container;
+  const slot=panelBody.querySelector<HTMLButtonElement>('[data-slot="input"],[data-slot="output"],[data-slot="module"]');
+  return slot?readSlot(slot):undefined;
+}
+
+function sameDevice(slot:InventoryDevice | undefined,device:InventoryDevice) {
+  return slot?.tile===device.tile && slot.identity===device.identity;
+}
+
+function quickTransfer(slot:Slot) {
+  if (!slot.count) return;
+  if (slot.role==='held') {
+    const container=readContainer(panelBody.querySelector('[data-container]'));
+    if (container) {
+      if (transferToContainer(slot,container)) closeInfo();
+      return;
+    }
+    const target=panelBody.querySelector<HTMLButtonElement>(`button[data-item="${slot.item}"][data-put="true"]`);
+    if (target && transferSlot(slot,readSlot(target))) closeInfo();
+  } else if (slot.canTake && transferSlot(slot,{role:'held',item:slot.item,tile:-1,identity:0,canPut:false})) {
+    closeInfo();
+  }
+}
+
+function activateSlot(anchor:HTMLButtonElement,event:MouseEvent) {
   const slot=readSlot(anchor), {role,item,canPut}=slot;
-  const shouldTransfer=selectedItem && ((role==='held' && selectedItem.role!=='held' && selectedItem.item===item) ||
-    ((role==='input' || role==='module') && canPut && selectedItem.role==='held' && selectedItem.item===item));
-  if (shouldTransfer && selectedItem) transferSlot(selectedItem,slot);
-  else if (canSelectSlot(slot)) {
+  const device=event.detail>0 && role!=='cargo' && role!=='display'?openInventory():undefined;
+  const previous=inventoryClick;
+  inventoryClick=undefined;
+  if (device && previous && sameDevice(device,previous.device) && sameSlot(previous.slot,slot) &&
+      event.timeStamp-previous.at<=INVENTORY_DOUBLE_CLICK_MS) {
+    quickTransfer(slot);
+    return;
+  }
+  previous?.singleTransfer?.();
+  const click:InventoryClick | undefined=device?{slot,device,at:event.timeStamp}:undefined;
+  inventoryClick=click;
+  const source=selectedItem;
+  const shouldTransfer=source && ((role==='held' && source.role!=='held' && source.item===item) ||
+    ((role==='input' || role==='module') && canPut && source.role==='held' && source.item===item));
+  if (shouldTransfer && source) {
+    if (click) {
+      // A second click turns this into a full-stack transfer from the clicked slot.
+      click.singleTransfer=()=>{
+        if (selectedItem===source && sameDevice(openInventory(),click.device)) transferSlot(source,slot);
+      };
+      window.setTimeout(()=>{
+        if (inventoryClick!==click) return;
+        inventoryClick=undefined;
+        click.singleTransfer?.();
+      },INVENTORY_DOUBLE_CLICK_MS);
+    } else transferSlot(source,slot);
+  } else if (canSelectSlot(slot)) {
     selectedItem=sameSlot(selectedItem,slot)?undefined:slot;
   }
   revealInfo(anchor,true);
@@ -1206,23 +1365,34 @@ function fill(element:HTMLElement,html:string) {
   const active=document.activeElement as HTMLElement | null;
   const key=active && element.contains(active)?active.dataset.quick:undefined;
   const recipeFocused=active && element.contains(active) && active.closest('.handcraft-recipe');
+  const containerFocused=active && element.contains(active) && active.hasAttribute('data-container-put')?readContainer(active):undefined;
   element.innerHTML=html;
   if (key) element.querySelector<HTMLButtonElement>(`[data-quick="${key}"]`)?.focus({preventScroll:true});
   else if (recipeFocused) element.querySelector<HTMLButtonElement>('[data-action^="toggle-handcraft-"]')?.focus({preventScroll:true});
+  else if (containerFocused) {
+    const target=element.querySelector<HTMLButtonElement>('[data-container-put]');
+    if (sameDevice(readContainer(target),containerFocused)) target?.focus({preventScroll:true});
+  }
 }
 
 function renderBalances() {
-  const items=knownItems(data).filter(item=>item>0);
+  const items:number[]=[];
+  for (let item=1;item<content.items.length;item++) {
+    if (held(data,item)>0) items.push(item);
+  }
   const key=items.join(',');
   if (key!==balanceItems) {
-    fill(balances,items.length?items.map(item=>itemSlot('held',item,held(data,item))).join('')+
-      '<span class="capacity" id="backpack-capacity"></span>':'');
+    fill(balances,'<button type="button" class="capacity container-put" id="backpack-capacity" data-container-put></button>'+
+      items.map(item=>itemSlot('held',item,held(data,item))).join(''));
     balanceItems=key;
   }
   const capacity=byId('backpack-capacity');
   if (capacity) {
     const label=t('ui.backpack',{used:limits.used,slots:limits.slots});
-    if (capacity.textContent!==label) capacity.textContent=label;
+    if (capacity.textContent!==label) {
+      capacity.textContent=label;
+      capacity.setAttribute('aria-label',`${t('ui.putInBackpack')} · ${label}`);
+    }
     capacity.title=t('ui.individualStacks');
     capacity.dataset.full=String(limits.used>=limits.slots);
   }
@@ -1247,12 +1417,21 @@ function refresh(force=true) {
     byId('ground-drop-context').textContent=t('ui.dropHint',{item:ITEM[dropDraft.item],count:dropDraft.count});
   }
   byId('clock').textContent=time(data[Meta.Tick]);
-  const activePage=guideOpen?'guide':operationPage();
-  for (const nav of document.querySelectorAll<HTMLButtonElement>('.mode')) {
-    nav.hidden=!modeAvailable(nav.dataset.mode as Mode);
-    nav.setAttribute('aria-pressed',String(nav.dataset.mode===activePage));
+  const activePage=operationPage();
+  for (const nav of pageButtons) {
+    const page=nav.dataset.mode as NavigationPage;
+    const active=page==='task' || page==='guide'
+      ? drawerOpen.reference && page===referencePage
+      : drawerOpen.factory && page===activePage;
+    nav.hidden=!modeAvailable(page);
+    nav.setAttribute('aria-pressed',String(active));
   }
   if (force || (!panelPointer && performance.now()-lastPanelRender>220)) {
+    if (referencePanel.dataset.expanded==='true') {
+      const [tag,title,html]=referenceContent();
+      byId('reference-tag').textContent=tag; byId('reference-title').textContent=title;
+      fill(referenceBody,html);
+    }
     const [tag,title,html,tools='',tabs='']=inspectors();
     byId('panel-tag').textContent=tag; byId('panel-title').textContent=title;
     fill(byId('panel-tools'),tools+(activePage==='view'?button(t(manualWork?'ui.inspect':'ui.handcraft'),'manual-work'):''));
@@ -1274,8 +1453,11 @@ function station(city=0) {
 }
 
 function powerMap() {
-  if (!modeAvailable('power')) return;
-  clearDraft(); mode='power'; inspectingTile=false; traced=[]; setPanel(true); refresh();
+  const site=selected>=0 && cell(data,selected,Field.Kind)===Kind.Station?selected:STATION;
+  const tile=gridGenerator(site);
+  if (tile<0) return;
+  clearDraft(); mode='view'; manualWork=false; inspectingTile=false; selected=tile; focus=tile; traced=[];
+  renderer?.camera.focus(tile); setPanel(true); refresh(); panelBody.scrollTop=0;
 }
 
 function traceCargo() {
@@ -1341,8 +1523,9 @@ function home() {
   const cam=renderer?.camera;
   if (!cam) return;
   const [x,y]=xy(data[Meta.FirstOre]);
-  const zoom=data[Meta.Stage]<Stage.Expand?Math.min(cam.width/8,48):28;
-  const drawerOffset=portraitDrawer.matches && panel.dataset.expanded==='true'?panel.offsetHeight/2:0;
+  const zoom=Math.max(cam.minZoom,data[Meta.Stage]<Stage.Expand?Math.min(cam.width/8,48):28);
+  const openDrawer=panel.dataset.expanded==='true'?panel:referencePanel;
+  const drawerOffset=portraitDrawer.matches && openDrawer.dataset.expanded==='true'?openDrawer.offsetHeight/2:0;
   cam.aim(x+.5,y+.5+drawerOffset/zoom,zoom);
 }
 
@@ -1412,7 +1595,7 @@ byId<HTMLFormElement>('drop-form').addEventListener('submit',event=>{
   const count=byId<HTMLInputElement>('drop-quantity').valueAsNumber;
   if (!dropItem || !Number.isInteger(count) || count<1 || count>held(data,dropItem)) return;
   clearDraft(); closeInfo(); harvest.stop(); handcraft.stop();
-  selectedItem=undefined; groundTile=-1; guideOpen=false;
+  selectedItem=undefined; groundTile=-1;
   dropDraft={item:dropItem,count};
   dropDialog.close();
   setPanel(false);
@@ -1464,9 +1647,9 @@ function onAction(action:string) {
     if (verb==='lastmile') {
       cam?.focus(v(CityField.Receiver)+2);
       choose(Kind.Belt,v(CityField.Receiver));
-      if (tool===Kind.Belt && !pending) { beltStarted=true; extendBelt(v(CityField.Site)); updateDraft(); }
+      if (tool===Kind.Belt && !pending) { pathStarted=true; extendBelt(v(CityField.Site)); updateDraft(); }
     }
-    if (verb==='cable') {cam?.focus(v(CityField.Site)); choose('wire',v(CityField.Site));}
+    if (verb==='cable') {cam?.focus(v(CityField.Site)); buildTab='catalog'; choose('wire',v(CityField.Site),true);}
     if (verb==='window') submit({op:Op.Trial,a:city,b:Number(program)},()=>say('照明窗口已排定'));
     return;
   }
@@ -1484,22 +1667,20 @@ function onAction(action:string) {
     case 'close-drop-dialog': dropDialog.close(); return;
     case 'cancel-drop': dropDraft=undefined; refresh(); return;
     case 'home': home(); return;
-    case 'close-guide': closeGuide(); return;
     case 'manual-work': selectMode('view',!manualWork); return;
     case 'zoom-in': if (cam) cam.scale(cam.width/2,cam.height/2,1.25); return;
     case 'zoom-out': if (cam) cam.scale(cam.width/2,cam.height/2,.8); return;
-    case 'toggle-panel': setPanel(panel.dataset.expanded!=='true'); return;
     case 'speed': setSpeed(speed===0 || speed>=limits.speed?1:speed*2); return;
     case 'pause': setSpeed(speed?0:1); return;
-    case 'station': station(); return;
-    case 'mission': selectMode('task'); return;
     case 'power-map': powerMap(); return;
     case 'trace-cargo': traceCargo(); return;
     case 'battery': previewOnGrid(Kind.Battery); return;
-    case 'wire': choose('wire'); return;
-    case 'cut': choose('cut'); return;
-    case 'remove-tool': choose('remove'); return;
-    case 'remove': choose('remove',selected); return;
+    case 'wire': buildTab='catalog'; choose('wire',selected,true); return;
+    case 'cut': case 'remove-tool': case 'remove': {
+      const next=action==='cut'?'cut':'remove';
+      if (tool===next) { onAction('cancel-draft'); return; }
+      buildTab='catalog'; choose(next,selected,true); return;
+    }
     case 'capture': if (data[Meta.FirstLight]) { buildTab='blueprints'; choose('capture'); } return;
     case 'dismiss-blueprint': blueprintDialog.close(); return;
     case 'transfer-amount': {
@@ -1514,8 +1695,7 @@ function onAction(action:string) {
       transferDialog.showModal(); input.select(); return;
     }
     case 'dismiss-quantity': transferDialog.close(); return;
-    case 'turn-path': verticalFirst=!verticalFirst; updateDraft(); return;
-    case 'back-path': confirmTransport=0; anchors.pop(); beltFacing=false; pathMessage=''; updateDraft(); return;
+    case 'back-path': if (!pending) { confirmTransport=0; anchors.pop(); beltFacing=false; pathMessage=''; updateDraft(); } return;
     case 'rotate-draft': rotateDraft(); return;
     case 'confirm-draft': confirmDraft(); return;
     case 'cancel-draft': {
@@ -1530,8 +1710,8 @@ function onAction(action:string) {
     case 'configure': {
       if (selected<0) return;
       const kind=cell(data,selected,Field.Kind),cfg=cell(data,selected,Field.Config);
-      const choices=kind===Kind.Depot?knownItems(data).filter(item=>item<SPEED_MODULE):kind===Kind.Splitter?[0,1]:[0,1,2];
-      submit({op:Op.Configure,a:selected,b:choices[(choices.indexOf(cfg)+1)%choices.length]}); return;
+      const choices=kind===Kind.Depot?content.items.length:kind===Kind.Splitter?2:3;
+      submit({op:Op.Configure,a:selected,b:(cfg+1)%choices}); return;
     }
     case 'launch': submit({op:Op.Launch},()=>say('试验镜发射已启动')); return;
     case 'trial': submit({op:Op.Trial},()=>say('试照窗口已排定')); return;
@@ -1543,8 +1723,8 @@ function onAction(action:string) {
     case 'reset-confirm': byId('reset-warning').hidden=false; return;
     case 'reset': {
       clearDraft(); closeInfo(); selectedItem=undefined; dropDraft=undefined; groundTile=-1;
-      selected=-1; focus=-1; traced=[]; mode='task'; recenter=true;
-      guideOpen=false;
+      selected=-1; focus=-1; traced=[]; mode='view'; inspectingTile=false; manualWork=false; recenter=true;
+      resetDrawers();
       buildTab='catalog';
       worker.postMessage({type:'reset'}); worker.postMessage({type:'save'}); dialog.close(); return;
     }
@@ -1554,16 +1734,21 @@ function onAction(action:string) {
 document.addEventListener('click',event=>{
   const target=event.target as Element;
   const el=target.closest<HTMLButtonElement>('button');
+  if (!el?.dataset.slot) inventoryClick=undefined;
   if (target!==canvas && !el?.dataset.quick && !quickInfo.contains(target)) closeInfo();
   if (!el || el.disabled || !ready) return;
-  if (el.dataset.slot) activateSlot(el);
+  if (el.dataset.slot) activateSlot(el,event);
+  else if (el.hasAttribute('data-container-put')) {
+    const container=readContainer(el);
+    if (selectedItem && container) transferToContainer(selectedItem,container);
+  }
   else if (el.dataset.tool) {
     const next=el.dataset.tool==='wire'?'wire':Number(el.dataset.tool);
     if (tool===next) { onAction('cancel-draft'); return; }
     if (el.dataset.unavailable!=='true') choose(next,selected,true);
     revealInfo(el,true);
   }
-  else if (el.dataset.mode) selectMode(el.dataset.mode as Mode);
+  else if (el.dataset.mode) togglePage(el.dataset.mode as NavigationPage);
   else if (el.dataset.buildTab==='catalog' || el.dataset.buildTab==='blueprints') {
     if (el.dataset.buildTab!==buildTab && catalogTool && !pending) clearDraft();
     buildTab=el.dataset.buildTab; refresh();
@@ -1599,6 +1784,7 @@ document.addEventListener('focusout',event=>{
 });
 window.addEventListener('scroll',syncInfo,true);
 window.addEventListener('resize',syncInfo);
+portraitDrawer.addEventListener('change',()=>{ syncDrawers(); refresh(); });
 panelBody.addEventListener('pointerdown',()=>{panelPointer=true;});
 window.addEventListener('pointerup',()=>{panelPointer=false;});
 window.addEventListener('pointercancel',()=>{panelPointer=false;});
@@ -1607,7 +1793,11 @@ window.addEventListener('blur',()=>{panelPointer=false;});
 window.addEventListener('keydown',event=>{
   if (blueprintDialog.open || transferDialog.open || dropDialog.open) return;
   if (event.key==='Escape' && dropDraft) { dropDraft=undefined; refresh(); return; }
-  if (event.key==='Escape' && guideOpen && !dialog.open) { closeGuide(); return; }
+  if (event.key==='Escape' && referencePanel.dataset.expanded==='true' && !dialog.open &&
+      (referencePanel.contains(event.target as Node) || activeDrawer==='reference' && !panel.contains(event.target as Node))) {
+    setDrawer('reference',false); refresh(); return;
+  }
+  if (event.key==='Escape' && tool!==undefined && !dialog.open) { onAction('cancel-draft'); return; }
   if (event.key==='Escape' && (infoKey || infoTile>=0 || selectedItem)) {
     closeInfo(); selectedItem=undefined; refresh(); return;
   }
@@ -1615,8 +1805,9 @@ window.addEventListener('keydown',event=>{
   if (event.key==='Escape') { clearDraft(); refresh(); }
   if (event.key==='Enter' && tool!==undefined) { event.preventDefault(); confirmDraft(); }
   if (event.key.toLowerCase()==='r' && tool!==undefined) onAction('rotate-draft');
-  const key=Number(event.key);
-  if (key>=1 && key<=6) selectMode((['view','build','power','orbit','task','guide'] as const)[key-1]);
+  const shortcuts:Record<string,NavigationPage|undefined>={'1':'view','2':'build','4':'orbit','5':'task','6':'guide'};
+  const next=shortcuts[event.key];
+  if (next) selectMode(next);
   if (event.key===' ' || event.key==='p') { event.preventDefault(); setSpeed(speed?0:1); }
   const pan:Record<string,[number,number]>={ArrowLeft:[30,0],ArrowRight:[-30,0],ArrowUp:[0,30],ArrowDown:[0,-30]};
   if (pan[event.key]) { event.preventDefault(); renderer?.camera.pan(...pan[event.key]); }
@@ -1683,15 +1874,25 @@ worker.onmessage=event=>{
     const oldLimits=limits;
     limits=progression(data);
     const cam=renderer?.camera;
-    if (cam && (oldLimits.tier!==limits.tier || oldLimits.left!==limits.left)) {
+    const boundsChanged=oldLimits.left!==limits.left || oldLimits.top!==limits.top ||
+      oldLimits.right!==limits.right || oldLimits.bottom!==limits.bottom;
+    if (cam && (!ready || boundsChanged || oldLimits.tier!==limits.tier || oldLimits.regional!==limits.regional)) {
       cam.bounds=limits;
       cam.aim(cam.x,cam.y);
     }
+    if (!ready || recenter || boundsChanged || oldStage!==data[Meta.Stage]) refreshOreLabels();
     if (speed>limits.speed) setSpeed(limits.speed);
     if (ready && previous instanceof ArrayBuffer) worker.postMessage({type:'recycle',buffer:previous},[previous]);
     if (!ready) {
       ready=true; loading.hidden=true; app.setAttribute('aria-busy','false');
-      setPanel(data[Meta.Stage]<Stage.Expand || window.matchMedia('(min-width: 901px) and (min-height: 521px)').matches);
+      if (reviewScene==='miner' || reviewScene==='assembly') {
+        selected=firstMachine(data,reviewScene==='miner'?Kind.SimpleMiner:Kind.Bench);
+        if (selected>=0) mode='view';
+      } else if (reviewScene==='handcraft') {
+        mode='view'; manualWork=true;
+      }
+      if (selected>=0 || manualWork) setPanel(true);
+      else setDrawer('reference',!landscapeDock.matches && (data[Meta.Stage]<Stage.Expand || window.matchMedia('(min-width: 901px) and (min-height: 521px)').matches));
       refresh();
       if (legacyCleanup) worker.postMessage({type:'save'});
     } else {
@@ -1704,7 +1905,7 @@ worker.onmessage=event=>{
     }
     if (!wasComplete && data[Meta.Complete]) say('四条厂段已交付 · 谷东请求开通班线');
     if (oldStage!==Stage.Victory && data[Meta.Stage]===Stage.Victory) {
-      say('三城连续迎来第三轮日出'); mode='task'; selected=-1; setPanel(true);
+      say('三城连续迎来第三轮日出'); selectReference('task');
       if (cam) cam.aim(28,18,Math.min(cam.width/54,cam.height/38));
       refresh();
     }
@@ -1732,8 +1933,8 @@ worker.onmessage=event=>{
   }
   if (message.type==='restored') {
     clearDraft(); closeInfo(); selectedItem=undefined; dropDraft=undefined; groundTile=-1;
-    mode='task'; focus=-1; selected=-1; traced=[]; recenter=true;
-    guideOpen=false;
+    mode='view'; focus=-1; selected=-1; traced=[]; inspectingTile=false; manualWork=false; recenter=true;
+    resetDrawers();
     buildTab='catalog';
     worker.postMessage({type:'save'}); dialog.close(); say('已恢复存档'); return;
   }
@@ -1744,17 +1945,47 @@ worker.onmessage=event=>{
 };
 worker.onerror=()=>fail('模拟没有启动。请刷新页面后重试。');
 
-const mapLabels=[
-  { name:'铜矿', x:17.5, y:16.5, stage:Stage.Handwork, oreTile:at(17,17) },
-  { nameKey:'ui.coalDeposit', x:23.5, y:15.5, stage:Stage.Bench, oreTile:at(23,16) }, { name:'铁矿', x:22.5, y:18.5,stage:Stage.Expand },
-  { name:'硅矿', x:20.5, y:19.5,stage:Stage.Silica }, { name:'曙港城', x:44, y:5.2,stage:Stage.Launch },
-  { name:'谷东城', x:48, y:22.1,stage:Stage.Valley }, { name:'西岭城', x:8, y:22.1,stage:Stage.Highland },
-].map(label=>{
-  const element=document.createElement('span'); element.className='map-label';
-  if (label.nameKey) element.dataset.i18n=label.nameKey;
-  else element.textContent=label.name ?? '';
-  byId('map-labels').append(element); return {...label,element};
+function mapLabel() {
+  const element=document.createElement('span');
+  element.className='map-label';
+  element.hidden=true;
+  byId('map-labels').append(element);
+  return element;
+}
+
+const cityLabels=[
+  { x:44, y:5.2, stage:Stage.Launch }, { x:48, y:22.1, stage:Stage.Valley }, { x:8, y:22.1, stage:Stage.Highland },
+].map((label,city)=>{
+  const element=mapLabel();
+  element.textContent=CITY[city]+'城';
+  return {...label,city,element};
 });
+let oreLabels:{x:number;y:number;element:HTMLSpanElement}[]=[];
+
+function refreshOreLabels() {
+  for (const label of oreLabels) label.element.remove();
+  oreLabels=[];
+  const first=data[Meta.FirstOre], [startX,startY]=xy(first);
+  const closest=new Map<number,{x:number;y:number;distance:number}>();
+  for (let y=limits.top;y<limits.bottom;y++) for (let x=limits.left;x<limits.right;x++) {
+    const tile=at(x,y), ore=cell(data,tile,Field.Ore);
+    if (!ore || tile===first) continue;
+    const distance=(x-startX)**2+(y-startY)**2;
+    if (distance<(closest.get(ore)?.distance ?? Infinity)) closest.set(ore,{x:x+.5,y:y-.35,distance});
+  }
+  for (const [ore,{x,y}] of closest) {
+    const element=mapLabel();
+    const nameKey=ore===3?'ui.coalDeposit':content.items[ore]?.nameKey;
+    if (nameKey) { element.dataset.i18n=nameKey; element.textContent=t(nameKey); }
+    oreLabels.push({x,y,element});
+  }
+}
+
+function positionMapLabel(cam:Renderer['camera'],element:HTMLSpanElement,x:number,y:number,visible:boolean) {
+  const [sx,sy]=cam.toScreen(x,y);
+  element.hidden=!visible || sx<=24 || sy<=(sx<157?88:41) || sx>=cam.width-26 || sy>=cam.height-42;
+  if (!element.hidden) element.style.transform=`translate(${Math.round(sx)}px,${Math.round(sy)}px) translate(-50%,-100%)`;
+}
 
 function draw(now:number) {
   harvest.tick(now);
@@ -1772,18 +2003,15 @@ function draw(now:number) {
         const [gx,gy]=xy(gainTile), [px,py]=cam.toScreen(gx+.5,gy);
         gain.style.transform=`translate(${px}px,${py-18+(gainUntil-now)/65}px) translateX(-50%)`;
       }
-      renderer.render({data,mode,preview:ghost.cells,selected,focus,trace:traced,now,tick:data[Meta.Tick]+animationPhase(now),
+      renderer.render({data,mode,preview:ghost.cells,cableEditing:cableTool(tool),selected,focus,trace:traced,now,tick:data[Meta.Tick]+animationPhase(now),
         chipTile:gainTile,chip:gain.hidden?0:(gainUntil-now)/750});
       groundMarkers.render(data,cam,tool===undefined && !dropDraft);
     }
-    for (const {name,x,y,stage,element,oreTile} of mapLabels) {
-      const [sx,sy]=renderer.camera.toScreen(x,y);
-      const visible=ready && data[Meta.Stage]>=stage && (oreTile===undefined || !!cell(data,oreTile,Field.Ore))
-        && sx>24&&sy>(sx<157?88:41)&&sx<renderer.camera.width-26&&sy<renderer.camera.height-42;
-      element.hidden=!visible;
-      if (visible) element.style.transform=`translate(${Math.round(sx)}px,${Math.round(sy)}px) translate(-50%,-100%)`;
-      const city=CITY.findIndex(city=>name===city+'城');
-      element.dataset.bright=city>=0 && (data[Meta.LitMask] & (1<<city))?'yes':'no';
+    const cam=renderer.camera;
+    for (const {x,y,element} of oreLabels) positionMapLabel(cam,element,x,y,ready);
+    for (const {x,y,stage,city,element} of cityLabels) {
+      positionMapLabel(cam,element,x,y,ready && data[Meta.Stage]>=stage && inBounds(limits,x,y));
+      element.dataset.bright=(data[Meta.LitMask] & (1<<city))?'yes':'no';
     }
   }
   requestAnimationFrame(draw);
@@ -1802,7 +2030,7 @@ try {
     rotateAt,
     startHarvest:(tile,pointer)=>harvest.start(tile,undefined,pointer),
     stopHarvest:harvest.stop,
-    canDragRoute:()=>!pending && (plainBelt(tool) || tool==='wire'),
+    canDragRoute:()=>!pending && (plainBelt(tool) || cableTool(tool)),
     startRoute:startPathDrag,
     route:drawPath,
     finishRoute:finishPathDrag,

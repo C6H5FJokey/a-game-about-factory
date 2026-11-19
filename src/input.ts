@@ -1,4 +1,3 @@
-import { at, xy } from './model';
 import type { Camera } from './renderer';
 
 type Point = {x:number; y:number};
@@ -125,19 +124,4 @@ export function bindMapInput(canvas:HTMLCanvasElement,camera:Camera, actions:{
     const {x,y}=local(event);
     camera.scale(x,y,Math.exp(-event.deltaY*(event.deltaMode===1?.028:.0015)));
   },{passive:false});
-}
-
-export function orthogonal(anchors:number[],verticalFirst:boolean) {
-  if (!anchors.length) return [];
-  const route=[anchors[0]];
-  let [x,y]=xy(anchors[0]);
-  for (const anchor of anchors.slice(1)) {
-    const [targetX,targetY]=xy(anchor);
-    const dx=Math.sign(targetX-x),dy=Math.sign(targetY-y);
-    for (const axis of verticalFirst ? ['y','x'] : ['x','y']) {
-      if (axis==='x') while (x!==targetX) { x+=dx; route.push(at(x,y)); }
-      else while (y!==targetY) { y+=dy; route.push(at(x,y)); }
-    }
-  }
-  return route;
 }

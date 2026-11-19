@@ -13,14 +13,24 @@ struct Replacement {
 struct Plan {
     replacements: Vec<Replacement>,
     cost: [u32; ITEMS],
+    anchor: usize,
 }
 
-impl Plan {
-    fn affordable(&self, world: &World) -> bool {
-        self.cost
-            .iter()
-            .zip(world.stock)
-            .all(|(&cost, stock)| cost <= stock)
+struct Payment {
+    backpack: [u32; ITEMS],
+    withdrawals: Vec<(usize, u8, u32)>,
+}
+
+impl Payment {
+    fn withdraw(self, world: &mut World) {
+        for (tile, item, amount) in self.withdrawals {
+            let warehouse = &mut world.cells[tile];
+            warehouse.set_material(
+                item,
+                warehouse.inv[item as usize] - amount,
+                world.progression.stack_limit(item),
+            );
+        }
     }
 }
 
@@ -29,6 +39,63 @@ fn has_output(kind: u8, dir: u8, flow: u8) -> bool {
 }
 
 impl World {
+    // Use the backpack first, then nearby warehouses with tile order as a tie-break.
+    fn construction_payment(&self, anchor: usize, mut cost: [u32; ITEMS]) -> Option<Payment> {
+        let mut payment = Payment {
+            backpack: self.stock,
+            withdrawals: Vec::new(),
+        };
+        for (amount, held) in cost.iter_mut().zip(&mut payment.backpack) {
+            let taken = (*amount).min(*held);
+            *amount -= taken;
+            *held -= taken;
+        }
+        if cost.iter().all(|&amount| amount == 0) {
+            return Some(payment);
+        }
+        let mut warehouses = self
+            .machines
+            .iter()
+            .copied()
+            .filter(|&tile| {
+                let cell = &self.cells[tile];
+                cell.kind == DEPOT && cell.used_storage_slots > 0
+            })
+            .collect::<Vec<_>>();
+        warehouses.sort_unstable_by_key(|&tile| {
+            (
+                (tile % W).abs_diff(anchor % W) + (tile / W).abs_diff(anchor / W),
+                tile,
+            )
+        });
+        for tile in warehouses {
+            for (item, amount) in cost.iter_mut().enumerate().skip(1) {
+                let taken = (*amount).min(self.cells[tile].inv[item]);
+                if taken > 0 {
+                    *amount -= taken;
+                    payment.withdrawals.push((tile, item as u8, taken));
+                }
+            }
+            if cost.iter().all(|&amount| amount == 0) {
+                return Some(payment);
+            }
+        }
+        None
+    }
+
+    pub fn spend_construction(&mut self, anchor: usize, materials: &[(u8, u32)]) -> bool {
+        let mut cost = [0; ITEMS];
+        for &(item, amount) in materials {
+            cost[item as usize] += amount;
+        }
+        let Some(payment) = self.construction_payment(anchor, cost) else {
+            return false;
+        };
+        self.stock = payment.backpack;
+        payment.withdraw(self);
+        true
+    }
+
     fn transport_plan(&mut self, words: &[i32]) -> Result<Plan, (i32, i32)> {
         if words.is_empty() || words.len() % 3 != 0 || words.len() / 3 > N {
             return Err((-1, -1));
@@ -53,7 +120,7 @@ impl World {
             if !self.unlocked(kind) {
                 return Err((-6, tile as i32));
             }
-            if !self.progression.contains(tile) || !permitted(kind, tile) {
+            if !self.map_contains(tile) || !permitted(kind, tile, self.progression.regional_map) {
                 return Err((-3, tile as i32));
             }
             if self.footprints.owner(tile).is_some() && !is_belt(old.kind) {
@@ -147,7 +214,11 @@ impl World {
                 }
             }
         }
-        Ok(Plan { replacements, cost })
+        Ok(Plan {
+            replacements,
+            cost,
+            anchor: words[0] as usize,
+        })
     }
 
     pub fn build_transports(&mut self, revision: i32, words: &[i32]) -> i32 {
@@ -158,15 +229,11 @@ impl World {
             Ok(plan) => plan,
             Err((error, _)) => return error,
         };
-        if !plan.affordable(self) {
+        let Some(payment) = self.construction_payment(plan.anchor, plan.cost) else {
             return -4;
-        }
+        };
         if plan.replacements.is_empty() {
             return 1;
-        }
-        let mut stock = self.stock;
-        for (held, cost) in stock.iter_mut().zip(plan.cost) {
-            *held -= cost;
         }
         let removals = plan
             .replacements
@@ -177,9 +244,10 @@ impl World {
             })
             .map(|part| (part.tile, [0; ITEMS]))
             .collect::<Vec<_>>();
-        if let Err(error) = self.settle_removals(stock, removals) {
+        if let Err(error) = self.settle_removals(payment.backpack, removals) {
             return error;
         }
+        payment.withdraw(self);
         for part in plan.replacements {
             let old = &self.cells[part.tile];
             let same_kind = old.kind == part.kind;
@@ -224,7 +292,11 @@ pub extern "C" fn preview_transports(len: usize) -> usize {
         match result {
             Ok(plan) => {
                 output.extend([
-                    if plan.affordable(world) { 1 } else { -4 },
+                    if world.construction_payment(plan.anchor, plan.cost).is_some() {
+                        1
+                    } else {
+                        -4
+                    },
                     -1,
                     world.layout_revision,
                 ]);

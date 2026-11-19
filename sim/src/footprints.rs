@@ -75,11 +75,11 @@ impl World {
         ignore: Option<usize>,
     ) -> Result<(), i32> {
         let tiles = covered(anchor, kind, dir).ok_or(-3)?;
-        if !permitted(kind, anchor) {
+        if !permitted(kind, anchor, self.progression.regional_map) {
             return Err(-3);
         }
         for tile in tiles {
-            if !self.progression.contains(tile) || tile != anchor && STATIONS.contains(&tile) {
+            if !self.map_contains(tile) || tile != anchor && STATIONS.contains(&tile) {
                 return Err(-3);
             }
             if self
@@ -94,6 +94,7 @@ impl World {
     }
 
     pub fn rebuild_footprints(&mut self) -> Option<()> {
+        let bounds = self.progression.bounds(self.stage);
         let footprints = &mut self.footprints;
         footprints.space.fill(Space::default());
         footprints.outlets.clear();
@@ -101,7 +102,7 @@ impl World {
             let kind = cell.kind;
             for tile in covered(anchor, kind, cell.dir)? {
                 if footprints.space[tile].owner != 0
-                    || !self.progression.contains(tile)
+                    || !crate::progression::contains_tile(bounds, tile)
                     || tile != anchor && STATIONS.contains(&tile)
                 {
                     return None;

@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use crate::belts::{node, Belts, Cargo, NODES, RETIRED_SOURCE};
 use crate::catalog::*;
 use crate::saved_ticks;
+use crate::transport::BELT_ARRIVAL_TICKS;
 use crate::world::World;
 
 impl World {
@@ -35,6 +36,20 @@ impl World {
                 cargo.since as i32,
                 cargo.ready as i32,
                 cargo.blocked as i32,
+            ]);
+        }
+        // Nonnegative locations are live belt cargo; negative locations tag
+        // transient arrivals without changing projection or save offsets.
+        for arrival in &self.belt_arrivals {
+            out.extend([
+                -1 - i32::from(arrival.from),
+                arrival.id,
+                arrival.item.into(),
+                arrival.target.into(),
+                arrival.flow.into(),
+                arrival.tick as i32,
+                arrival.tick.saturating_add(BELT_ARRIVAL_TICKS) as i32,
+                arrival.crossing as i32,
             ]);
         }
         out.push(start as i32);

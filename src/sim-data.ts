@@ -1,32 +1,79 @@
-import { Field, HEADER, H, Kind, STRIDE, W, cell, transportStart, type Part } from './model';
+import { Field, HEADER, H, Kind, STRIDE, W, cell, held, transportStart, xy, type Part } from './model';
 
 export type Material = { item:number; count:number };
-export type SlotData = { item:number; role:'input'|'output'|'module'; count:number; capacity:number; canPut:boolean; canTake:boolean };
+export type SlotData = { item:number; role:'input'|'output'|'module'; count:number; stack:number; room:boolean; canPut:boolean; canTake:boolean };
 type Device = { identity:number; grade:number; ore:number; demand:number; used:number; generated:number; charged:number; discharged:number; slots:SlotData[] };
 
 const devices = new WeakMap<Int32Array, Map<number,number|Device>>();
 
-export function deviceAt(data:Int32Array,tile:number) {
+function deviceIndex(data:Int32Array) {
   let index=devices.get(data);
   if (!index) {
     index=new Map();
     devices.set(data,index);
     const end=data.length-1;
     const start=data[end];
-    if (start<HEADER+W*H*STRIDE+4 || start>end) return undefined;
-    for (let i=start;i<end;i+=10+5*data[i+9]) index.set(data[i],i);
+    if (start>=HEADER+W*H*STRIDE+4 && start<=end) {
+      for (let i=start;i<end;i+=10+5*data[i+9]) index.set(data[i],i);
+    }
   }
+  return index;
+}
+
+export function deviceAt(data:Int32Array,tile:number) {
+  const index=deviceIndex(data);
   const record=index.get(tile);
   if (typeof record!=='number') return record;
   const [,identity,grade,ore,demand,used,generated,charged,discharged,count]=data.subarray(record,record+10);
   const slots:SlotData[]=[];
   for (let j=0,i=record+10;j<count;j++,i+=5) {
-    const [item,role,count,capacity,manual]=data.subarray(i,i+5);
-    slots.push({item,role:role===3?'module':role===1?'input':'output',count,capacity,canPut:Boolean(manual&1),canTake:Boolean(manual&2)});
+    const [item,role,count,stack,permissions]=data.subarray(i,i+5);
+    slots.push({item,role:role===3?'module':role===1?'input':'output',count,stack,room:Boolean(permissions&4),canPut:Boolean(permissions&1),canTake:Boolean(permissions&2)});
   }
   const device={identity,grade,ore,demand,used,generated,charged,discharged,slots};
   index.set(tile,device);
   return device;
+}
+
+type Warehouse = {tile:number; stock:Map<number,number>};
+const warehouseContents = new WeakMap<Int32Array,Warehouse[]>();
+
+function warehouses(data:Int32Array) {
+  let result=warehouseContents.get(data);
+  if (!result) {
+    result=[];
+    for (const tile of deviceIndex(data).keys()) {
+      if (cell(data,tile,Field.Kind)!==Kind.Depot) continue;
+      const stock=new Map(deviceAt(data,tile)?.slots.filter(slot=>slot.count>0).map(slot=>[slot.item,slot.count]));
+      if (stock.size) result.push({tile,stock});
+    }
+    warehouseContents.set(data,result);
+  }
+  return result;
+}
+
+export function constructionAvailable(data:Int32Array,item:number) {
+  return warehouses(data).reduce((total,warehouse)=>total+(warehouse.stock.get(item) ?? 0),held(data,item));
+}
+
+export function constructionSources(data:Int32Array,materials:Material[],anchor:number) {
+  const remaining=materials.map(({item,count})=>({item,count:Math.max(0,count-held(data,item))}));
+  if (!remaining.some(({count})=>count>0)) return [];
+  const [x,y]=xy(anchor);
+  const distance=(tile:number)=>{
+    const [tx,ty]=xy(tile);
+    return Math.abs(tx-x)+Math.abs(ty-y);
+  };
+  return [...warehouses(data)].sort((a,b)=>distance(a.tile)-distance(b.tile)||a.tile-b.tile).flatMap(({tile,stock})=>{
+    const used:Material[]=[];
+    for (const row of remaining) {
+      const amount=Math.min(row.count,stock.get(row.item) ?? 0);
+      if (!amount) continue;
+      row.count-=amount;
+      used.push({item:row.item,count:amount});
+    }
+    return used.length?[{tile,used}]:[];
+  });
 }
 
 type DirectoryEntry = {
@@ -61,27 +108,32 @@ export function transportPorts(kind:number,dir:number,lane:number) {
   return {incoming:rotate(input),outgoing:rotate(output)};
 }
 
-const recordWords=8;
-const projections=new WeakMap<Int32Array,Map<number,number>>();
+export const TRANSPORT_RECORD_WORDS=8;
+const projections=new WeakMap<Int32Array,{cargo:Map<number,number>;arrivals:Int32Array}>();
 export type CargoTrack = { location:number; id:number; item:number; identity:number; from:number; since:number; until:number; blocked:boolean };
 
 export function layoutRevision(data:Int32Array) { return data[transportStart(data)] ?? 0; }
 
-export function cargoIndex(data:Int32Array) {
-  let index=projections.get(data);
-  if (!index) {
-    index=new Map();
-    const start=transportStart(data), end=data[data.length-1]-1;
-    if (start>=0) for (let i=start+1;i<end;i+=recordWords) index.set(data[i],i);
-    projections.set(data,index);
-  }
-  return index;
+function transportProjection(data:Int32Array) {
+  const cached=projections.get(data);
+  if (cached) return cached;
+  const cargo=new Map<number,number>();
+  const start=transportStart(data), end=data[data.length-1]-1;
+  // Visual arrivals follow the real cargo records with a negative source tag.
+  let i=start>=0?start+1:end;
+  for (;i<end && data[i]>=0;i+=TRANSPORT_RECORD_WORDS) cargo.set(data[i],i);
+  const projection={cargo,arrivals:data.subarray(i,end)};
+  projections.set(data,projection);
+  return projection;
 }
+
+export function cargoIndex(data:Int32Array) { return transportProjection(data).cargo; }
+export function beltArrivalData(data:Int32Array) { return transportProjection(data).arrivals; }
 
 export function cargoAt(data:Int32Array,tile:number,lane:number):CargoTrack | undefined {
   const index=cargoIndex(data).get(tile*2+lane);
   if (index===undefined) return undefined;
-  const [location,id,item,identity,from,since,until,blocked]=data.subarray(index,index+recordWords);
+  const [location,id,item,identity,from,since,until,blocked]=data.subarray(index,index+TRANSPORT_RECORD_WORDS);
   return {location,id,item,identity,from,since,until,blocked:blocked===1};
 }
 

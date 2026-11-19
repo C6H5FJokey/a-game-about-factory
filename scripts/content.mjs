@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const SIM_HZ = 30;
 const CONTENT_HZ = 20;
-const SAVE_VERSION = 11;
+const SAVE_VERSION = 14;
 const registryPath = resolve(root, 'data/registry.json');
 const identifier = /^[a-z][a-z0-9-]{0,47}$/;
 const defaultLanguage = 'zh-CN';
@@ -182,8 +182,12 @@ export function loadContent(configPath = process.env.DAYBREAK_CONTENT_CONFIG || 
   })];
   const machines = fixedIds('machines', machineRegistry).map(({ entry, row, at }) => {
     allowedFields(row, ['id','icon','nameKey','descriptionKey','materials','power','generation',
-      'batteryCapacity','batteryPower','span','beltInterval','beltRate','inputCapacity','outputCapacity','size','ports',
+      'batteryCapacity','batteryPower','span','beltInterval','beltRate','inputCapacity','outputCapacity',
+      'inputSlots','outputSlots','storageSlots','crateSlots','size','ports',
       'nextMaterials','nextPower','nextSpan'], at);
+    for (const legacyField of ['inputCapacity','outputCapacity']) {
+      if (Object.hasOwn(row,legacyField)) integer(row[legacyField],0,24,`${at}.${legacyField}`);
+    }
     const [width, height] = list(row.size === undefined ? [1,1] : row.size, `${at}.size`);
     if (row.size !== undefined) check(row.size.length === 2, `${at}.size`, 'expected [width, height]');
     integer(width, 1, 8, `${at}.size[0]`);
@@ -235,13 +239,17 @@ export function loadContent(configPath = process.env.DAYBREAK_CONTENT_CONFIG || 
       nextSpan: integer(row.nextSpan ?? row.span ?? 1, 1, 1904, `${at}.nextSpan`),
       beltInterval: entry.behavior === 'transport' ? integer(row.beltInterval, 1, 200, `${at}.beltInterval`) : 0,
       beltRate: entry.behavior === 'transport' ? integer(row.beltRate ?? 60, 1, 1800, `${at}.beltRate`) : 0,
-      inputCapacity: integer(row.inputCapacity === undefined ? 0 : row.inputCapacity, 0, 24, `${at}.inputCapacity`),
-      outputCapacity: integer(row.outputCapacity === undefined ? 0 : row.outputCapacity, 0, 24, `${at}.outputCapacity`),
+      inputSlots: integer(row.inputSlots ?? Number(canInput && !['depot','freight-yard'].includes(entry.id)), 0, 64, `${at}.inputSlots`),
+      outputSlots: integer(row.outputSlots ?? Number(canOutput && !['depot','freight-yard'].includes(entry.id)), 0, 64, `${at}.outputSlots`),
+      storageSlots: integer(row.storageSlots ?? ({depot:8,'freight-yard':4}[entry.id] ?? 0), 0, 64, `${at}.storageSlots`),
+      crateSlots: integer(row.crateSlots ?? (entry.id === 'freight-yard' ? 2 : 0), 0, 64, `${at}.crateSlots`),
     };
     if (entry.code !== 0) check(spec.materials.length > 0, `${at}.materials`, 'a construction cost is required');
     if (entry.code !== 0) check(spec.nextMaterials.length > 0, `${at}.nextMaterials`, 'a construction cost is required');
     const tutorialItem = { 'simple-miner': 1, 'freight-yard': 4 }[row.id];
     if (tutorialItem) check(spec.materials.length === 1 && spec.materials[0].item === tutorialItem, `${at}.materials`, 'this legacy building requires its original cost item');
+    if (entry.id === 'depot' || entry.id === 'freight-yard') check(spec.storageSlots > 0, at, 'storage needs at least one slot');
+    if (entry.id === 'freight-yard') check(spec.crateSlots > 0, at, 'a freight crate needs at least one slot');
     return spec;
   });
   const rawRecipes = idMap(read(sources.recipes), location(sources.recipes));
@@ -283,11 +291,18 @@ export function loadContent(configPath = process.env.DAYBREAK_CONTENT_CONFIG || 
   });
   check(recipes.every(recipe => recipe.key > 0) && new Set(recipes.map(recipe => recipe.key)).size === recipes.length,
     location(sources.recipes), 'recipe IDs must hash to distinct nonzero keys');
+  const fits = (row, slots) => Math.ceil(row.amount / items[row.item].stackLimit) <= slots;
+  const fitsRecipe = (recipe, machine) => fits(recipe.output, machine.outputSlots) &&
+    recipe.inputs.every(row => fits(row, machine.inputSlots));
   for (const recipe of recipes) for (const code of recipe.machines) {
-    check(recipe.output.amount <= machines[code].outputCapacity &&
-      recipe.inputs.every(row => row.amount <= machines[code].inputCapacity),
+    check(fitsRecipe(recipe, machines[code]),
       recipe.id, 'recipe quantities exceed machine buffer capacity');
   }
+  for (const [id, amount] of [['mirror',3],['fuel',5],['core',6]]) {
+    check(fits({item:itemRegistry.get(id).code,amount},machines[13].inputSlots),
+      'station.inputSlots', `must fit the campaign reserve for ${id}`);
+  }
+  check(machines[9].inputSlots>0,'generator.inputSlots','the generator needs a fuel slot');
   const recipeMap = new Map(recipes.map(row => [row.id, row]));
   const activeRecipes = machineCodes.map(entry => {
     if (!entry.legacyRecipe) return null;
@@ -297,9 +312,11 @@ export function loadContent(configPath = process.env.DAYBREAK_CONTENT_CONFIG || 
     const machine = machines[entry.code];
     check(recipe.inputs.length === legacyInputs.length && recipe.inputs.every((row, i) => row.item === legacyInputs[i].item), at, 'the campaign recipe must retain its original input items');
     check(recipe.output.item === itemRegistry.get(entry.output).code && recipe.byproducts.length === 0, at, 'the campaign recipe must retain its original output item');
-    check(recipe.output.amount <= machine.outputCapacity && recipe.inputs.every(row => row.amount <= machine.inputCapacity), at, 'recipe quantities exceed machine buffer capacity');
+    check(fitsRecipe(recipe, machine) && legacyInputs.every(row=>fits(row,machine.inputSlots)), at, 'recipe quantities exceed machine buffer capacity');
     return { ...recipe, legacyInputs, power: machine.power };
   });
+  check([...mineralIds].every(item=>fits({item,amount:activeRecipes[17].output.amount},machines[17].outputSlots)),
+    'simple-miner.outputSlots','the miner must fit one batch of any raw mineral');
   const compatibleRecipes = machines.map((_, code) => recipes.flatMap((recipe, i) => recipe.machines.includes(code) ? [i] : []));
   const mechanics = activeRecipes.map(recipe => recipe?.inputs ?? null);
   const layouts = machines.flatMap(({id,width,height,ports}) => ports === null ? [] :
@@ -360,8 +377,10 @@ pub const RECIPES: &[RecipeSpec] = &[
 ${recipes.map(recipe => `    RecipeSpec { key: ${recipe.key}, modern: ${recipe.modern}, recipe: Recipe { input: ${pairs(recipe.inputs, 3)}, output: ${recipe.output.item}, amount: ${recipe.output.amount}, ticks: ${recipe.baseTicks}, power: 0 }, machines: &[${recipe.machines.join(', ')}], unlock: ${recipe.unlockStage}, handcraft: ${recipe.handcraft ?
   `Some(HandRecipe { input: ${pairs(recipe.handcraft.inputs, 3)}, ticks: ${recipe.handcraft.ticks}, unlock: ${recipe.handcraft.unlockStage} })` : 'None'} },`).join('\n')}
 ];
-pub const INPUT_CAPACITY: [u16; MAX_KIND as usize + 1] = ${list('inputCapacity')};
-pub const OUTPUT_CAPACITY: [u16; MAX_KIND as usize + 1] = ${list('outputCapacity')};
+pub const INPUT_SLOTS: [u32; MAX_KIND as usize + 1] = ${list('inputSlots')};
+pub const OUTPUT_SLOTS: [u32; MAX_KIND as usize + 1] = ${list('outputSlots')};
+pub const STORAGE_SLOTS: [u32; MAX_KIND as usize + 1] = ${list('storageSlots')};
+pub const CRATE_SLOTS: u32 = ${machines[19].crateSlots};
 pub const BELT_INTERVAL: [u32; MAX_KIND as usize + 1] = ${list('beltInterval')};
 pub const BELT_RATE: [u32; MAX_KIND as usize + 1] = ${list('beltRate')};
 pub const FOOTPRINT_SIZES: [(u8, u8); MAX_KIND as usize + 1] = [
@@ -380,7 +399,6 @@ pub const LINE_COST: u32 = ${machines[19].materials[0].amount};
 pub const BATTERY_CAPACITY: u32 = simulation_ticks(${machines[10].batteryCapacity});
 pub const BATTERY_POWER: u16 = ${machines[10].batteryPower};
 pub const MINER_TICKS: u32 = simulation_ticks(${content.activeRecipes[17].baseTicks});
-pub const MINER_CAPACITY: u16 = ${machines[17].outputCapacity};
 `;
 }
 

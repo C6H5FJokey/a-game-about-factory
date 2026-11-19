@@ -15,6 +15,37 @@ export function flowTo(from:number,to:number) {
   return STEP.findIndex(([dx,dy])=>dx===nx-x && dy===ny-y);
 }
 
+export function findCablePath(bounds:MapLimits,path:number[],target:number,canUse:(tile:number)=>boolean) {
+  const start=path.at(-1)!;
+  const [tx,ty]=xy(target);
+  if (!inBounds(bounds,tx,ty) || !canUse(target)) return undefined;
+  const used=new Set(path);
+  const from=new Int32Array(W*H).fill(-1);
+  const costs=new Int32Array(from.length).fill(-1);
+  const frontier=new MinHeap();
+  const distance=(tile:number)=>Math.abs(tile%W-tx)+Math.abs(Math.floor(tile/W)-ty);
+  costs[start]=0;
+  frontier.push({state:start,priority:distance(start),cost:0});
+  while (frontier.size) {
+    const {state:tile,cost}=frontier.pop()!;
+    if (cost!==costs[tile]) continue;
+    if (tile===target) {
+      const suffix:number[]=[];
+      for (let next=tile;next!==start;next=from[next]) suffix.push(next);
+      return suffix.reverse();
+    }
+    for (let flow=0;flow<4;flow++) {
+      const next=side(tile,flow);
+      if (next<0 || !inBounds(bounds,next%W,Math.floor(next/W)) || used.has(next) || !canUse(next)) continue;
+      const nextCost=cost+1;
+      if (costs[next]>=0 && costs[next]<=nextCost) continue;
+      costs[next]=nextCost; from[next]=tile;
+      frontier.push({state:next,priority:nextCost+distance(next),cost:nextCost});
+    }
+  }
+  return undefined;
+}
+
 function ports(data:Int32Array,tile:number,kind:number,input:boolean) {
   const dir=cell(data,tile,Field.Direction);
   if (isTransport(kind)) {

@@ -1,11 +1,14 @@
 import { CityField, Field, H, Kind, Meta, Stage, STEP, W, at, cell, cityValue, inBounds, isTransport, legacyRecipes, xy, type MapLimits, type Mode, type PreviewCell } from './model';
-import { cargoIndex, design, deviceAt, transportPorts } from './sim-data';
-import { machineAnchor, machinePortTiles, machineSize, previewPorts } from './machine-layout';
+import { beltArrivalData, cargoIndex, design, deviceAt, transportPorts, TRANSPORT_RECORD_WORDS } from './sim-data';
+import { machineAnchor, machinePortTiles, machineSize, previewPorts, transportLinks } from './machine-layout';
 
 type Color = [number,number,number,number];
 const rgba = (r:number,g:number,b:number,a=1):Color => [r/255,g/255,b/255,a];
 const ink = rgba(12,21,29), frame = rgba(59,84,95), line = rgba(39,60,68), amber = rgba(255,193,109);
 const cyan = rgba(119,225,213), red = rgba(255,145,117), grey = rgba(131,157,168);
+const wireQuiet=rgba(95,171,180,.46), wireSelected=rgba(119,225,213,.62), wireOther=rgba(80,138,153,.78);
+const beltSurface=rgba(24,43,53), beltHousing=rgba(36,54,64), bridgeShadow=rgba(8,17,24);
+const BELT_EDGE=.505, BELT_GAP=.38;
 const mineral = [ink,rgba(180,135,112),rgba(133,169,217),rgba(123,130,137),rgba(194,205,207),rgba(167,184,249),rgba(125,222,209),amber,rgba(221,199,152),
   cyan,rgba(100,193,130),grey,rgba(230,145,83),rgba(145,179,231),rgba(165,175,186),
   rgba(240,158,94),rgba(157,216,252),rgba(205,196,159),rgba(222,165,110),rgba(137,193,204)];
@@ -52,13 +55,14 @@ void main(){
 
 export class Camera {
   x=19.7; y=17.2; zoom=26; width=1; height=1;
-  bounds:MapLimits={left:0,top:0,right:W,bottom:H,minZoom:9,maxZoom:64};
+  bounds:MapLimits={left:0,top:0,right:W,bottom:H,minZoom:9,maxZoom:64,regional:false};
   get minZoom() {
     const {left,right,top,bottom,minZoom}=this.bounds;
     return Math.max(minZoom,this.width/(right-left),this.height/(bottom-top));
   }
   get maxZoom() {
     // Preserve a close view on large screens at every progression tier.
+    if (this.bounds.regional) return Math.max(this.bounds.maxZoom,this.width/10,this.height/10);
     return Math.max(this.bounds.maxZoom,this.width/40,this.height/24);
   }
   private clampZoom(zoom:number) { return Math.max(this.minZoom,Math.min(this.maxZoom,zoom)); }
@@ -92,7 +96,7 @@ export class Camera {
   }
 }
 
-type Scene = { data:Int32Array; mode:Mode; preview:PreviewCell[]; selected:number; focus:number; trace:[number,number][]; now:number; tick:number; chipTile:number; chip:number; };
+type Scene = { data:Int32Array; mode:Mode; preview:PreviewCell[]; cableEditing:boolean; selected:number; focus:number; trace:[number,number][]; now:number; tick:number; chipTile:number; chip:number; };
 
 export class Renderer {
   readonly camera = new Camera();
@@ -252,39 +256,77 @@ export class Renderer {
     this.box(px,py,.20,.17,output?amber:cyan,5,(side+(output?0:2))*Math.PI/2);
   }
 
-  private transport(kind:number,x:number,y:number,dir:number,detail:boolean,preview?:Color) {
+  private beltLine(x:number,y:number,flow:number,back:number,front:number,width:number,color:Color) {
+    const [dx,dy]=STEP[flow];
+    this.box(x+dx*(front-back)/2,y+dy*(front-back)/2,back+front,width,color,0,flow*Math.PI/2);
+  }
+
+  private beltBend(x:number,y:number,entry:number,exit:number,reach:number,width:number,color:Color) {
+    const [ix,iy]=STEP[entry], [ox,oy]=STEP[exit];
+    const sx=x-ix*.32, sy=y-iy*.32, ex=x+ox*.23, ey=y+oy*.23;
+    this.stroke(x-ix*reach,y-iy*reach,sx,sy,width,color);
+    let fromX=sx, fromY=sy;
+    for (let segment=1;segment<=3;segment++) {
+      const t=segment/3, u=1-t;
+      const toX=u*u*sx+2*u*t*x+t*t*ex, toY=u*u*sy+2*u*t*y+t*t*ey;
+      this.stroke(fromX,fromY,toX,toY,width,color);
+      if (segment<3) this.box(toX,toY,width,width,color,2);
+      fromX=toX; fromY=toY;
+    }
+  }
+
+  private beltArrows(x:number,y:number,flow:number,tier:number,style:Color,preview?:Color) {
+    const [dx,dy]=STEP[flow], angle=flow*Math.PI/2;
+    const dist=tier>1?.29:.31;
+    this.box(x+dx*dist,y+dy*dist,.22,.20,preview ?? grey,5,angle);
+    if (tier>1) this.box(x+dx*.08,y+dy*.08,.17,.18,style,5,angle);
+    if (tier===3) this.box(x-dx*.13,y-dy*.13,.17,.18,style,5,angle);
+  }
+
+  private transport(kind:number,x:number,y:number,dir:number,links:number,preview?:Color) {
     const tier=design(kind)?.beltTier ?? 0;
     const style=preview ?? (tier===3?amber:tier===2?cyan:frame);
-    const lanes=design(kind)?.lanes ?? 1;
-    for (let lane=lanes-1;lane>=0;lane--) {
-      const angle=(dir+lane)%4*Math.PI/2;
-      const width=lanes===2?.46:.72;
-      this.box(x,y,.98,width,style,1,angle);
-      this.box(x,y,.97,width-.12,rgba(24,43,53),1,angle);
-      if (lanes===2 && lane===0) this.box(x,y,.42,width+.02,style,1,angle);
-    }
-    for (let lane=0;lane<lanes;lane++) {
-      const {incoming,outgoing}=transportPorts(kind,dir,lane);
+    const incoming=links&15, outgoing=links>>4;
+    const inputReach=(flow:number)=>incoming&(1<<flow)?BELT_EDGE:BELT_GAP;
+    const outputReach=(flow:number)=>outgoing&(1<<flow)?BELT_EDGE:BELT_GAP;
+    if (kind===Kind.Crossing) {
+      const under=(dir+1)%4;
+      this.beltLine(x,y,under,inputReach(under),outputReach(under),.50,style);
+      this.beltLine(x,y,under,inputReach(under),outputReach(under),.36,beltSurface);
+      this.beltArrows(x,y,under,0,style,preview);
+      this.box(x,y,.71,.61,bridgeShadow,1,dir*Math.PI/2);
+      this.beltLine(x,y,dir,inputReach(dir),outputReach(dir),.52,style);
+      this.beltLine(x,y,dir,inputReach(dir),outputReach(dir),.36,beltSurface);
+      const [dx,dy]=STEP[dir];
+      for (const edge of [-.23,.23]) this.box(x-dy*edge,y+dx*edge,.64,.06,preview ?? grey,1,dir*Math.PI/2);
+      this.beltArrows(x,y,dir,0,style,preview);
+    } else {
       if (kind===Kind.Merger || kind===Kind.Splitter) {
-        const ports=kind===Kind.Merger?incoming:outgoing;
-        const reach=kind===Kind.Merger?-.42:.42;
-        for (let flow=0;flow<4;flow++) {
-          if (!(ports&(1<<flow))) continue;
-          const [dx,dy]=STEP[flow];
-          this.stroke(x,y,x+dx*reach,y+dy*reach,.065,style);
-        }
-        this.box(x,y,.19,.19,style,kind===Kind.Merger?2:3);
+        this.box(x,y,.86,.86,style,1);
+        this.box(x,y,.78,.78,beltHousing,1);
       }
-      for (let flow=0;flow<4;flow++) {
-        const [dx,dy]=STEP[flow];
-        const direction=flow*Math.PI/2;
-        if (outgoing&(1<<flow)) {
-          const dist=tier>1?.29:.33;
-          this.box(x+dx*dist,y+dy*dist,.22,.20,preview ?? grey,5,direction);
-          if (tier>1) this.box(x+dx*.08,y+dy*.08,.17,.18,style,5,direction);
-          if (tier===3) this.box(x-dx*.13,y-dy*.13,.17,.18,style,5,direction);
+      const back=incoming && !(incoming&(1<<dir)) ? .04 : inputReach(dir);
+      for (const width of [.70,.55]) {
+        const color=width===.70?style:beltSurface;
+        this.beltLine(x,y,dir,back,outputReach(dir),width,color);
+        for (let flow=0;flow<4;flow++) {
+          if (flow!==dir && (incoming&(1<<flow))) this.beltBend(x,y,flow,dir,BELT_EDGE,width,color);
         }
-        if (detail && incoming&(1<<flow)) this.box(x-dx*.42,y-dy*.42,.10,.13,preview ?? style,5,direction);
+        if (kind===Kind.Splitter) {
+          const side=(dir+1)%4;
+          this.beltBend(x,y,(side+2)%4,(dir+2)%4,outputReach(side),width,color);
+        }
+      }
+      this.beltArrows(x,y,dir,tier,style,preview);
+      if (kind===Kind.Splitter) this.beltArrows(x,y,(dir+1)%4,tier,style,preview);
+    }
+    if (preview) {
+      const first=transportPorts(kind,dir,0), second=transportPorts(kind,dir,1);
+      const allowed=first.incoming|second.incoming;
+      for (let flow=0;flow<4;flow++) {
+        if (!(allowed&(1<<flow))) continue;
+        const [dx,dy]=STEP[flow];
+        this.box(x-dx*.42,y-dy*.42,.10,.13,preview,5,flow*Math.PI/2);
       }
     }
   }
@@ -294,6 +336,30 @@ export class Renderer {
     if (cell(data,tile,Field.Kind)!==Kind.Crossing) return [x+.5,y+.5];
     const [dx,dy]=STEP[(cell(data,tile,Field.Direction)+location%2)%4];
     return [x+.5-dy*.18,y+.5+dx*.18];
+  }
+
+  private drawBeltArrivals(data:Int32Array,tick:number,size:number,left:number,top:number,right:number,bottom:number) {
+    const arrivals=beltArrivalData(data);
+    for (let i=0;i<arrivals.length;i+=TRANSPORT_RECORD_WORDS) {
+      const item=arrivals[i+2], target=arrivals[i+3], flow=arrivals[i+4];
+      const since=arrivals[i+5], until=arrivals[i+6];
+      if (tick>=until) continue;
+      const [x,y]=xy(target);
+      if (x<left-1 || x>=right+1 || y<top-1 || y>=bottom+1) continue;
+      const [dx,dy]=STEP[flow];
+      const [sx,sy]=xy(Math.floor((-1-arrivals[i])/2));
+      const offset=arrivals[i+7] ? .18 : 0;
+      const fromX=sx+.5-dy*offset, fromY=sy+.5+dx*offset;
+      const portX=x+.5-dx*.44, portY=y+.5-dy*.44;
+      const phase=Math.max(0,(tick-since)/(until-since));
+      const approach=Math.min(1,phase/.64), inside=Math.max(0,(phase-.64)/.36);
+      const px=fromX+(portX-fromX)*approach+dx*.29*inside;
+      const py=fromY+(portY-fromY)*approach+dy*.29*inside;
+      const width=size*(1-.45*inside), alpha=1-inside;
+      const [r,g,b]=mineral[item];
+      this.box(px,py,width+.08,width+.08,[ink[0],ink[1],ink[2],alpha],shapeForItem[item]);
+      this.box(px,py,width,width,[r,g,b,alpha],shapeForItem[item]);
+    }
   }
 
   render(scene:Scene) {
@@ -379,7 +445,7 @@ export class Renderer {
         }
       }
       if (isTransport(kind)) {
-        this.transport(kind,x+.5,y+.5,dir,c.zoom>=12);
+        this.transport(kind,x+.5,y+.5,dir,transportLinks(data,tile,kind,dir));
       } else if (anchor>=0 && !this.drawn[anchor]) {
         this.drawn[anchor]=1;
         const [ax,ay]=xy(anchor);
@@ -409,13 +475,13 @@ export class Renderer {
       }
     }
 
-    const showPower=mode==='power' || preview.some(part=>part.wire);
-    if (showPower) for (let y=top;y<bottom;y++) for (let x=left;x<right;x++) {
+    const selectedGrid=selected>=0?cell(data,selected,Field.Grid):0;
+    const activeWire=scene.cableEditing?cyan:wireSelected, inactiveWire=scene.cableEditing?wireOther:wireQuiet;
+    for (let y=top;y<bottom;y++) for (let x=left;x<right;x++) {
       const tile=y*W+x;
       if (!cell(data,tile,Field.Wire)) continue;
       const group=cell(data,tile,Field.Grid);
-      const selectedGrid=selected>=0?cell(data,selected,Field.Grid):data[Meta.StationGrid];
-      const color=group===selectedGrid?cyan:rgba(80,138,153,.70);
+      const color=(scene.cableEditing && !selectedGrid) || group===selectedGrid?activeWire:inactiveWire;
       this.box(x+.5,y+.5,.14,.14,color,3);
       for (const [nx,ny] of [[x+1,y],[x,y+1]]) {
         const next=at(nx,ny);
@@ -442,6 +508,7 @@ export class Renderer {
           this.box(px,py,size,size,mineral[item],shapeForItem[item]);
         }
       }
+      this.drawBeltArrivals(data,scene.tick,size,left,top,right,bottom);
     }
 
     if (focus>=0) this.marker(focus,rgba(255,173,111,.82),1.22);
@@ -452,12 +519,12 @@ export class Renderer {
       this.box(x+.5-dy*.42,y+.5+dx*.42,.87,.07,cyan,0,flow*Math.PI/2);
     }
     if (selected>=0) this.marker(selected,cyan,1.06,...machineSize(cell(data,selected,Field.Kind),cell(data,selected,Field.Direction)));
-    for (const part of preview) {
+    for (const [index,part] of preview.entries()) {
       if (part.tile<0) continue;
       const [x,y]=xy(part.tile), color=part.conflict?red:amber;
       const [width,height]=machineSize(part.kind,part.dir);
       this.box(x+width/2,y+height/2,width-.05,height-.05,[...color.slice(0,3),.24] as Color,1);
-      if (isTransport(part.kind)) this.transport(part.kind,x+.5,y+.5,part.dir,true,color);
+      if (isTransport(part.kind)) this.transport(part.kind,x+.5,y+.5,part.dir,0,color);
       else if (part.kind>0) {
         this.machineBody(part.kind,x,y,part.dir,0,.68);
         const ports=[...previewPorts(part.tile,part.kind,part.dir,legacyRecipes(data))];
@@ -467,7 +534,14 @@ export class Renderer {
             ports.some(peer=>peer.tile===port.tile && peer.side===port.side && peer.role!==port.role));
         }
       }
-      if (part.wire) this.box(x+.5,y+.5,.32,.32,color,3);
+      if (part.wire) {
+        this.box(x+.5,y+.5,.32,.32,color,3);
+        const next=preview[index+1];
+        if (scene.cableEditing && next?.wire) {
+          const [nx,ny]=xy(next.tile);
+          this.stroke(x+.5,y+.5,nx+.5,ny+.5,.10,color);
+        }
+      }
       this.marker(part.tile,color,.9,width,height);
     }
 
