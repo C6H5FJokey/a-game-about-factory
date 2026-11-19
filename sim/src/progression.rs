@@ -75,12 +75,16 @@ fn used_slots(stock: &[u32; ITEMS], stacks: &[u32; ITEMS]) -> u32 {
 
 impl World {
     pub fn stock_room(&self, item: u8) -> u32 {
+        self.stock_room_for(&self.stock, item)
+    }
+
+    pub fn stock_room_for(&self, stock: &[u32; ITEMS], item: u8) -> u32 {
         let limits = self.progression.limits();
         let stacks = self.progression.stack_limits();
         let stack = stacks[item as usize];
-        let actual = self.stock[item as usize];
+        let actual = stock[item as usize];
         let tail = (stack - actual % stack) % stack;
-        let used = used_slots(&self.stock, stacks);
+        let used = used_slots(stock, stacks);
         if used > limits.slots {
             return 0;
         }

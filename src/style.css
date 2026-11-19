@@ -70,6 +70,20 @@ canvas { position:absolute; inset:0; display:block; height:100%; width:100%; tou
 canvas[data-tool="active"] { cursor:crosshair; }
 canvas:active { cursor:grabbing; }
 .map-labels { position:absolute; inset:0; pointer-events:none; overflow:hidden; }
+.ground-markers { position:absolute; inset:0; pointer-events:none; }
+.ground-marker { position:absolute; left:0; top:0; display:flex; align-items:center; justify-content:center; gap:2px;
+  min-width:34px; min-height:32px; padding:2px 4px; border:1px solid var(--gold); border-radius:5px;
+  background:#26251fef; color:#f9da99; pointer-events:auto; touch-action:manipulation; font:700 11px var(--mono); }
+.ground-marker .item-icon { width:17px; height:17px; }
+.ground-marker:disabled { pointer-events:none; opacity:.55; }
+.ground-stack { display:inline-block; width:10px; height:10px; border:1px solid currentColor; transform:rotate(45deg); box-shadow:2px 2px 0 #26251f, 3px 3px 0 currentColor; }
+.ground-drop-hint { position:absolute; left:10px; right:10px; bottom:64px; z-index:2; display:flex; align-items:center;
+  justify-content:space-between; gap:8px; width:fit-content; max-width:calc(100% - 20px); padding:6px 8px;
+  border:1px solid var(--gold); border-radius:5px; background:#16242b; font-size:13px; }
+.ground-drop-hint[hidden] { display:none; }
+.ground-picker { display:grid; gap:8px; }
+.ground-picker-row { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.ground-picker-row > span { display:flex; align-items:center; gap:6px; }
 .map-label { position:absolute; top:0; left:0; padding:2px 6px; font-size:11px; color:#b5c4c4; background:#101b24e8; border:1px solid #3b525b; white-space:nowrap; }
 .map-label[data-bright="yes"] { color:var(--gold); border-color:#907144; }
 .map-controls { position:absolute; bottom:14px; right:14px; display:flex; align-items:center; gap:5px; }

@@ -146,7 +146,32 @@ try {
   assert.equal(campaign.signature, base.signature);
   assert.equal(review.signature, variant.signature);
   const original = campaign.save();
-  assert.equal(original[0], 10);
+  assert.equal(original[0], 11);
+  const repricedMachines = await json(baseFiles.machines);
+  repricedMachines.find(row => row.id==='simple-miner').nextMaterials[0].amount=17;
+  const repricedConfig=await write('repriced.json',{
+    dataset:'campaign',
+    datasets:{campaign:{version:base.version,files:{
+      ...baseFiles,
+      machines:await write('repriced-machines.json',repricedMachines),
+      locales:{
+        'zh-CN':join(root,'data/locales/zh-CN.json'),
+        en:join(root,'data/locales/en.json'),
+      },
+    }}},
+  });
+  const repriced=await kernel(repricedConfig);
+  const firstOre=16*56+19;
+  for(let n=0;n<10;n++) {
+    assert.equal(campaign.command(9,firstOre),1);
+    assert.equal(repriced.command(9,firstOre),1);
+  }
+  assert.equal(campaign.command(1,firstOre,17),1);
+  assert.equal(repriced.command(1,firstOre,17),-4);
+  assert.equal(repriced.restore(campaign.save()),1);
+  assert.equal(repriced.command(3,firstOre),1);
+  assert.equal(repriced.snapshot()[36],10,'Removal follows the saved payment after a compatible price change.');
+  assert.equal(campaign.restore(original),1);
   const beforeReject = review.save();
   assert.equal(review.restore(original), -25);
   assert.deepEqual(review.save(), beforeReject, 'A save from a different profile must leave the current game intact');
@@ -241,7 +266,7 @@ try {
   assert.equal(review.restore(roundTrip),1);
   assert.deepEqual(occupied(outlet),[bench,16]);
   assert.ok(review.snapshot()[98+19*bench+6]>0);
-  console.log('数据回归通过：两套配置、存档隔离、逐物品堆叠、配方周期、语言回退、多格占地、旋转、端口交接及蓝图。');
+  console.log('数据回归通过：配置、存档隔离、调价后返还、逐物品堆叠、配方周期、语言回退、多格占地、旋转、端口交接及蓝图。');
 } finally {
   for (const file of created) await unlink(file);
   await rmdir(work);

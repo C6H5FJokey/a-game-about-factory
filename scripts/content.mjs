@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const SIM_HZ = 30;
 const CONTENT_HZ = 20;
-const SAVE_VERSION = 10;
+const SAVE_VERSION = 11;
 const registryPath = resolve(root, 'data/registry.json');
 const identifier = /^[a-z][a-z0-9-]{0,47}$/;
 const defaultLanguage = 'zh-CN';

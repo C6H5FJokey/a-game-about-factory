@@ -114,13 +114,17 @@ function legacySave(current,version) {
   const devices=progression+4+data[progression+3];
   const extension=devices+2+data[devices+1];
   const extra=content.frontend.items.length-10;
-  const library=extension+1+extra*3+(extra+3)*data[devices+1];
+  const ground=extension+1+extra*3+(extra+3)*data[devices+1];
+  const [,piles,payments,bundles]=data.subarray(ground,ground+4);
+  let library=ground+4+piles*4;
+  for (let n=0;n<payments;n++) library+=3+(data[library+1]===0?data[library+2]*2:0);
+  library+=bundles*3;
   data[0]=version;
   return Int32Array.from([
-    ...data.subarray(0,version<7?progression:extension),
+    ...data.subarray(0,version<7?progression:version<10?extension:ground),
     ...(version<7?data.subarray(devices,extension):[]),
     ...data.subarray(library,data.length-data.at(-1)),
-    ...(version>=8?content.legacyTag:[]),
+    ...(version>=10?content.tag:version>=8?content.legacyTag:[]),
   ]);
 }
 
@@ -245,11 +249,54 @@ function testProductionOpening() {
   assert.deepEqual(save(),flowing);
   until(()=>stage()===11,'Only the batch using automatic intake advances the opening.');
   assert.equal(available(ore,1,2),conserved,'The simple miner retained its ore.');
-  console.log('P1 opening passed: timed handcraft, copper wiring, recipe choice, automatic intake and V10 restore.');
+  console.log('P1 opening passed: timed handcraft, copper wiring, recipe choice, automatic intake and save restore.');
+}
+
+function testGroundItems() {
+  const piles=()=>{
+    const view=snapshot();
+    const recipeEnd=view[view[view.at(-1)-1]-14]-1;
+    const groundEnd=view[recipeEnd]-1;
+    const result=[];
+    for (let i=view[groundEnd];i<groundEnd;i+=4) result.push(view.slice(i,i+4));
+    return result;
+  };
+  for(let n=0;n<10;n++) assert.equal(command(9,ore),1);
+  assert.equal(command(1,ore,17),1);
+  advance(3*hz);
+  const beforeRemoval=save();
+  const full=beforeRemoval.slice();
+  full[5]=98;
+  full[8]=1500;
+  assert.equal(restore(full),1);
+  assert.equal(command(3,ore),1);
+  assert.equal(snapshot()[36],100);
+  const [[tile,item,id,count]]=piles();
+  assert.deepEqual([tile,item,count],[ore,1,9]);
+  const withPile=save();
+  assert.equal(restore(withPile),1);
+  assert.deepEqual(save(),withPile);
+  assert.equal(command(27,ore,1,id),-24);
+  assert.equal(command(26,0,1,2),-3);
+  assert.equal(command(26,ore+1,1,2),2);
+  assert.equal(command(27,ore,1,id),2);
+  assert.equal(piles()[0][3],7);
+  assert.equal(command(26,ore,4,100),100);
+  assert.equal(command(27,ore,1,id),7);
+  assert.equal(command(27,ore,1,id),-28);
+  assert.equal(command(26,ore,1,1),1);
+  assert.equal(command(27,ore,1,id),-28);
+  assert.equal(restore(legacySave(beforeRemoval,10)),1);
+  assert.equal(command(3,ore),1);
+  assert.equal(snapshot()[36],1,'An unrecorded legacy machine still returns its contents.');
+  assert.equal(snapshot()[30],1,'An unrecorded legacy basic miner returns as a packed machine.');
+  console.log('P2 passed: overflow, partial pickup, stale IDs, current save round-trip and V10 import.');
 }
 
 const modernEmpty=save();
 testProductionOpening();
+assert.equal(restore(modernEmpty),1);
+testGroundItems();
 assert.equal(restore(legacySave(modernEmpty,9)),1);
 advance(100);
 assert.equal(stage(),0);

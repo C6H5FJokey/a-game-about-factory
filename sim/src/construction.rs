@@ -161,11 +161,24 @@ impl World {
         if !plan.affordable(self) {
             return -4;
         }
-        for (item, count) in plan.cost.into_iter().enumerate() {
-            self.stock[item] -= count;
-        }
         if plan.replacements.is_empty() {
             return 1;
+        }
+        let mut stock = self.stock;
+        for (held, cost) in stock.iter_mut().zip(plan.cost) {
+            *held -= cost;
+        }
+        let removals = plan
+            .replacements
+            .iter()
+            .filter(|part| {
+                let current = self.cells[part.tile].kind;
+                current != 0 && current != part.kind
+            })
+            .map(|part| (part.tile, [0; ITEMS]))
+            .collect::<Vec<_>>();
+        if let Err(error) = self.settle_removals(stock, removals) {
+            return error;
         }
         for part in plan.replacements {
             let old = &self.cells[part.tile];
@@ -181,6 +194,10 @@ impl World {
                     ..Cell::default()
                 },
             );
+            if !same_kind {
+                self.ground
+                    .record_device(part.tile, self.build_materials(part.kind), false);
+            }
             for (lane, cargo) in part.cargo.into_iter().enumerate() {
                 self.cargo[node(part.tile, lane)] = cargo;
             }

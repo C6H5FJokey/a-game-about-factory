@@ -8,7 +8,7 @@ export const ERRORS: Record<number,string> = {};
 function refreshCatalogText() {
   content.items.forEach((item, i) => { ITEM[i] = item ? t(item.nameKey) : ''; });
   content.machines.forEach((machine, i) => { MACHINE[i] = {name:t(machine.nameKey),detail:t(machine.descriptionKey)}; });
-  for (let code=1;code<=27;code++) ERRORS[-code]=t('errors.'+code);
+  for (let code=1;code<=29;code++) ERRORS[-code]=t('errors.'+code);
 }
 refreshCatalogText();
 onLanguageChange(refreshCatalogText);

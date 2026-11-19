@@ -3,6 +3,7 @@ use crate::blueprints::Library;
 use crate::campaign::Stage;
 use crate::catalog::*;
 use crate::footprints::{covered, Footprints};
+use crate::ground::Ground;
 use crate::progression::{cycle_ticks, Progression};
 use crate::recipes::device_recipe;
 use crate::regions::*;
@@ -84,6 +85,7 @@ pub struct World {
     pub tick: u32,
     pub legacy_recipes: bool,
     pub handcraft: Option<(usize, i32, u32)>,
+    pub ground: Ground,
     pub stage: Stage,
     pub progression: Progression,
     pub packed_miners: u16,
@@ -113,6 +115,7 @@ impl World {
             tick: 0,
             legacy_recipes: true,
             handcraft: None,
+            ground: Ground::default(),
             stage: Stage::Gather,
             progression: Progression::default(),
             packed_miners: 0,

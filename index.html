@@ -19,6 +19,11 @@
         <section id="map" class="map" aria-label="工厂地图">
           <canvas id="world" aria-label="可编辑工厂地图"></canvas>
           <div id="map-labels" class="map-labels" aria-hidden="true"></div>
+          <div id="ground-markers" class="ground-markers" aria-label="地面物品" data-i18n-label="ui.groundItems"></div>
+          <div id="ground-drop-hint" class="ground-drop-hint" hidden>
+            <span id="ground-drop-context"></span>
+            <button class="button" type="button" data-action="cancel-drop" data-i18n="ui.cancelDrop">取消丢弃</button>
+          </div>
           <span id="map-harvest" class="map-harvest" aria-hidden="true" hidden><span class="harvest-fill"></span></span>
           <span id="ore-gain" class="ore-gain" aria-live="polite" hidden></span>
           <div id="notice" class="notice" role="status" hidden></div>
@@ -63,7 +68,7 @@
 
     <dialog id="archive-dialog" class="dialog" aria-labelledby="archive-title">
       <div class="dialog-head"><h2 id="archive-title" data-i18n="ui.archiveTitle">矿站档案</h2><button class="button quiet" type="button" data-action="close-dialog" data-i18n="ui.close">关闭</button></div>
-      <p data-i18n="ui.archiveCompatibility">支持导入 V4 至 V9 战役。V10 保存设备和蓝图配方。</p>
+      <p data-i18n="ui.archiveCompatibility">支持导入 V4 至 V10 战役。V11 保存地面物品与建造支付记录。</p>
       <label class="language-setting"><span data-i18n="ui.language">语言</span><select id="language-select"></select></label>
       <p id="save-status" role="status" data-i18n="ui.saveStatus">当前战役会自动保存到此浏览器。</p>
       <div class="dialog-actions"><button class="button" type="button" data-action="save">立即保存</button><button class="button" type="button" data-action="export">导出存档</button><button class="button" type="button" data-action="import">导入存档</button></div>
@@ -85,6 +90,17 @@
         <h2 id="transfer-title">指定转移数量</h2>
         <label>件数 <input id="transfer-quantity" type="number" min="1" step="1" required inputmode="numeric" /></label>
         <div class="dialog-actions"><button type="button" class="button" data-action="dismiss-quantity">取消</button><button type="submit" class="button primary">应用</button></div>
+      </form>
+    </dialog>
+    <dialog id="drop-dialog" class="dialog" aria-labelledby="drop-title">
+      <form id="drop-form">
+        <h2 id="drop-title" data-i18n="ui.dropTitle">丢弃物品</h2>
+        <p id="drop-material"></p>
+        <label><span data-i18n="ui.dropQuantity">件数</span> <input id="drop-quantity" type="number" min="1" step="1" required inputmode="numeric" /></label>
+        <div class="dialog-actions">
+          <button type="button" class="button" data-action="close-drop-dialog" data-i18n="ui.cancelDrop">取消丢弃</button>
+          <button type="submit" class="button primary" data-i18n="ui.chooseDropSite">选择落点</button>
+        </div>
       </form>
     </dialog>
     <script type="module" src="/src/main.ts"></script>

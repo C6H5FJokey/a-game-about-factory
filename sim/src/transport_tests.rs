@@ -328,8 +328,6 @@ fn a_full_backpack_blocks_automatic_deposit_until_space_is_available() {
         world.take_cargo(belt, 0, IRON.into(), &[cargo_id, device]),
         -24
     );
-    assert_eq!(world.remove(belt, false), -24);
-    assert_eq!(world.cells[belt].kind, BELT);
     world.stock[KIT as usize] -= 100;
     advance(&mut world, 1);
     assert_eq!(world.stock[IRON as usize], 1);

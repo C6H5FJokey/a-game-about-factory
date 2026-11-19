@@ -501,11 +501,29 @@ impl World {
             };
             plan.push((tile, kind, part.dir, part.wire, config, chosen));
         }
+        let members = plan
+            .iter()
+            .flat_map(|&(tile, kind, _, wire, ..)| {
+                [
+                    (kind != 0).then_some(tile),
+                    (wire && !self.cells[tile].wire)
+                        .then_some(crate::ground::cable_payment_site(tile)),
+                ]
+                .into_iter()
+                .flatten()
+            })
+            .collect::<Vec<_>>();
+        if members.is_empty() {
+            return -2;
+        }
         if self.stock[KIT as usize] < price {
             return -5;
         }
         self.stock[KIT as usize] -= price;
         self.materialize();
+        self.ground
+            .record_bundle(self.next_device_id, price, members.into_iter());
+        self.next_device_id += 1;
         for (tile, kind, dir, wire, cfg, selected_recipe) in plan {
             let wire = self.cells[tile].wire || wire;
             if kind != 0 {

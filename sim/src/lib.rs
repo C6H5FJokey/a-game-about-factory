@@ -4,6 +4,7 @@ mod campaign;
 mod catalog;
 mod construction;
 mod footprints;
+mod ground;
 mod interface;
 mod inventory;
 mod progression;
@@ -29,6 +30,7 @@ const SAVE_CELL_WORDS: usize = 19;
 const SAVE_WORDS: usize = SAVE_HEADER + N * SAVE_CELL_WORDS;
 const TAGGED_SAVE_VERSION: i32 = 8;
 const PRE_RECIPE_SAVE_VERSION: i32 = 9;
+const RECIPE_SAVE_VERSION: i32 = 10;
 const BUFFER: usize = 48_000;
 const MAX_INPUT: usize = 1_000_000;
 
@@ -143,6 +145,8 @@ pub extern "C" fn command(op: i32, a: i32, b: i32, c: i32, len: usize) -> i32 {
             23 => world.start_handcraft(a, b),
             24 => world.cancel_handcraft(a),
             25 => world.finish_handcraft(a),
+            26 => world.drop_held(tile, b, c),
+            27 => world.pick_ground(tile, b, c),
             _ => -1,
         }
     })
@@ -295,6 +299,7 @@ pub extern "C" fn snapshot() -> usize {
                 g.stored as i32,
             ]);
         }
+        world.ground.write_view(output);
         world.write_recipe_view(output);
         world.write_machine_footprints(output);
         world.write_progression(output);
@@ -373,6 +378,7 @@ pub extern "C" fn save() -> usize {
         world.write_progression_save(output);
         world.write_saved_devices(output);
         world.write_recipe_save(output);
+        world.ground.write_save(output);
         world.blueprints.write_save(output);
         output.extend(SAVE_DATA_TAG);
         output.len()
@@ -388,7 +394,9 @@ pub extern "C" fn restore(len: usize) -> i32 {
         };
         let data = if matches!(
             words.first().copied(),
-            Some(TAGGED_SAVE_VERSION | PRE_RECIPE_SAVE_VERSION | SAVE_VERSION)
+            Some(
+                TAGGED_SAVE_VERSION | PRE_RECIPE_SAVE_VERSION | RECIPE_SAVE_VERSION | SAVE_VERSION
+            )
         ) {
             let Some(end) = words
                 .last()
@@ -399,7 +407,7 @@ pub extern "C" fn restore(len: usize) -> i32 {
             else {
                 return -1;
             };
-            let tag = if words[0] < SAVE_VERSION {
+            let tag = if words[0] < RECIPE_SAVE_VERSION {
                 LEGACY_SAVE_DATA_TAG
             } else {
                 SAVE_DATA_TAG
@@ -516,6 +524,7 @@ impl World {
                 ..Cell::default()
             },
         );
+        self.ground.record_device(tile, materials, use_packed_miner);
         self.rebuild();
         1
     }
@@ -564,6 +573,11 @@ impl World {
             if !self.cells[tile].wire {
                 return -1;
             }
+            if let Err(status) =
+                self.settle_removals(self.stock, [(ground::cable_payment_site(tile), [0; ITEMS])])
+            {
+                return status;
+            }
             self.cells[tile].wire = false;
             self.update_grids();
             return 1;
@@ -574,7 +588,7 @@ impl World {
             return -6;
         }
         self.materialize();
-        let mut returned = self.stock;
+        let mut returned = [0; ITEMS];
         for lane in 0..belt_lanes(c.kind) {
             let cargo = self.cargo[node(tile, lane)];
             if cargo.item > 0 {
@@ -591,15 +605,11 @@ impl World {
         for (i, &count) in c.inv.iter().enumerate() {
             returned[i] += u32::from(count);
         }
-        if !self.fits_stock(&returned) {
-            return -24;
+        if let Err(error) = self.settle_removals(self.stock, [(tile, returned)]) {
+            return error;
         }
-        self.stock = returned;
         for lane in 0..belt_lanes(c.kind) {
             self.cargo[node(tile, lane)] = belts::Cargo::default();
-        }
-        if c.kind == SIMPLE_MINER {
-            self.packed_miners += 1;
         }
         if matches!(c.kind, KIT_PRESS | SPLICER | SMELTER | BENCH) {
             for cargo in &mut self.cargo {
@@ -608,8 +618,6 @@ impl World {
                 }
             }
         }
-        // Only return material present in the machine or on the belt. Build cost
-        // might have been paid with equipment kits.
         self.cells[tile] = Cell {
             wire: c.wire,
             ..Cell::default()
@@ -666,7 +674,7 @@ impl World {
             5 if data.len() > SAVE_WORDS => INDUSTRIAL_MINER,
             6 if data.len() > SAVE_WORDS => CROSSING,
             7..=PRE_RECIPE_SAVE_VERSION if data.len() > SAVE_WORDS => REINFORCED_MINER,
-            SAVE_VERSION if data.len() > SAVE_WORDS => MAX_KIND,
+            RECIPE_SAVE_VERSION | SAVE_VERSION if data.len() > SAVE_WORDS => MAX_KIND,
             _ => return None,
         };
         let legacy_clock = version < PRE_RECIPE_SAVE_VERSION;
@@ -787,7 +795,8 @@ impl World {
             };
             if !(0..=max).contains(&s[3])
                 || (kind != 0
-                    && ((version < SAVE_VERSION && !w.stage.allows(kind)) || !permitted(kind, i)))
+                    && ((version < RECIPE_SAVE_VERSION && !w.stage.allows(kind))
+                        || !permitted(kind, i)))
                 || (s[8] != 0 && !is_belt(kind))
                 || (s[6] != 0 && !matches!(kind, KIT_PRESS | SPLICER))
                 || (s[18] != 0 && !matches!(s[8] as u8, KIT | PLATE))
@@ -864,8 +873,13 @@ impl World {
                 return None;
             }
             let rest = w.read_saved_devices(rest, true)?;
-            let rest = if version == SAVE_VERSION {
+            let rest = if version >= RECIPE_SAVE_VERSION {
                 w.read_recipe_save(rest)?
+            } else {
+                rest
+            };
+            let rest = if version == SAVE_VERSION {
+                w.read_ground_save(rest)?
             } else {
                 rest
             };

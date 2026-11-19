@@ -3,6 +3,7 @@ import { bindMapInput, orthogonal } from './input';
 import { beltTerminal, detourLockedCrossing, dragTiles, findBeltPath, projectBeltPath } from './belt-route';
 import { bindActionHold } from './action-hold';
 import { bindInventoryDrag, canSelectSlot, readSlot, sameSlot, type Selection, type Slot, type SlotRole } from './inventory-drag';
+import { bindGroundMarkers, groundPiles, type GroundPile } from './ground-items';
 import {
   DIRECTION, Field, H, HEADER, HZ, Kind, Meta, Op, energyMj, legacyRecipes, selectedRecipe,
   STATION, STATUS, STEP, STRIDE, Stage, W, SPEED_MODULE, at, cell, drillTool, held, inBounds, isTransport, plainBelt, progression, stackLimit, mw, time, unlocked, xy, CITY, CityField, cityValue, knownItems,
@@ -26,6 +27,7 @@ const panel=byId('panel'), panelBody=byId('panel-body'), draft=byId('draft');
 const panelTabs=byId('panel-tabs');
 const dialog=byId<HTMLDialogElement>('archive-dialog'), saveFile=byId<HTMLInputElement>('save-file');
 const blueprintDialog=byId<HTMLDialogElement>('blueprint-dialog'), transferDialog=byId<HTMLDialogElement>('transfer-dialog');
+const dropDialog=byId<HTMLDialogElement>('drop-dialog');
 const notice=byId('notice'), balances=byId('balances'), quickInfo=byId('quick-info');
 const worker=new Worker(new URL('./worker.ts',import.meta.url),{type:'module'});
 let renderer:Renderer | undefined;
@@ -58,6 +60,9 @@ type Draft = { cells:PreviewCell[]; command?:Command; materials:Material[]; labe
 let ghost:Draft={cells:[],materials:[],label:'',conflict:false};
 
 let selectedItem:Selection | undefined;
+let dropItem=0, groundTile=-1;
+let dropDraft:{item:number;count:number}|undefined;
+const groundMarkers=bindGroundMarkers(byId('ground-markers'),openGroundMarker);
 let infoKey='', infoPinned=false, infoTile=-1;
 let balanceItems='';
 
@@ -113,7 +118,7 @@ const actions=(...buttons:string[])=>`<div class="actions">${buttons.join('')}</
 const bar=(n:number,max:number)=>`<div class="bar" role="progressbar" aria-label="进度" aria-valuemin="0" aria-valuemax="${max}" aria-valuenow="${Math.min(n,max)}"><span style="width:${Math.min(100,n/max*100)}%"></span></div>`;
 const coordinates=(tile:number)=>{const [x,y]=xy(tile);return `${x}, ${y}`;};
 
-const holdAvailable=()=>ready && speed>0 && !dialog.open && !blueprintDialog.open && !transferDialog.open;
+const holdAvailable=()=>ready && speed>0 && !dialog.open && !blueprintDialog.open && !transferDialog.open && !dropDialog.open && !dropDraft;
 const harvest=bindActionHold(app,{
   attribute:'data-gather', duration:450,
   available:tile=>holdAvailable() && tool===undefined && tile>=0 && !!cell(data,tile,Field.Ore),
@@ -202,6 +207,8 @@ function selectMode(next:Mode,crafting=false) {
     return;
   }
   if (guideOpen && next===operationPage() && !crafting) { closeGuide(); return; }
+  dropDraft=undefined;
+  groundTile=-1;
   guideOpen=false;
   clearDraft();
   mode=next;
@@ -226,6 +233,8 @@ function clearDraft() {
 function choose(next:Tool,anchor=-1,fromCatalog=false) {
   if (tool!==undefined && pending) return;
   if (typeof next==='number' && !unlocked(data,next)) return;
+  dropDraft=undefined;
+  groundTile=-1;
   clearDraft();
   catalogTool=fromCatalog;
   if (fromCatalog) draft.dataset.catalog='true';
@@ -546,6 +555,16 @@ function finishPathDrag(keep:boolean) {
 
 function tap(tile:number) {
   if (!ready) return;
+  if (dropDraft) {
+    const request=dropDraft;
+    const [x,y]=xy(tile);
+    if (!inBounds(limits,x,y)) { say(t('errors.3'),true); return; }
+    submit({op:Op.DropHeld,a:tile,b:request.item,c:request.count},count=>{
+      if (dropDraft===request) dropDraft=undefined;
+      say(t('ui.dropped',{item:ITEM[request.item],count}));
+    });
+    return;
+  }
   if (tool!==undefined) {
     if (pending) return;
     if (plainBelt(tool)) { tapBelt(tile); return; }
@@ -564,6 +583,7 @@ function tap(tile:number) {
     } else anchors=[tile];
     updateDraft(); return;
   }
+  groundTile=-1;
   const anchor=machineAnchor(data,tile);
   if (anchor>=0) tile=anchor;
   if (renderer && renderer.camera.zoom<13) {
@@ -640,6 +660,7 @@ function inspectors() {
   if (mode==='view' && manualWork) {
     return [t('ui.operations'),t('ui.handcraft'),handcraftPanel()];
   }
+  if (mode==='view' && groundTile>=0) return groundPanel(groundTile);
   if (mode==='view' || (inspectingTile && tool===undefined)) {
     const kind=selected<0?0:cell(data,selected,Field.Kind);
     if (kind===Kind.Station) return data[Meta.Stage]>=Stage.Valley?regionalPanel():orbitPanel();
@@ -652,6 +673,38 @@ function inspectors() {
   if (mode==='build') return buildPanel();
   if (mode==='view') return ['操作','选择设备','<p class="lead">点地图上的设备、矿点或输送带。</p>'];
   return missionPanel();
+}
+
+function pickGround(pile:GroundPile) {
+  if (tool!==undefined || dropDraft) return;
+  submit({op:Op.PickGround,a:pile.tile,b:pile.item,c:pile.id},count=>{
+    const remaining=groundPiles(data).get(pile.tile)?.find(row=>row.id===pile.id)?.count ?? 0;
+    say(t(remaining?'ui.groundPickedPartial':'ui.received',{item:ITEM[pile.item],count,remaining}));
+  });
+}
+
+function openGroundMarker(tiles:number[]) {
+  if (!ready || pending || tool!==undefined || dropDraft) return;
+  if (tiles.length>1) {
+    const camera=renderer?.camera;
+    const [x,y]=xy(tiles[0]);
+    camera?.aim(x+.5,y+.5,Math.min(limits.maxZoom,40));
+    return;
+  }
+  const tile=tiles[0], piles=groundPiles(data).get(tile) ?? [];
+  if (piles.length===1) pickGround(piles[0]);
+  if (piles.length<2) return;
+  groundTile=tile;
+  mode='view'; inspectingTile=false; manualWork=false; guideOpen=false;
+  closeInfo(); setPanel(true); refresh();
+}
+
+function groundPanel(tile:number) {
+  const entries=(groundPiles(data).get(tile) ?? []).map(({item,id,count})=>
+    `<div class="ground-picker-row"><span>${itemIcon(item)}${textHtml(ITEM[item])} ×${count}</span>`+
+    button(t('ui.pickGround'),`pick-ground-${tile}-${item}-${id}`)+`</div>`);
+  return [coordinates(tile),t('ui.groundItems'),entries.length?
+    `<div class="ground-picker">${entries.join('')}</div>`:`<p class="lead">${textHtml(t('ui.groundEmpty'))}</p>`];
 }
 
 function guideEntry(id:keyof typeof handbook,collapsible=false) {
@@ -1080,7 +1133,8 @@ function syncInfo() {
       (cap>=0?`<p>${textHtml(t('ui.capacity',{count,capacity:cap}))}</p>`:'')+
       (role==='held'?`<p>${textHtml(t('ui.stackUsage',{used:Math.ceil(count/stack),limit:stack}))}</p>`:'')+
       (help[role]?`<p>${textHtml(help[role])}</p>`:'')+
-      (infoPinned && count>1 && sameSlot(selectedItem,slot)?button(selectedItem?.quantity?`数量 ${selectedItem.quantity}`:'指定数量','transfer-amount'):'');
+      (infoPinned && count>1 && sameSlot(selectedItem,slot)?button(selectedItem?.quantity?`数量 ${selectedItem.quantity}`:'指定数量','transfer-amount'):'')+
+      (infoPinned && role==='held' && count>0?button(t('ui.dropTitle'),`drop-item-${item}`):'');
   }
   if (quickInfo.innerHTML!==html) quickInfo.innerHTML=html;
   const interactive=infoPinned && !!quickInfo.querySelector('button');
@@ -1175,6 +1229,10 @@ function renderBalances() {
 function refresh(force=true) {
   if (!ready) return;
   renderBalances();
+  byId('ground-drop-hint').hidden=!dropDraft;
+  if (dropDraft) {
+    byId('ground-drop-context').textContent=t('ui.dropHint',{item:ITEM[dropDraft.item],count:dropDraft.count});
+  }
   byId('clock').textContent=time(data[Meta.Tick]);
   const activePage=guideOpen?'guide':operationPage();
   for (const nav of document.querySelectorAll<HTMLButtonElement>('.mode')) {
@@ -1336,7 +1394,38 @@ byId<HTMLFormElement>('transfer-form').addEventListener('submit',event=>{
   transferDialog.close(); refresh();
 });
 
+byId<HTMLFormElement>('drop-form').addEventListener('submit',event=>{
+  event.preventDefault();
+  const count=byId<HTMLInputElement>('drop-quantity').valueAsNumber;
+  if (!dropItem || !Number.isInteger(count) || count<1 || count>held(data,dropItem)) return;
+  clearDraft(); closeInfo(); harvest.stop(); handcraft.stop();
+  selectedItem=undefined; groundTile=-1; guideOpen=false;
+  dropDraft={item:dropItem,count};
+  dropDialog.close();
+  setPanel(false);
+  refresh();
+});
+
 function onAction(action:string) {
+  const dropAction=/^drop-item-(\d+)$/.exec(action);
+  if (dropAction) {
+    dropItem=Number(dropAction[1]);
+    const count=held(data,dropItem);
+    if (count<=0) return;
+    byId('drop-material').textContent=ITEM[dropItem];
+    const input=byId<HTMLInputElement>('drop-quantity');
+    input.max=String(count); input.value='1';
+    dropDialog.showModal();
+    input.select();
+    return;
+  }
+  const pickup=/^pick-ground-(\d+)-(\d+)-(\d+)$/.exec(action);
+  if (pickup) {
+    const [,tile,item,id]=pickup.map(Number);
+    const pile=groundPiles(data).get(tile)?.find(row=>row.item===item && row.id===id);
+    if (pile) pickGround(pile);
+    return;
+  }
   const libraryAction=/^(preview|rename|delete)-blueprint-(\d+)$/.exec(action);
   if (libraryAction) {
     const [,verb,value]=libraryAction, id=Number(value);
@@ -1379,6 +1468,8 @@ function onAction(action:string) {
     return;
   }
   switch (action) {
+    case 'close-drop-dialog': dropDialog.close(); return;
+    case 'cancel-drop': dropDraft=undefined; refresh(); return;
     case 'home': home(); return;
     case 'close-guide': closeGuide(); return;
     case 'manual-work': selectMode('view',!manualWork); return;
@@ -1438,7 +1529,8 @@ function onAction(action:string) {
     case 'import': saveFile.click(); return;
     case 'reset-confirm': byId('reset-warning').hidden=false; return;
     case 'reset': {
-      clearDraft(); closeInfo(); selectedItem=undefined; selected=-1; focus=-1; traced=[]; mode='task'; recenter=true;
+      clearDraft(); closeInfo(); selectedItem=undefined; dropDraft=undefined; groundTile=-1;
+      selected=-1; focus=-1; traced=[]; mode='task'; recenter=true;
       guideOpen=false;
       buildTab='catalog';
       worker.postMessage({type:'reset'}); worker.postMessage({type:'save'}); dialog.close(); return;
@@ -1500,7 +1592,8 @@ window.addEventListener('pointercancel',()=>{panelPointer=false;});
 window.addEventListener('blur',()=>{panelPointer=false;});
 
 window.addEventListener('keydown',event=>{
-  if (blueprintDialog.open || transferDialog.open) return;
+  if (blueprintDialog.open || transferDialog.open || dropDialog.open) return;
+  if (event.key==='Escape' && dropDraft) { dropDraft=undefined; refresh(); return; }
   if (event.key==='Escape' && guideOpen && !dialog.open) { closeGuide(); return; }
   if (event.key==='Escape' && (infoKey || infoTile>=0 || selectedItem)) {
     closeInfo(); selectedItem=undefined; refresh(); return;
@@ -1625,7 +1718,8 @@ worker.onmessage=event=>{
     return;
   }
   if (message.type==='restored') {
-    clearDraft(); closeInfo(); selectedItem=undefined; mode='task'; focus=-1; selected=-1; traced=[]; recenter=true;
+    clearDraft(); closeInfo(); selectedItem=undefined; dropDraft=undefined; groundTile=-1;
+    mode='task'; focus=-1; selected=-1; traced=[]; recenter=true;
     guideOpen=false;
     buildTab='catalog';
     worker.postMessage({type:'save'}); dialog.close(); say('已恢复存档'); return;
@@ -1665,6 +1759,7 @@ function draw(now:number) {
       }
       renderer.render({data,mode,preview:ghost.cells,selected,focus,trace:traced,now,tick:data[Meta.Tick]+animationPhase(now),
         chipTile:gainTile,chip:gain.hidden?0:(gainUntil-now)/750});
+      groundMarkers.render(data,cam,tool===undefined && !dropDraft);
     }
     for (const {name,x,y,stage,element,oreTile} of mapLabels) {
       const [sx,sy]=renderer.camera.toScreen(x,y);

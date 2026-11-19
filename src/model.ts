@@ -29,7 +29,7 @@ export const enum Stage { Gather, Craft, PlaceMiner, Mining, Collect, Handwork, 
 export const enum Field { Kind, Direction, Wire, Ore, Cargo, Status, Grid, Config, Progress, Energy, Inventory, DeliveringKits = 18 }
 export const enum Op { Place = 1, Route, Remove, Configure, Launch, Trial, Blueprint, Rotate, Gather, CraftMiner, Collect, Handwork, Feed, OpenLine,
   Transfer, CaptureBlueprint, RenameBlueprint, DeleteBlueprint, MigrateBlueprint, BuildTransport, TakeCargo,
-  SelectRecipe, StartHandcraft, CancelHandcraft, FinishHandcraft }
+  SelectRecipe, StartHandcraft, CancelHandcraft, FinishHandcraft, DropHeld, PickGround }
 
 export const SPEED_MODULE = 9;
 export const STATUS = ['待命','运转','缺少进料','供电不足','出料阻塞','等待窗口','未选配方'];
@@ -66,7 +66,7 @@ export function cell(data:Int32Array, tile:number, field:number) {
   return data[HEADER + tile * STRIDE + field] ?? 0;
 }
 function recipesEnd(data:Int32Array) { return data[transportStart(data)-14]-1; }
-function recipesStart(data:Int32Array) { return data[recipesEnd(data)]; }
+export function recipesStart(data:Int32Array) { return data[recipesEnd(data)]; }
 export function legacyRecipes(data:Int32Array) { return data[recipesStart(data)]!==0; }
 export function selectedRecipe(data:Int32Array,tile:number) {
   for (let i=recipesStart(data)+2+content.items.length-10;i<recipesEnd(data);i+=3) {
