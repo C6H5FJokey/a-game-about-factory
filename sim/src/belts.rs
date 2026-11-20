@@ -16,7 +16,7 @@ pub struct Cargo {
     pub source: u16,
     pub id: i32,
     pub offset: u16,
-    pub from: u16,
+    pub from: i32,
     pub since: u32,
     pub ready: u32,
     pub blocked: bool,
@@ -40,7 +40,7 @@ impl Segment {
 
     pub fn enter(&mut self, mut cargo: Cargo, from: usize, tick: u32) {
         cargo.offset = 0;
-        cargo.from = from as u16;
+        cargo.from = from as i32;
         cargo.since = tick;
         cargo.ready = belt_deadline(tick, self.interval, self.rate);
         cargo.blocked = false;
@@ -73,7 +73,7 @@ impl Segment {
             let mut current = usize::from(cargo.offset);
             if current + 1 < ahead {
                 if cargo.ready <= tick {
-                    cargo.from = self.nodes[current] as u16;
+                    cargo.from = self.nodes[current] as i32;
                     cargo.since = tick;
                     cargo.ready = belt_deadline(tick, self.interval, self.rate);
                     current += 1;

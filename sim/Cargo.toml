@@ -6,6 +6,9 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+terminal-profile = []
+
 [profile.release]
 lto = true
 codegen-units = 1

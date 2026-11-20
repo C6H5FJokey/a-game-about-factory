@@ -32,7 +32,7 @@ impl World {
                 cargo.id,
                 cargo.item.into(),
                 self.cells[location / 2].identity,
-                cargo.from.into(),
+                cargo.from,
                 cargo.since as i32,
                 cargo.ready as i32,
                 cargo.blocked as i32,
@@ -42,7 +42,7 @@ impl World {
         // transient arrivals without changing projection or save offsets.
         for arrival in &self.belt_arrivals {
             out.extend([
-                -1 - i32::from(arrival.from),
+                -1 - arrival.from,
                 arrival.id,
                 arrival.item.into(),
                 arrival.target.into(),
@@ -72,7 +72,7 @@ impl World {
                 cargo.id,
                 cargo.item.into(),
                 cargo.source.into(),
-                cargo.from.into(),
+                cargo.from,
                 cargo.since as i32,
                 cargo.ready as i32,
                 cargo.blocked as i32,
@@ -130,7 +130,7 @@ impl World {
                 item: item as u8,
                 source: source as u16,
                 id,
-                from: from as u16,
+                from,
                 since,
                 ready,
                 blocked: blocked == 1,
@@ -180,7 +180,7 @@ impl World {
             item,
             source,
             id: self.next_cargo_id,
-            from: location as u16,
+            from: location as i32,
             since: self.tick,
             ready: legacy_cargo_ready(self.tick),
             ..Cargo::default()

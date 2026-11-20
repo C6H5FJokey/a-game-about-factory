@@ -1,4 +1,4 @@
-import { HZ, Op, type Command } from './model';
+import { H, HZ, Op, W, type Command } from './model';
 
 type Kernel = WebAssembly.Exports & {
   memory: WebAssembly.Memory;
@@ -7,6 +7,7 @@ type Kernel = WebAssembly.Exports & {
   preview_transports(len:number):number;
   reset():void; step(ticks:number):void; max_speed():number;
   content_signature():number; tick_rate():number;
+  world_width():number; world_height():number;
   command(op:number,a:number,b:number,c:number,len:number):number;
   save():number; restore(len:number):number;
 };
@@ -26,6 +27,7 @@ let previous = 0;
 let budget = 0;
 const buffers:ArrayBuffer[] = [];
 const TICK_MS = 1000 / HZ;
+const blueprintMutations = new Set<Op>([Op.CaptureBlueprint, Op.RenameBlueprint, Op.DeleteBlueprint, Op.MigrateBlueprint]);
 
 function input(words:Int32Array | number[]) {
   if (!kernel) return false;
@@ -73,7 +75,8 @@ async function boot(url:string, signature:number, save?:unknown, legacy?:number[
     const result = await WebAssembly.instantiate(await file.arrayBuffer());
     const loaded = result.instance.exports as Kernel;
     if (typeof loaded.content_signature !== 'function' || (loaded.content_signature() >>> 0) !== signature
-      || typeof loaded.tick_rate !== 'function' || loaded.tick_rate() !== HZ) {
+      || typeof loaded.tick_rate !== 'function' || loaded.tick_rate() !== HZ
+      || loaded.world_width?.() !== W || loaded.world_height?.() !== H) {
       worker.postMessage({type:'error',key:'ui.sameContentRequired'});
       return;
     }
@@ -126,7 +129,7 @@ worker.onmessage = event => {
     case 'command': {
       const { op,a=0,b=0,c=0,words=[] } = message.data;
       const status = input(words) ? kernel.command(op,a,b,c,words.length) : -1;
-      if (status>0 && op>=Op.CaptureBlueprint && op<=Op.MigrateBlueprint) publishBlueprints();
+      if (status>0 && blueprintMutations.has(op)) publishBlueprints();
       snapshot();
       worker.postMessage({type:'command-result',status});
       return;

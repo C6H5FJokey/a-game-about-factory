@@ -10,6 +10,8 @@ mod inventory;
 mod progression;
 mod recipes;
 mod regions;
+#[cfg(feature = "terminal-profile")]
+mod terminal_profile;
 mod transport;
 mod transport_save;
 #[cfg(test)]
@@ -24,7 +26,7 @@ use catalog::*;
 use regions::*;
 use world::{Cell, Orbit, World, FUEL_STEPS_PER_TICK};
 
-const HEADER: usize = 54 + 3 * 14 + 2;
+const HEADER: usize = SNAPSHOT_HEADER_WORDS;
 const SAVE_HEADER: usize = 32 + 2 * LEGACY_ROUTE_WORDS;
 const SAVE_CELL_WORDS: usize = 19;
 const SAVE_WORDS: usize = SAVE_HEADER + N * SAVE_CELL_WORDS;
@@ -104,6 +106,16 @@ pub extern "C" fn tick_rate() -> u32 {
 }
 
 #[no_mangle]
+pub extern "C" fn world_width() -> usize {
+    W
+}
+
+#[no_mangle]
+pub extern "C" fn world_height() -> usize {
+    H
+}
+
+#[no_mangle]
 pub extern "C" fn content_signature() -> u32 {
     BUILD_SIGNATURE
 }
@@ -117,45 +129,46 @@ pub extern "C" fn command(op: i32, a: i32, b: i32, c: i32, len: usize) -> i32 {
             return -1;
         };
         let clicked = a as usize;
-        let tile = if clicked < N && matches!(op, 4 | 8 | 11 | 13) {
-            world.footprints.owner(clicked).unwrap_or(clicked)
-        } else {
-            clicked
-        };
+        let tile =
+            if clicked < N && matches!(op, op::CONFIGURE | op::ROTATE | op::COLLECT | op::FEED) {
+                world.footprints.owner(clicked).unwrap_or(clicked)
+            } else {
+                clicked
+            };
         match op {
-            1 if tile < N => world.place(tile, b, c),
-            2 => world.route(a == 1, words),
-            3 if tile < N => world.remove(tile, b == 1),
-            4 if tile < N => world.configure(tile, b),
-            5 => world.launch(),
-            6 if (0..=2).contains(&b) => world.regional_window(tile, b as u8),
-            7 => match words {
+            op::PLACE if tile < N => world.place(tile, b, c),
+            op::ROUTE => world.route(a == 1, words),
+            op::REMOVE if tile < N => world.remove(tile, b == 1),
+            op::CONFIGURE if tile < N => world.configure(tile, b),
+            op::LAUNCH => world.launch(),
+            op::TRIAL if (0..=2).contains(&b) => world.regional_window(tile, b as u8),
+            op::BLUEPRINT => match words {
                 &[turns] => world.deploy_blueprint(tile, b, c, turns),
                 _ => -1,
             },
-            8 if tile < N => world.rotate(tile),
-            9 if tile < N => world.gather(tile),
-            10 => world.craft_miner(),
-            11 if tile < N => world.collect(tile),
-            12 if world.legacy_recipes => world.handwork(),
-            13 if tile < N && (1..MATERIAL_ITEMS as i32).contains(&b) => {
+            op::ROTATE if tile < N => world.rotate(tile),
+            op::GATHER if tile < N => world.gather(tile),
+            op::CRAFT_MINER => world.craft_miner(),
+            op::COLLECT if tile < N => world.collect(tile),
+            op::HANDWORK if world.legacy_recipes => world.handwork(),
+            op::FEED if tile < N && (1..MATERIAL_ITEMS as i32).contains(&b) => {
                 world.hand_feed(tile, b as u8)
             }
-            14 => world.open_line(tile),
-            15 => world.transfer(a, b, c, words),
-            16 => world.capture_blueprint(tile, b as usize, words),
-            17 => world.blueprints.rename(a, words),
-            18 => world.blueprints.delete(a),
-            19 => world.blueprints.import_legacy(words),
-            20 => world.build_transports(a, words),
-            21 => world.take_cargo(tile, b as usize, c, words),
-            22 if tile < N => world.select_recipe(tile, b, c),
-            23 => world.start_handcraft(a, b),
-            24 => world.cancel_handcraft(a),
-            25 => world.finish_handcraft(a),
-            26 => world.drop_held(tile, b, c),
-            27 => world.pick_ground(tile, b, c),
-            28 => world.remove_cables(words),
+            op::OPEN_LINE => world.open_line(tile),
+            op::TRANSFER => world.transfer(a, b, c, words),
+            op::CAPTURE_BLUEPRINT => world.capture_blueprint(tile, b as usize, words),
+            op::RENAME_BLUEPRINT => world.blueprints.rename(a, words),
+            op::DELETE_BLUEPRINT => world.blueprints.delete(a),
+            op::MIGRATE_BLUEPRINT => world.blueprints.import_legacy(words),
+            op::BUILD_TRANSPORT => world.build_transports(a, words),
+            op::TAKE_CARGO => world.take_cargo(tile, b as usize, c, words),
+            op::SELECT_RECIPE if tile < N => world.select_recipe(tile, b, c),
+            op::START_HANDCRAFT => world.start_handcraft(a, b),
+            op::CANCEL_HANDCRAFT => world.cancel_handcraft(a),
+            op::FINISH_HANDCRAFT => world.finish_handcraft(a),
+            op::DROP_HELD => world.drop_held(tile, b, c),
+            op::PICK_GROUND => world.pick_ground(tile, b, c),
+            op::REMOVE_CABLES => world.remove_cables(words),
             _ => -1,
         }
     })
@@ -300,6 +313,7 @@ pub extern "C" fn snapshot() -> usize {
             output.extend(c.inv[1..LEGACY_MATERIAL_ITEMS].iter().map(|&n| n as i32));
             output.push(c.delivering_kits(world.tick) as i32);
         }
+        debug_assert_eq!(HEADER + N * SNAPSHOT_CELL_WORDS, output.len());
         for g in &world.grids {
             output.extend([
                 g.generation as i32,

@@ -65,7 +65,7 @@ fn load(world: &mut World, tile: usize, lane: usize, item: u8, source: u16) -> i
         id,
         item,
         source,
-        from: node(tile, lane) as u16,
+        from: node(tile, lane) as i32,
         ..Cargo::default()
     };
     id
@@ -174,7 +174,7 @@ fn merger_alternates_skips_empty_and_restarts_after_jam() {
         advance(&mut world, 1);
         let cargo = world.cargo[node(out, 0)];
         if cargo.id != 0 && cargo.id != observed {
-            assert_eq!(cargo.from, node(junction, 0) as u16);
+            assert_eq!(cargo.from, node(junction, 0) as i32);
             observed = cargo.id;
             entries.push(cargo.item);
         }
@@ -226,7 +226,7 @@ fn crossing_blocks_one_direction_and_takes_only_the_selected_cargo() {
     assert_eq!([iron.item, silica.item], [IRON, SILICA]);
     assert!(iron.blocked);
     assert!(!silica.blocked);
-    assert_eq!(silica.from, node(index(10, 9), 0) as u16);
+    assert_eq!(silica.from, node(index(10, 9), 0) as i32);
     let device = world.cells[crossing].identity;
     assert_eq!(
         world.take_cargo(crossing, 1, IRON.into(), &[iron.id, device]),
@@ -402,15 +402,15 @@ fn splitter_projects_the_branch_that_was_really_available() {
     world.rebuild();
     advance(&mut world, simulation_ticks(5));
     let item = world.cargo[node(bend, 0)];
-    assert_eq!(item.from, node(index(8, 9), 0) as u16);
+    assert_eq!(item.from, node(index(8, 9), 0) as i32);
     advance(&mut world, simulation_ticks(5));
     let through_split = world.cargo[node(split, 0)];
     assert_eq!(through_split.id, item.id);
-    assert_eq!(through_split.from, node(bend, 0) as u16);
+    assert_eq!(through_split.from, node(bend, 0) as i32);
     advance(&mut world, simulation_ticks(5));
     let selected_branch = world.cargo[node(branch, 0)];
     assert_eq!(selected_branch.id, item.id);
-    assert_eq!(selected_branch.from, node(split, 0) as u16);
+    assert_eq!(selected_branch.from, node(split, 0) as i32);
     assert_eq!(
         selected_branch.ready - selected_branch.since,
         simulation_ticks(2)

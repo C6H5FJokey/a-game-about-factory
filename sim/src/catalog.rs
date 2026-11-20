@@ -1,6 +1,16 @@
-pub const W: usize = 56;
-pub const H: usize = 34;
+pub const W: usize = if cfg!(feature = "terminal-profile") {
+    256
+} else {
+    WORLD_WIDTH
+};
+pub const H: usize = if cfg!(feature = "terminal-profile") {
+    224
+} else {
+    WORLD_HEIGHT
+};
 pub const N: usize = W * H;
+// Footprint owners and producer IDs reserve a sentinel above the last tile.
+const _: () = assert!(N < u16::MAX as usize);
 pub const BELT_TICKS: u32 = 5;
 pub const LEGACY_MATERIAL_ITEMS: usize = 9;
 pub const MATERIAL_ITEMS: usize = ITEMS;

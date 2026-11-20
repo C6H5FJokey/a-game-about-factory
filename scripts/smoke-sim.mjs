@@ -156,7 +156,9 @@ function legacySave(current,version) {
   ]);
 }
 
-const reviewSaves = process.argv.includes('--capture-visual-review') ? new Map() : undefined;
+const captureVisual = process.argv.includes('--capture-visual-review');
+const capturePerformance = process.argv.includes('--capture-performance');
+const reviewSaves = captureVisual || capturePerformance ? new Map() : undefined;
 function captureReview(name) {
   if (reviewSaves) reviewSaves.set(name, new Uint8Array(save().buffer));
 }
@@ -1006,9 +1008,62 @@ assert.equal(warehouseStock(moduleDepot,9),1);
 assert.equal(limits()[12],0,'A module stored in a warehouse is not installed.');
 console.log('发展系统通过：满仓限制、阶段交付站、地图与倍速边界、高阶设备、V6 迁移及速度模块。');
 
-if (reviewSaves) {
-  const directory = new URL('../docs/visual-review.local/', import.meta.url);
+async function writeFixtures(directory, saves) {
   await mkdir(directory, { recursive: true });
-  await Promise.all([...reviewSaves].map(([name, data]) =>
+  await Promise.all([...saves].map(([name, data]) =>
     writeFile(new URL(name + '.dawn', directory), data)));
+}
+
+function denseBeltFixture() {
+  // The two omitted row pairs contain reserved ground station tiles.
+  const rows = [2, 4, 6, 8, 10, 12, 16, 18, 20, 22, 24, 26, 30, 32];
+  const left = 4, right = 50;
+  const cargoPerLoop = 40;
+  const cargoCount = rows.length * cargoPerLoop;
+  const funded = modernEmpty.slice();
+  funded[23] = 11; // Expand stage permits warehouse exports on the full map.
+  funded[5] = cargoCount;
+  funded[8] = 2000;
+  assert.equal(restore(funded), 1);
+
+  const parts = [];
+  for (const y of rows) {
+    for (let x = left; x <= right; x++) {
+      parts.push(tile(x, y), 1, x === right ? 1 : 0);
+      parts.push(tile(x, y + 1), 1, x === left ? 3 : 2);
+    }
+  }
+  const preview = previewTransports(parts);
+  assert.equal(preview[0], 1);
+  assert.equal(command(20, preview[2], 0, 0, parts), 1);
+  for (const y of rows) {
+    place(left - 1, y, 12);
+    const warehouse = tile(left - 1, y);
+    fundWarehouse(warehouse, 1, cargoPerLoop);
+    act(4, left - 1, y, 1);
+  }
+  advance(100 * hz);
+  const loaded = save();
+  const positions = tracksById();
+  assert.equal(positions.size, cargoCount, 'Every seeded item must be in transit.');
+  advance(hz);
+  const later = tracksById();
+  assert.equal(later.size, positions.size);
+  assert.ok([...positions].every(([id, position]) => later.get(id) !== position),
+    'All cargo must circulate without continued supply.');
+  return new Uint8Array(loaded.buffer);
+}
+
+function tracksById() {
+  return new Map([...cargoTracks()].map(([location, [id]]) => [id, location]));
+}
+
+if (captureVisual) await writeFixtures(new URL('../docs/visual-review.local/', import.meta.url), reviewSaves);
+if (capturePerformance) {
+  const fixtures = new Map([
+    ['opening', new Uint8Array(modernEmpty.buffer)],
+    ['three-cities', reviewSaves.get('three-cities')],
+    ['dense-belts', denseBeltFixture()],
+  ]);
+  await writeFixtures(new URL('../docs/performance.local/', import.meta.url), fixtures);
 }

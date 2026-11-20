@@ -35,7 +35,7 @@ flowchart LR
 | --- | --- | --- |
 | 面板、操作流程、键鼠与触屏 | [main.ts](../src/main.ts) · [input.ts](../src/input.ts) · [inventory-drag.ts](../src/inventory-drag.ts) · [action-hold.ts](../src/action-hold.ts) | `main.ts` 装配 UI 和 Worker，手势绑定把输入交给相同的操作入口。 |
 | 地图绘制、端口与路径 | [renderer.ts](../src/renderer.ts) · [icons.ts](../src/icons.ts) · [machine-layout.ts](../src/machine-layout.ts) · [belt-route.ts](../src/belt-route.ts) · [footprints.rs](../sim/src/footprints.rs) | 地图和货物用 WebGL 图元，界面图标用代码生成的 SVG。TypeScript 负责寻路与施工预览，Rust 校验占地、朝向和端口。 |
-| 通信协议 | [worker.ts](../src/worker.ts) · [model.ts](../src/model.ts) · [sim-data.ts](../src/sim-data.ts) · [lib.rs](../sim/src/lib.rs) · [interface.rs](../sim/src/interface.rs) | 包含消息、命令参数和快照记录。目录、蓝图库和运输预览有各自的返回消息。 |
+| 通信协议 | [protocol.json](../data/protocol.json) · [worker.ts](../src/worker.ts) · [model.ts](../src/model.ts) · [sim-data.ts](../src/sim-data.ts) · [lib.rs](../sim/src/lib.rs) · [interface.rs](../sim/src/interface.rs) | 命令编号、地图尺寸和固定帧长度从协议声明生成。目录、蓝图库和运输预览有各自的返回消息。 |
 | 物流与运输 | [belts.rs](../sim/src/belts.rs) · [transport.rs](../sim/src/transport.rs) · [transport_save.rs](../sim/src/transport_save.rs) · [regions.rs](../sim/src/regions.rs) | 管运输段、普通带优先级、专用装置、库存端点、货箱和运输持久化。 |
 | 加工、电力、库存、建造 | [world.rs](../sim/src/world.rs) · [recipes.rs](../sim/src/recipes.rs) · [inventory.rs](../sim/src/inventory.rs) · [construction.rs](../sim/src/construction.rs) · [ground.rs](../sim/src/ground.rs) | `World::step` 分配供电和推进工序。容量、取放、支付和退款由 Rust 校验。 |
 | 进度、地图限制、轨道、蓝图 | [campaign.rs](../sim/src/campaign.rs) · [progression.rs](../sim/src/progression.rs) · [regions.rs](../sim/src/regions.rs) · [blueprints.rs](../sim/src/blueprints.rs) | 模拟决定解锁和验收，前端任务与手册读取当前阶段。 |
@@ -51,14 +51,16 @@ flowchart LR
 
 下表列出在当前代码中能定位的问题，处理顺序按下一次改动会触及的边界给出。性能项目需要用测量决定投入。
 
+当前版本的实测、可维护性指标和复测命令见[工程质量基线](quality-baseline.md)。
+
 | 技术债 | 证据与影响 | 建议处理时机与验收 |
 | --- | --- | --- |
-| **手工维护跨语言的二进制协议** | Rust 与 TypeScript 分别维护命令编号、固定格步长和变长段位置。读层有从帧尾向前定位其他段的偏移计算，新增字段时也要同步维护前端与测试读法。[Rust 写端](../sim/src/lib.rs) · [TS 读端](../src/model.ts) · [Wasm 端到端检查](../scripts/smoke-sim.mjs) | 下次扩快照或加命令时，从一份声明生成双方的字段常量和段表。用小型样本验证编码、解码、长度与版本。保留现有紧凑缓冲。 |
+| **手工维护变长快照协议** | 命令编号和固定布局尺寸已由一份声明生成。变长段读层仍从帧尾向前定位其他段；新增字段需同步前端与测试读法。[协议声明](../data/protocol.json) · [Rust 写端](../sim/src/lib.rs) · [TS 读端](../src/model.ts) | 下次扩展快照时从一份段声明生成双方的字段常量和段目录，用编码样本验收。 |
 | **前端入口集中承担交互状态** | `main.ts` 约两千行，同时控制抽屉、地图选中、库存点击时序、施工草稿、Worker 回执和存档。库存与施工改动容易碰到焦点、取消和暂停的联动。仓库供料预览还在 TypeScript 与 Rust 两侧分别计算。[页面编排](../src/main.ts) · [前端供料预览](../src/sim-data.ts) · [模拟施工](../sim/src/construction.rs) | 碰到下一项库存或施工功能时，先将对应交互状态收进独立模块，把可复用的预览结果从 Rust 返回给界面。用实际浏览器覆盖点选、拖拽、取消和命令被拒绝后的状态。 |
-| **固定地图与整图快照限制扩图** | 当前地图为 56 × 34。每格 19 个 `i32`，仅格区每份快照已有约 141 KiB。Worker 仍写出整图，视野裁剪发生在渲染端。规格里的 50,000 格传送带压力目标超出了现有地图容量。[地图常量](../sim/src/catalog.rs) · [快照写出](../sim/src/lib.rs) · [性能目标](game-spec.md#性能验收候选值) | 扩图前先分开测量模拟步、快照写出、传输和浏览器帧时间。根据结果分块发送静态拓扑与视野内动态状态，同时验证镜头外产线和读档后结果一致。 |
+| **整图快照限制扩图** | 发布地图为 56 × 34。256 × 224 的独立模拟已实测约 5.4 MB 整图快照，写出加复制比步进开销高。镜头裁剪当前在渲染端。[快照写出](../sim/src/lib.rs) · [扩容实测](quality-baseline.md#两小时档的扩容模拟) | 下一次扩容优先分开静态拓扑与动态快照。复测视野内更新与视野外继续模拟，验证浏览器帧间隔及读档结果。 |
 | **拓扑重建与设备调度的工作量绑定** | `World::rebuild` 一次重建占地、输送拓扑和电网，`update_grids` 遍历整图。电力和生产按已登记设备逐步扫描。传送段已有就绪时间跳过无须推进的队列，规格中的设备级唤醒和局部电网重建仍是扩展方向。[拓扑与设备调度](../sim/src/world.rs) · [运输段调度](../sim/src/belts.rs) | 批量施工或更大地图前测量单次施工尖峰与稳态开销。若重建成为瓶颈，再按电网和运输段拆分失效范围。用拆接电缆、阻塞恢复和货物守恒回归验证。 |
 | **进度规则仍与固定标识耦合** | 物品和机种的注册范围受到构建校验及运行时常量约束。教学阶段与机种开放条件在 Rust 和前端任务说明之间绑定。阶段提交、奖励和速度模块来源仍在交接待办。[注册与校验](../scripts/content.mjs) · [阶段规则](../sim/src/campaign.rs) · [阶段交付待办](progression-handoff.md#阶段交付待办) | 接阶段交付时，把要求、奖励和任务文案键放入共用数据表。验证更换一项交付需求后，界面、扣料、奖励和存档恢复保持一致。 |
-| **浏览器回归和性能基线还需补齐** | 现有回归强项是 Rust 规则、Wasm 主线和自定义数据。浏览器评审场景可本地运行，Pages 工作流运行静态包验证和默认配置的模拟回归。现有性能脚本在 Node 中测 `step`，从数据中无法得到渲染帧时间或快照传输开销。[Pages 工作流](../.github/workflows/pages.yml) · [评审与测试入口](../package.json) · [模拟计时脚本](../scripts/profile-sim.mjs) | 优先固定开局、空容器投放、批量铺拆和存档导入几条浏览器冒烟路径。扩图时保存可复现样本，分别记录浏览器与设备环境和各阶段计时。 |
+| **浏览器回归和扩容性能基线还需补齐** | 现有回归强项是 Rust 规则、Wasm 主线和自定义数据。性能工具已分开记录 Node 下的步进与快照成本，以及浏览器帧和快照到达节奏。Pages 工作流覆盖静态包与默认配置的模拟，浏览器操作仍主要靠本地评审。[Pages 工作流](../.github/workflows/pages.yml) · [工程质量基线](quality-baseline.md) | 优先固定开局、空容器投放、批量铺拆和存档导入几条浏览器冒烟路径。扩图时保存可复现样本，分别记录浏览器与设备环境和各阶段计时。 |
 
 ## 验证入口
 

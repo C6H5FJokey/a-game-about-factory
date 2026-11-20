@@ -7,7 +7,7 @@ use crate::world::World;
 pub(crate) const BELT_ARRIVAL_TICKS: u32 = 12;
 
 pub(crate) struct BeltArrival {
-    pub from: u16,
+    pub from: i32,
     pub target: u16,
     pub flow: u8,
     pub item: u8,
@@ -150,7 +150,7 @@ impl World {
                 self.belt.segments[id].depart(self.tick);
                 if !is_belt(self.cells[next].kind) {
                     self.belt_arrivals.push_back(BeltArrival {
-                        from: from as u16,
+                        from: from as i32,
                         target: next as u16,
                         flow,
                         item: cargo.item,

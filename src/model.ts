@@ -1,7 +1,7 @@
-import { content, SIM_HZ as HZ } from './generated-content';
+import { content, Op, SIM_HZ as HZ, WORLD_WIDTH as W, WORLD_HEIGHT as H,
+  SNAPSHOT_HEADER_WORDS as HEADER, SNAPSHOT_CELL_WORDS as STRIDE } from './generated-content';
 
-export { HZ };
-export const W = 56, H = 34, HEADER = 98, STRIDE = 19;
+export { HZ, W, H, HEADER, STRIDE, Op };
 export const STATION = 15 * W + 33;
 export const STEP = [[1,0],[0,1],[-1,0],[0,-1]] as const;
 export const DIRECTION = ['东', '南', '西', '北'];
@@ -27,9 +27,6 @@ export function cityValue(data:Int32Array, city:number, field:CityField) { retur
 export const enum Stage { Gather, Craft, PlaceMiner, Mining, Collect, Handwork, Bench, Feed, Working,
   Belt, BeltFed, Expand, Power, Silica, Optics, Assemble, Launch, Tracking, Sunlight, Valley, Highland, Acceptance, Victory }
 export const enum Field { Kind, Direction, Wire, Ore, Cargo, Status, Grid, Config, Progress, Energy, Inventory, DeliveringKits = 18 }
-export const enum Op { Place = 1, Route, Remove, Configure, Launch, Trial, Blueprint, Rotate, Gather, CraftMiner, Collect, Handwork, Feed, OpenLine,
-  Transfer, CaptureBlueprint, RenameBlueprint, DeleteBlueprint, MigrateBlueprint, BuildTransport, TakeCargo,
-  SelectRecipe, StartHandcraft, CancelHandcraft, FinishHandcraft, DropHeld, PickGround, RemoveCables }
 
 export const SPEED_MODULE = 9;
 export const STATUS = ['待命','运转','缺少进料','供电不足','出料阻塞','等待窗口','未选配方'];

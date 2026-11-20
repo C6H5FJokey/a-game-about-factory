@@ -144,7 +144,7 @@ impl World {
                 if cargo[target].item != 0 {
                     return Err((-21, tile as i32));
                 }
-                let location = node(tile, target) as u16;
+                let location = node(tile, target) as i32;
                 cargo[target] = Cargo {
                     from: location,
                     since: self.tick,
