@@ -10,7 +10,15 @@ use crate::{Runtime, RUNTIME};
 impl World {
     pub fn write_device_data(&self, out: &mut Vec<i32>) {
         let start = out.len();
+        self.append_device_data(out, |_| true);
+        out.push(start as i32);
+    }
+
+    pub fn append_device_data(&self, out: &mut Vec<i32>, include: impl Fn(usize) -> bool) {
         for &tile in &self.machines {
+            if !include(tile) {
+                continue;
+            }
             let cell = self.cells[tile];
             let grade = miner_grade(cell.kind);
             let ore = cell.mining_ore;
@@ -28,7 +36,6 @@ impl World {
             ]);
             self.write_slots(tile, out);
         }
-        out.push(start as i32);
     }
 
     pub fn write_saved_devices(&self, out: &mut Vec<i32>) {

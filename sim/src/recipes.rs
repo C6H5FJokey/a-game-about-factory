@@ -307,6 +307,11 @@ impl World {
 
     pub fn write_recipe_view(&self, out: &mut Vec<i32>) {
         let start = out.len();
+        self.append_recipe_view(out, |_| true);
+        out.push(start as i32);
+    }
+
+    pub fn append_recipe_view(&self, out: &mut Vec<i32>, include: impl Fn(usize) -> bool) {
         out.extend([
             self.legacy_recipes as i32,
             (32..=MAX_KIND)
@@ -316,7 +321,7 @@ impl World {
         out.extend(self.stock[10..].iter().map(|&n| n as i32));
         for &tile in &self.machines {
             let cell = &self.cells[tile];
-            if cell.selected_recipe > 0 {
+            if cell.selected_recipe > 0 && include(tile) {
                 out.extend([
                     tile as i32,
                     RECIPES[cell.selected_recipe as usize - 1].key,
@@ -327,7 +332,6 @@ impl World {
                 ]);
             }
         }
-        out.push(start as i32);
     }
 
     pub fn write_recipe_save(&self, out: &mut Vec<i32>) {

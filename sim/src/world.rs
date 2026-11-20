@@ -110,6 +110,7 @@ pub struct World {
     pub blueprints: Library,
     pub next_cargo_id: i32,
     pub layout_revision: i32,
+    pub view_revision: i32,
 }
 
 impl World {
@@ -141,6 +142,7 @@ impl World {
             blueprints: Library::default(),
             next_cargo_id: 1,
             layout_revision: 0,
+            view_revision: 0,
         }
     }
 
@@ -191,6 +193,7 @@ impl World {
     }
 
     pub fn update_grids(&mut self) {
+        self.view_revision = self.view_revision.wrapping_add(1);
         self.grids.clear();
         self.grids.push(Grid::default());
         self.machines.clear();

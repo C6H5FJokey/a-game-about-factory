@@ -1,8 +1,10 @@
-import { H, HZ, Op, W, type Command } from './model';
+import { H, HZ, Op, W, terminalReview, type Command } from './model';
 
 type Kernel = WebAssembly.Exports & {
   memory: WebAssembly.Memory;
   reserve_input(length:number):number; output_ptr():number; snapshot():number;
+  snapshot_layout(revision:number,stage:number,cached:number):number;
+  snapshot_view(...scope:ViewScope):number;
   directory():number; blueprints():number;
   preview_transports(len:number):number;
   reset():void; step(ticks:number):void; max_speed():number;
@@ -10,12 +12,20 @@ type Kernel = WebAssembly.Exports & {
   world_width():number; world_height():number;
   command(op:number,a:number,b:number,c:number,len:number):number;
   save():number; restore(len:number):number;
+  prepare_terminal_profile?():void;
+  feed_terminal_profile?():number;
+  terminal_profile_stats?():number;
+  prepare_terminal_exercise?():void;
+  terminal_exercise_state?():number;
 };
-type Message = { type:'init'; url:string; signature:number; save?:unknown; legacy?:number[] } | { type:'command'; data:Command } |
+type ViewScope = [number,number,number,number,number,number,number,number];
+type Message = { type:'init'; url:string; signature:number; save?:unknown; legacy?:number[]; fullSnapshot?:boolean } | { type:'command'; data:Command } |
   { type:'cancel-handcraft'; token:number } |
   { type:'speed'; speed:number } | { type:'recycle'; buffer:ArrayBuffer } |
   { type:'restore'; buffer:ArrayBuffer } | { type:'reset' } | { type:'save' } |
-  { type:'transport-preview'; request:number; words:number[] };
+  { type:'transport-preview'; request:number; words:number[] } |
+  { type:'profile-stats' } | { type:'profile-exercise' } | { type:'profile-advance'; ticks:number }
+  | { type:'profile-line' } | { type:'view'; scope:ViewScope };
 
 const worker = self as unknown as {
   onmessage: ((event:MessageEvent<Message>)=>void) | null;
@@ -25,6 +35,10 @@ let kernel: Kernel | undefined;
 let speed = 1;
 let previous = 0;
 let budget = 0;
+let supplied = 0;
+let fullSnapshot = false;
+let scope:ViewScope=[0,0,0,0,-1,-1,-1,-1];
+let layoutKey:Int32Array | undefined;
 const buffers:ArrayBuffer[] = [];
 const TICK_MS = 1000 / HZ;
 const blueprintMutations = new Set<Op>([Op.CaptureBlueprint, Op.RenameBlueprint, Op.DeleteBlueprint, Op.MigrateBlueprint]);
@@ -56,10 +70,30 @@ function copyOutput(length:number, reusable = false) {
   return buffer;
 }
 
-function snapshot(immediate=false) {
+function snapshot(immediate=false, steps?:number[]) {
   if (!kernel) return;
-  const buffer = copyOutput(kernel.snapshot(),true);
-  worker.postMessage({type:'snapshot',buffer,immediate},[buffer]);
+  const start=terminalReview ? performance.now() : 0;
+  let layoutWrite=0, layoutCopy=0, viewStarted=start;
+  if (!fullSnapshot) {
+    const words=kernel.snapshot_layout(layoutKey?.[0] ?? 0,layoutKey?.[1] ?? 0,Number(Boolean(layoutKey)));
+    if (words) {
+      const wroteLayout=terminalReview ? performance.now() : 0;
+      const buffer=copyOutput(words);
+      layoutKey=new Int32Array(buffer,0,2).slice();
+      if (terminalReview) {
+        layoutWrite=wroteLayout-start;
+        layoutCopy=performance.now()-wroteLayout;
+      }
+      worker.postMessage({type:'snapshot-layout',buffer},[buffer]);
+      if (terminalReview) viewStarted=performance.now();
+    }
+  }
+  const length=fullSnapshot ? kernel.snapshot() : kernel.snapshot_view(...scope);
+  const written=terminalReview ? performance.now() : 0;
+  const buffer=copyOutput(length,true);
+  const profile=terminalReview ? {steps,writeMs:layoutWrite+written-viewStarted,copyMs:layoutCopy+performance.now()-written,
+    sentAt:performance.timeOrigin+performance.now()} : undefined;
+  worker.postMessage({type:'snapshot',buffer,immediate,scoped:!fullSnapshot,profile},[buffer]);
 }
 
 function restoreSave(buffer:unknown) {
@@ -68,7 +102,18 @@ function restoreSave(buffer:unknown) {
   return input(words) ? kernel.restore(words.length) : -1;
 }
 
-async function boot(url:string, signature:number, save?:unknown, legacy?:number[]) {
+function advanceProfile(sim:Kernel,ticks:number,measure=true) {
+  const times:number[]=[];
+  for (let i=0;i<ticks;i++) {
+    supplied+=sim.feed_terminal_profile!();
+    const start=measure ? performance.now() : 0;
+    sim.step(1);
+    if (measure) times.push(performance.now()-start);
+  }
+  return times;
+}
+
+async function boot(url:string, signature:number, save?:unknown, legacy?:number[], full=false) {
   try {
     const file = await fetch(url);
     if (!file.ok) throw new Error(`模拟文件加载失败 (${file.status})`);
@@ -81,7 +126,12 @@ async function boot(url:string, signature:number, save?:unknown, legacy?:number[
       return;
     }
     kernel = loaded;
-    if (save!==undefined) {
+    fullSnapshot=terminalReview && full;
+    if (terminalReview) {
+      if (!kernel.prepare_terminal_profile || !kernel.feed_terminal_profile) throw new Error('Missing terminal profile build');
+      kernel.prepare_terminal_profile();
+      advanceProfile(kernel,1800,false);
+    } else if (save!==undefined) {
       const status=restoreSave(save);
       if (status<0) worker.postMessage({type:'invalid-save',startup:true,status});
     }
@@ -100,17 +150,53 @@ async function boot(url:string, signature:number, save?:unknown, legacy?:number[
       const ticks = Math.floor(budget / 1000);
       if (!kernel || ticks === 0) return;
       budget -= ticks * 1000;
-      kernel.step(ticks);
-      snapshot();
+      if (terminalReview && kernel.feed_terminal_profile) {
+        snapshot(false,advanceProfile(kernel,ticks));
+      } else {
+        kernel.step(ticks);
+        snapshot();
+      }
     }, TICK_MS);
   } catch (error) { worker.postMessage({type:'error',message:String(error)}); }
 }
 
 worker.onmessage = event => {
   const message = event.data;
-  if (message.type === 'init') { void boot(message.url,message.signature,message.save,message.legacy); return; }
+  if (message.type === 'init') { void boot(message.url,message.signature,message.save,message.legacy,message.fullSnapshot); return; }
   if (!kernel) return;
   switch (message.type) {
+    case 'view':
+      scope=message.scope;
+      if (speed===0 && !fullSnapshot) snapshot(true);
+      return;
+    case 'profile-stats': {
+      if (terminalReview && kernel.terminal_profile_stats) {
+        const length=kernel.terminal_profile_stats();
+        const values=Array.from(new Int32Array(kernel.memory.buffer,kernel.output_ptr(),length));
+        worker.postMessage({type:'profile-stats',values,supplied});
+      }
+      return;
+    }
+    case 'profile-exercise':
+      if (terminalReview && speed===0 && kernel.prepare_terminal_exercise) {
+        kernel.prepare_terminal_exercise();
+        snapshot(true);
+        worker.postMessage({type:'profile-exercise'});
+      }
+      return;
+    case 'profile-advance':
+      if (terminalReview && speed===0 && Number.isInteger(message.ticks) && message.ticks>=0 && message.ticks<=1000) {
+        snapshot(true,advanceProfile(kernel,message.ticks,false));
+        worker.postMessage({type:'profile-advance'});
+      }
+      return;
+    case 'profile-line':
+      if (terminalReview && kernel.terminal_exercise_state) {
+        const length=kernel.terminal_exercise_state();
+        const values=Array.from(new Int32Array(kernel.memory.buffer,kernel.output_ptr(),length));
+        worker.postMessage({type:'profile-line',values});
+      }
+      return;
     case 'cancel-handcraft': kernel.command(Op.CancelHandcraft,message.token,0,0,0); return;
     case 'speed': {
       const requested = message.speed;
@@ -128,10 +214,13 @@ worker.onmessage = event => {
     case 'recycle': if (buffers.length < 3) buffers.push(message.buffer); return;
     case 'command': {
       const { op,a=0,b=0,c=0,words=[] } = message.data;
-      const status = input(words) ? kernel.command(op,a,b,c,words.length) : -1;
+      const accepted=input(words);
+      const started=terminalReview ? performance.now() : 0;
+      const status = accepted ? kernel.command(op,a,b,c,words.length) : -1;
+      const commandMs=terminalReview ? performance.now()-started : undefined;
       if (status>0 && blueprintMutations.has(op)) publishBlueprints();
       snapshot();
-      worker.postMessage({type:'command-result',status});
+      worker.postMessage({type:'command-result',status,commandMs});
       return;
     }
     case 'save': {
@@ -142,9 +231,16 @@ worker.onmessage = event => {
     case 'restore': {
       const status = restoreSave(message.buffer);
       worker.postMessage({type:status>0 ? 'restored' : 'invalid-save',status});
-      if (status>0) { speed=Math.min(speed,kernel.max_speed()); publishDirectory(); publishBlueprints(); snapshot(true); }
+      if (status>0) {
+        layoutKey=undefined;
+        speed=Math.min(speed,kernel.max_speed()); publishDirectory(); publishBlueprints(); snapshot(true);
+      }
       return;
     }
-    case 'reset': kernel.reset(); speed=Math.min(speed,kernel.max_speed()); publishDirectory(); publishBlueprints(); snapshot(true); return;
+    case 'reset':
+      kernel.reset();
+      layoutKey=undefined;
+      speed=Math.min(speed,kernel.max_speed()); publishDirectory(); publishBlueprints(); snapshot(true);
+      return;
   }
 };

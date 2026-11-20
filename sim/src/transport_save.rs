@@ -23,10 +23,16 @@ impl World {
     pub fn write_transport_projection(&self, out: &mut Vec<i32>) {
         let start = out.len();
         out.push(self.layout_revision);
-        for (location, cargo) in self.cargo.iter().enumerate() {
-            if cargo.item == 0 {
-                continue;
-            }
+        for location in 0..NODES {
+            self.append_cargo_view(out, location);
+        }
+        self.append_arrival_view(out, |_| true);
+        out.push(start as i32);
+    }
+
+    pub fn append_cargo_view(&self, out: &mut Vec<i32>, location: usize) {
+        let cargo = self.cargo[location];
+        if cargo.item != 0 {
             out.extend([
                 location as i32,
                 cargo.id,
@@ -38,9 +44,15 @@ impl World {
                 cargo.blocked as i32,
             ]);
         }
+    }
+
+    pub fn append_arrival_view(&self, out: &mut Vec<i32>, include: impl Fn(usize) -> bool) {
         // Nonnegative locations are live belt cargo; negative locations tag
         // transient arrivals without changing projection or save offsets.
         for arrival in &self.belt_arrivals {
+            if !include(arrival.from as usize / 2) && !include(usize::from(arrival.target)) {
+                continue;
+            }
             out.extend([
                 -1 - arrival.from,
                 arrival.id,
@@ -52,7 +64,6 @@ impl World {
                 arrival.crossing as i32,
             ]);
         }
-        out.push(start as i32);
     }
 
     pub fn write_transport_save(&self, out: &mut Vec<i32>) {

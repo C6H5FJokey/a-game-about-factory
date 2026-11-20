@@ -10,6 +10,7 @@ mod inventory;
 mod progression;
 mod recipes;
 mod regions;
+mod snapshot_view;
 #[cfg(feature = "terminal-profile")]
 mod terminal_profile;
 mod transport;
@@ -42,7 +43,12 @@ const LEGACY_YARD_PIECES: u32 = 32;
 // The format supports any inventory reachable with the largest data-defined slot and stack settings.
 const MAX_SAVED_CONTAINER_ITEM: u32 = 64_000_000;
 const BUFFER: usize = 48_000;
-const MAX_INPUT: usize = 1_000_000;
+// Terminal review uses the ordinary save importer with a larger world payload.
+const MAX_INPUT: usize = if cfg!(feature = "terminal-profile") {
+    64 * N
+} else {
+    1_000_000
+};
 
 struct Runtime {
     world: World,
@@ -174,6 +180,112 @@ pub extern "C" fn command(op: i32, a: i32, b: i32, c: i32, len: usize) -> i32 {
     })
 }
 
+fn write_snapshot_header(world: &World, output: &mut Vec<i32>) {
+    let o = &world.orbit;
+    let station = &world.cells[STATION_POS];
+    let grid = world.grids[station.group as usize];
+    output.extend([
+        world.tick as i32,
+        world.stock[PLATE as usize] as i32,
+        world.stock[KIT as usize] as i32,
+        o.launch_left as i32,
+        o.orbiting as i32,
+        o.mode as i32,
+        o.time_left as i32,
+        o.first_light as i32,
+        world.active_blocks() as i32,
+        grid.generation as i32,
+        grid.demand as i32,
+        grid.stored as i32,
+        station.inv[MIRROR as usize] as i32,
+        station.inv[CORE as usize] as i32,
+        station.inv[FUEL as usize] as i32,
+        o.fault as i32,
+        o.fault_at as i32,
+        (o.sun_until > world.tick) as i32,
+        world.belt.segments.len() as i32,
+        world.delivered as i32,
+        world.kit_total as i32,
+        o.complete as i32,
+        o.next_window.saturating_sub(world.tick) as i32,
+        grid.discharge as i32,
+        grid.used as i32,
+        station.group as i32,
+        (DELIVERY_WINDOW / HZ) as i32,
+        REQUIRED_BLOCKS as i32,
+        REQUIRED_KITS as i32,
+        world.stage as i32,
+        world.packed_miners as i32,
+        world.build_materials(SIMPLE_MINER)[0].1 as i32,
+        MINER_TICKS as i32,
+        OUTPUT_SLOTS[SIMPLE_MINER as usize] as i32,
+        (1..=SPLICER)
+            .filter(|&kind| world.unlocked(kind))
+            .fold(0, |mask, kind| mask | (1 << kind)),
+        FIRST_ORE as i32,
+    ]);
+    output.extend(
+        world.stock[1..LEGACY_MATERIAL_ITEMS]
+            .iter()
+            .map(|&v| v as i32),
+    );
+    output.extend([
+        o.modules as i32,
+        o.target as i32,
+        o.program as i32,
+        o.rounds as i32,
+        o.lit as i32,
+        o.fault_city as i32,
+        HEADWAY as i32,
+        TRAVEL as i32,
+        CRATE_SLOTS as i32,
+        LINE_COST as i32,
+    ]);
+    for (n, &tile) in STATIONS.iter().enumerate() {
+        let s = world.cells[tile];
+        let g = world.grids[s.group as usize];
+        let (cores, energy) = reserve(n);
+        let (sender, receiver, r) = if n > 0 {
+            (
+                SENDERS[n - 1] as i32,
+                RECEIVERS[n - 1] as i32,
+                world.routes[n - 1],
+            )
+        } else {
+            (-1, -1, Route::default())
+        };
+        output.extend([
+            tile as i32,
+            sender,
+            receiver,
+            WINDOW_LENGTH[n] as i32,
+            TRACKING_POWER[n] as i32,
+            cores as i32,
+            energy as i32,
+            g.stored as i32,
+            if r.arrival == 0 {
+                -1
+            } else {
+                r.arrival.saturating_sub(world.tick) as i32
+            },
+            inventory::used_slots(&r.crate_stock, world.progression.stack_limits()) as i32,
+            r.delivered as i32,
+            g.generation as i32,
+            g.demand as i32,
+            WINDOW_GAP[n] as i32,
+        ]);
+    }
+    output.extend([
+        world.beam_x100(),
+        if world.stage == Stage::Victory {
+            (20 * HZ).saturating_sub(o.sun_until.saturating_sub(world.tick)) as i32
+        } else {
+            -1
+        },
+    ]);
+    debug_assert_eq!(HEADER, output.len());
+}
+
 #[no_mangle]
 pub extern "C" fn snapshot() -> usize {
     RUNTIME.with(|rt| {
@@ -181,109 +293,7 @@ pub extern "C" fn snapshot() -> usize {
         let Runtime { world, output, .. } = &mut *runtime;
         world.materialize();
         output.clear();
-        let o = &world.orbit;
-        let station = &world.cells[STATION_POS];
-        let grid = world.grids[station.group as usize];
-        output.extend([
-            world.tick as i32,
-            world.stock[PLATE as usize] as i32,
-            world.stock[KIT as usize] as i32,
-            o.launch_left as i32,
-            o.orbiting as i32,
-            o.mode as i32,
-            o.time_left as i32,
-            o.first_light as i32,
-            world.active_blocks() as i32,
-            grid.generation as i32,
-            grid.demand as i32,
-            grid.stored as i32,
-            station.inv[MIRROR as usize] as i32,
-            station.inv[CORE as usize] as i32,
-            station.inv[FUEL as usize] as i32,
-            o.fault as i32,
-            o.fault_at as i32,
-            (o.sun_until > world.tick) as i32,
-            world.belt.segments.len() as i32,
-            world.delivered as i32,
-            world.kit_total as i32,
-            o.complete as i32,
-            o.next_window.saturating_sub(world.tick) as i32,
-            grid.discharge as i32,
-            grid.used as i32,
-            station.group as i32,
-            (DELIVERY_WINDOW / HZ) as i32,
-            REQUIRED_BLOCKS as i32,
-            REQUIRED_KITS as i32,
-            world.stage as i32,
-            world.packed_miners as i32,
-            world.build_materials(SIMPLE_MINER)[0].1 as i32,
-            MINER_TICKS as i32,
-            OUTPUT_SLOTS[SIMPLE_MINER as usize] as i32,
-            (1..=SPLICER)
-                .filter(|&kind| world.unlocked(kind))
-                .fold(0, |mask, kind| mask | (1 << kind)),
-            FIRST_ORE as i32,
-        ]);
-        output.extend(
-            world.stock[1..LEGACY_MATERIAL_ITEMS]
-                .iter()
-                .map(|&v| v as i32),
-        );
-        output.extend([
-            o.modules as i32,
-            o.target as i32,
-            o.program as i32,
-            o.rounds as i32,
-            o.lit as i32,
-            o.fault_city as i32,
-            HEADWAY as i32,
-            TRAVEL as i32,
-            CRATE_SLOTS as i32,
-            LINE_COST as i32,
-        ]);
-        for (n, &tile) in STATIONS.iter().enumerate() {
-            let s = world.cells[tile];
-            let g = world.grids[s.group as usize];
-            let (cores, energy) = reserve(n);
-            let (sender, receiver, r) = if n > 0 {
-                (
-                    SENDERS[n - 1] as i32,
-                    RECEIVERS[n - 1] as i32,
-                    world.routes[n - 1],
-                )
-            } else {
-                (-1, -1, Route::default())
-            };
-            output.extend([
-                tile as i32,
-                sender,
-                receiver,
-                WINDOW_LENGTH[n] as i32,
-                TRACKING_POWER[n] as i32,
-                cores as i32,
-                energy as i32,
-                g.stored as i32,
-                if r.arrival == 0 {
-                    -1
-                } else {
-                    r.arrival.saturating_sub(world.tick) as i32
-                },
-                inventory::used_slots(&r.crate_stock, world.progression.stack_limits()) as i32,
-                r.delivered as i32,
-                g.generation as i32,
-                g.demand as i32,
-                WINDOW_GAP[n] as i32,
-            ]);
-        }
-        output.extend([
-            world.beam_x100(),
-            if world.stage == Stage::Victory {
-                (20 * HZ).saturating_sub(o.sun_until.saturating_sub(world.tick)) as i32
-            } else {
-                -1
-            },
-        ]);
-        debug_assert_eq!(HEADER, output.len());
+        write_snapshot_header(world, output);
         for (i, c) in world.cells.iter().enumerate() {
             let cargo = [world.cargo[node(i, 0)], world.cargo[node(i, 1)]]
                 .into_iter()
@@ -709,6 +719,9 @@ impl World {
         };
         if !(0..=max).contains(&value) {
             return -1;
+        }
+        if c.kind == DEPOT && c.cfg != value as u8 {
+            self.view_revision = self.view_revision.wrapping_add(1);
         }
         c.cfg = value as u8;
         1

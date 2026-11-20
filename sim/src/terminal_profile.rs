@@ -20,10 +20,24 @@ struct Line {
     output: u8,
     period: u32,
     phase: u32,
+    supplied: u32,
 }
 
 thread_local! {
     static LINES: RefCell<Vec<Line>> = const { RefCell::new(Vec::new()) };
+}
+
+const EXERCISE_PROCESSOR: usize = index(39, 42);
+
+fn with_exercise_line<T>(use_line: impl FnOnce(&Line) -> T) -> T {
+    LINES.with(|lines| {
+        let lines = lines.borrow();
+        let line = lines
+            .iter()
+            .find(|line| line.processor == EXERCISE_PROCESSOR)
+            .expect("terminal exercise line");
+        use_line(line)
+    })
 }
 
 fn install(world: &mut World, tile: usize, kind: u8, dir: u8, cfg: u8) {
@@ -103,6 +117,7 @@ fn add_block(world: &mut World, lines: &mut Vec<Line>, left: usize, top: usize) 
             output: recipe.output,
             period,
             phase: lines.len() as u32 % period,
+            supplied: 0,
         });
     }
     for x in [processor_column - 1, processor_column + 1] {
@@ -145,7 +160,7 @@ pub extern "C" fn feed_terminal_profile() -> u32 {
         let world = &mut runtime.world;
         LINES.with(|state| {
             let mut supplied = 0;
-            for line in state.borrow().iter() {
+            for line in state.borrow_mut().iter_mut() {
                 if world.tick % line.period != line.phase {
                     continue;
                 }
@@ -154,6 +169,7 @@ pub extern "C" fn feed_terminal_profile() -> u32 {
                 if cell.inv[line.input as usize] == 0 {
                     cell.set_material(line.input, 1, world.progression.stack_limit(line.input));
                     supplied += 1;
+                    line.supplied += 1;
                 }
             }
             supplied
@@ -176,7 +192,9 @@ pub extern "C" fn terminal_profile_stats() -> usize {
         let mut runtime = rt.borrow_mut();
         let Runtime { world, output, .. } = &mut *runtime;
         let mut upper_sources = 0;
+        let mut cargo_count = 0;
         for segment in &world.belt.segments {
+            cargo_count += segment.queue.len();
             for cargo in &segment.queue {
                 let location = segment.nodes[cargo.offset as usize] / 2;
                 let from = cargo.from as usize / 2;
@@ -211,7 +229,97 @@ pub extern "C" fn terminal_profile_stats() -> usize {
                 sources as i32,
                 delivered as i32,
                 upper_sources,
+                cargo_count as i32,
+                world.tick as i32,
             ]);
+            output.len()
+        })
+    })
+}
+
+// Fund construction and leave four spaces at the sink and five at the
+// processor output, so backpressure reaches the processor during the run.
+#[no_mangle]
+pub extern "C" fn prepare_terminal_exercise() {
+    RUNTIME.with(|rt| {
+        let mut runtime = rt.borrow_mut();
+        let world = &mut runtime.world;
+        world.progression.tier = 1;
+        let mut stock = world.stock;
+        for (kind, copies) in [(BELT, 112), (EXPRESS_BELT, 12), (CABLE, 6)] {
+            for &(item, amount) in world.build_materials(kind) {
+                stock[item as usize] += copies * amount;
+            }
+        }
+        assert!(world.fits_stock(&stock));
+        world.stock = stock;
+        with_exercise_line(|line| {
+            let tile = line.sinks[0];
+            let room = world.input_room(tile, line.output).expect("terminal sink");
+            let count = world.cells[tile].inv[line.output as usize] + room - 4;
+            world.cells[tile].set_material(
+                line.output,
+                count,
+                world.progression.stack_limit(line.output),
+            );
+            let output_stack = world.progression.stack_limit(line.output);
+            world.cells[line.processor].inv[line.output as usize] =
+                u32::from(OUTPUT_SLOTS[SMELTER as usize]) * output_stack - 5;
+        });
+    });
+}
+
+#[no_mangle]
+pub extern "C" fn terminal_exercise_state() -> usize {
+    RUNTIME.with(|rt| {
+        let mut runtime = rt.borrow_mut();
+        let Runtime { world, output, .. } = &mut *runtime;
+        with_exercise_line(|line| {
+            let source = &world.cells[line.sources[0]];
+            let sink_tile = line.sinks[0];
+            let sink = &world.cells[sink_tile];
+            let machine = &world.cells[line.processor];
+            let mut cargo_count = 0;
+            let mut blocked = 0;
+            let mut ids = Vec::new();
+            for segment in &world.belt.segments {
+                for cargo in &segment.queue {
+                    let tile = segment.nodes[cargo.offset as usize] / 2;
+                    if (line.sources[0]..sink_tile).contains(&tile) {
+                        cargo_count += 1;
+                        blocked += i32::from(cargo.blocked);
+                        ids.push(cargo.id);
+                    }
+                }
+            }
+            let sink_count = sink.inv[line.output as usize];
+            let total = source.inv[line.input as usize]
+                + machine.inv[line.input as usize]
+                + machine.inv[line.output as usize]
+                + u32::from(machine.progress > 0)
+                + sink_count
+                + world.stock[line.output as usize]
+                + cargo_count;
+            output.clear();
+            output.extend([
+                world.tick as i32,
+                world.layout_revision,
+                line.processor as i32,
+                sink_tile as i32,
+                sink.identity,
+                line.output.into(),
+                sink_count as i32,
+                world.input_room(sink_tile, line.output).unwrap_or(0) as i32,
+                cargo_count as i32,
+                blocked,
+                i32::from(machine.status),
+                i32::from(machine.group),
+                total as i32,
+                world.grids[machine.group as usize].generation as i32,
+                line.supplied as i32,
+            ]);
+            ids.sort_unstable();
+            output.extend(ids);
             output.len()
         })
     })

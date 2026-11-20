@@ -1,4 +1,6 @@
 import { Field, HEADER, H, Kind, STRIDE, W, cell, held, transportStart, xy, type Part } from './model';
+import { ViewSection } from './generated-content';
+import { finishViewDecode, startViewDecode, viewSection } from './world-view';
 
 export type Material = { item:number; count:number };
 export type SlotData = { item:number; role:'input'|'output'|'module'; count:number; stack:number; room:boolean; canPut:boolean; canTake:boolean };
@@ -9,13 +11,16 @@ const devices = new WeakMap<Int32Array, Map<number,number|Device>>();
 function deviceIndex(data:Int32Array) {
   let index=devices.get(data);
   if (!index) {
+    const started=startViewDecode();
     index=new Map();
     devices.set(data,index);
-    const end=data.length-1;
-    const start=data[end];
-    if (start>=HEADER+W*H*STRIDE+4 && start<=end) {
+    const view=viewSection(data,ViewSection.Devices);
+    const end=view?.[1] ?? data.length-1;
+    const start=view?.[0] ?? data[end];
+    if (start>=0 && start<=end && (view || start>=HEADER+W*H*STRIDE+4)) {
       for (let i=start;i<end;i+=10+5*data[i+9]) index.set(data[i],i);
     }
+    finishViewDecode('device-index',started);
   }
   return index;
 }
@@ -41,13 +46,28 @@ const warehouseContents = new WeakMap<Int32Array,Warehouse[]>();
 function warehouses(data:Int32Array) {
   let result=warehouseContents.get(data);
   if (!result) {
+    const started=startViewDecode();
     result=[];
-    for (const tile of deviceIndex(data).keys()) {
-      if (cell(data,tile,Field.Kind)!==Kind.Depot) continue;
-      const stock=new Map(deviceAt(data,tile)?.slots.filter(slot=>slot.count>0).map(slot=>[slot.item,slot.count]));
-      if (stock.size) result.push({tile,stock});
+    const view=viewSection(data,ViewSection.Warehouses);
+    if (view) {
+      let warehouse:Warehouse | undefined;
+      for (let row=view[0];row<view[1];row+=3) {
+        const tile=data[row];
+        if (warehouse?.tile!==tile) {
+          warehouse={tile,stock:new Map()};
+          result.push(warehouse);
+        }
+        warehouse.stock.set(data[row+1],data[row+2]);
+      }
+    } else {
+      for (const tile of deviceIndex(data).keys()) {
+        if (cell(data,tile,Field.Kind)!==Kind.Depot) continue;
+        const stock=new Map(deviceAt(data,tile)?.slots.filter(slot=>slot.count>0).map(slot=>[slot.item,slot.count]));
+        if (stock.size) result.push({tile,stock});
+      }
     }
     warehouseContents.set(data,result);
+    finishViewDecode('warehouse-stock',started);
   }
   return result;
 }
@@ -117,13 +137,15 @@ export function layoutRevision(data:Int32Array) { return data[transportStart(dat
 function transportProjection(data:Int32Array) {
   const cached=projections.get(data);
   if (cached) return cached;
+  const started=startViewDecode();
   const cargo=new Map<number,number>();
-  const start=transportStart(data), end=data[data.length-1]-1;
+  const start=transportStart(data), end=viewSection(data,ViewSection.Transport)?.[1] ?? data[data.length-1]-1;
   // Visual arrivals follow the real cargo records with a negative source tag.
   let i=start>=0?start+1:end;
   for (;i<end && data[i]>=0;i+=TRANSPORT_RECORD_WORDS) cargo.set(data[i],i);
   const projection={cargo,arrivals:data.subarray(i,end)};
   projections.set(data,projection);
+  finishViewDecode('cargo-index',started);
   return projection;
 }
 

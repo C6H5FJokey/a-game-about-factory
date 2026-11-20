@@ -1,13 +1,11 @@
-pub const W: usize = if cfg!(feature = "terminal-profile") {
-    256
-} else {
-    WORLD_WIDTH
-};
-pub const H: usize = if cfg!(feature = "terminal-profile") {
-    224
-} else {
-    WORLD_HEIGHT
-};
+#[cfg(feature = "terminal-profile")]
+pub const W: usize = TERMINAL_WIDTH;
+#[cfg(feature = "terminal-profile")]
+pub const H: usize = TERMINAL_HEIGHT;
+#[cfg(not(feature = "terminal-profile"))]
+pub const W: usize = WORLD_WIDTH;
+#[cfg(not(feature = "terminal-profile"))]
+pub const H: usize = WORLD_HEIGHT;
 pub const N: usize = W * H;
 // Footprint owners and producer IDs reserve a sentinel above the last tile.
 const _: () = assert!(N < u16::MAX as usize);

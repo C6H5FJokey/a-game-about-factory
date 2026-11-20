@@ -3,6 +3,8 @@ import { ITEM } from './catalog-text';
 import { t } from './i18n';
 import { W, recipesStart, xy } from './model';
 import type { Camera } from './renderer';
+import { ViewSection } from './generated-content';
+import { finishViewDecode, startViewDecode, viewSection } from './world-view';
 
 export type GroundPile = { tile:number; item:number; id:number; count:number };
 
@@ -11,9 +13,11 @@ const cachedPiles=new WeakMap<Int32Array,Map<number,GroundPile[]>>();
 export function groundPiles(data:Int32Array) {
   let grouped=cachedPiles.get(data);
   if (grouped) return grouped;
+  const started=startViewDecode();
   grouped=new Map();
   cachedPiles.set(data,grouped);
-  const end=recipesStart(data)-1, start=data[end];
+  const view=viewSection(data,ViewSection.Ground);
+  const end=view?.[1] ?? recipesStart(data)-1, start=view?.[0] ?? data[end];
   if (!Number.isInteger(start) || start<0 || start>end || (end-start)%4) return grouped;
   for (let i=start;i<end;i+=4) {
     const [tile,item,id,count]=data.subarray(i,i+4);
@@ -21,6 +25,7 @@ export function groundPiles(data:Int32Array) {
     piles.push({tile,item,id,count});
     grouped.set(tile,piles);
   }
+  finishViewDecode('ground-piles',started);
   return grouped;
 }
 

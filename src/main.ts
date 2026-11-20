@@ -7,7 +7,7 @@ import { bindGroundMarkers, groundPiles, type GroundPile } from './ground-items'
 import {
   DIRECTION, Field, H, HEADER, HZ, Kind, Meta, Op, energyMj, legacyRecipes, selectedRecipe,
   STATION, STATUS, STEP, STRIDE, Stage, W, SPEED_MODULE, at, cell, drillTool, held, inBounds, isTransport, plainBelt, progression, stackLimit, mw, time, unlocked, xy, CITY, CityField, cityValue,
-  type Command, type Mode, type PreviewCell, type Tool,
+  terminalReview, type Command, type Mode, type PreviewCell, type Tool,
 } from './model';
 import { Renderer } from './renderer';
 import { campaignTask, contents, firstMachine, guideText, handbook, visibleGuide } from './campaign';
@@ -16,7 +16,8 @@ import { actionIcon, itemIcon, machineIcon } from './icons';
 import { devicePower, designPower } from './power-readout';
 import { cargoAt, constructionAvailable, constructionSources, design, deviceAt, drillVariant, layoutRevision, preparedMaterials, readBlueprints, readDirectory, transportPorts, type Blueprint, type CargoTrack, type Material, type SlotData } from './sim-data';
 import { ERRORS, ITEM, MACHINE, itemDescription } from './catalog-text';
-import { content } from './generated-content';
+import { content, ViewSection } from './generated-content';
+import { SnapshotLayout, attachView, finishViewDecode, startViewDecode, viewHasTile, viewSection } from './world-view';
 import { language, languages, onLanguageChange, setLanguage, t, textHtml } from './i18n';
 import { footprint, machineAnchor, machineMasks, machineSize, occupiedKind, previewPorts, rotatePart } from './machine-layout';
 
@@ -44,6 +45,9 @@ const blueprintDialog=byId<HTMLDialogElement>('blueprint-dialog'), transferDialo
 const dropDialog=byId<HTMLDialogElement>('drop-dialog');
 const notice=byId('notice'), balances=byId('balances'), quickInfo=byId('quick-info');
 const worker=new Worker(new URL('./worker.ts',import.meta.url),{type:'module'});
+const fullSnapshot=terminalReview && new URLSearchParams(location.search).get('snapshot')==='full';
+let snapshotLayout:SnapshotLayout | undefined;
+let lastView:number[]=[];
 let renderer:Renderer | undefined;
 let data=new Int32Array(HEADER+W*H*STRIDE);
 let limits=progression(data);
@@ -329,7 +333,9 @@ function transportDraft(result:Draft) {
   const revision=layoutRevision(data);
   const key=`${revision}:${data[Meta.Unlocked]}:${words.join(',')}`;
   const changed=transportPreview?.key!==key;
-  const cargoKey=result.cells.map(({tile})=>Number(!!cargoAt(data,tile,0))+2*Number(!!cargoAt(data,tile,1))).join('');
+  const offscreen=result.cells.some(({tile})=>!viewHasTile(data,tile));
+  const cargoKey=result.cells.map(({tile})=>Number(!!cargoAt(data,tile,0))+2*Number(!!cargoAt(data,tile,1))).join('')
+    +(offscreen?'/'+Math.floor(data[Meta.Tick]/7):'');
   if (changed || cargoKey!==transportPreview?.cargoKey) {
     const queued=!changed && confirmTransport===transportPreview?.request;
     transportPreview={key,request:++previewSequence,cargoKey};
@@ -924,10 +930,12 @@ function gridShortcut(origin:number) {
 function gridDetails(group:number) {
   if (!group) return signal('未接入电网');
   const faults:number[]=[];
-  for (let i=0;i<W*H && faults.length<5;i++) {
-    if (cell(data,i,Field.Status)===3 && cell(data,i,Field.Grid)===group) faults.push(i);
+  const faultView=viewSection(data,ViewSection.Faults);
+  for (let i=faultView?.[0] ?? 0;i<(faultView?.[1] ?? W*H) && faults.length<5;i++) {
+    const tile=faultView?data[i]:i;
+    if ((faultView || cell(data,tile,Field.Status)===3) && cell(data,tile,Field.Grid)===group) faults.push(tile);
   }
-  const index=HEADER+W*H*STRIDE+group*4;
+  const index=(viewSection(data,ViewSection.Grids)?.[0] ?? HEADER+W*H*STRIDE)+group*4;
   const rows:[string,string][]=[['电网总发电',mw(data[index])],['请求负荷',mw(data[index+1])],
     ['电池可放电',mw(data[index+2])],['电网储能',energyMj(data[index+3]).toFixed(1)+' MJ']];
   return `<section class="grid-details"><h3>供电区 #${group}</h3>`+readings(rows)+
@@ -1832,6 +1840,12 @@ saveFile.addEventListener('change',async()=>{
 worker.onmessage=event=>{
   const message=event.data;
   if (message.type==='error') { fail(message.key?t(message.key):message.message); return; }
+  if (message.type==='snapshot-layout') {
+    const started=startViewDecode();
+    snapshotLayout=new SnapshotLayout(new Int32Array(message.buffer),W,H);
+    finishViewDecode('layout',started);
+    return;
+  }
   if (message.type==='directory') { readDirectory(message.buffer); return; }
   if (message.type==='blueprints') { blueprints=readBlueprints(message.buffer); refresh(); return; }
   if (message.type==='transport-preview') {
@@ -1864,8 +1878,13 @@ worker.onmessage=event=>{
     return;
   }
   if (message.type==='snapshot') {
+    const decodeStarted=startViewDecode();
     const wasLit=data[Meta.FirstLight], wasComplete=data[Meta.Complete], oldStage=data[Meta.Stage], previous=data.buffer;
     const next=new Int32Array(message.buffer);
+    if (message.scoped) {
+      if (!snapshotLayout) throw new Error('Snapshot received before its layout');
+      attachView(next,snapshotLayout);
+    }
     if (speed || next[Meta.Tick]!==data[Meta.Tick]) {
       lastSnapshot=performance.now();
       if (!speed) pausedPhase=0;
@@ -1873,6 +1892,7 @@ worker.onmessage=event=>{
     data=next;
     const oldLimits=limits;
     limits=progression(data);
+    finishViewDecode('frame',decodeStarted);
     const cam=renderer?.camera;
     const boundsChanged=oldLimits.left!==limits.left || oldLimits.top!==limits.top ||
       oldLimits.right!==limits.right || oldLimits.bottom!==limits.bottom;
@@ -1898,7 +1918,11 @@ worker.onmessage=event=>{
     } else {
       refresh(message.immediate || oldStage!==data[Meta.Stage]);
     }
-    if (recenter) { home(); recenter=false; }
+    if (recenter) {
+      if (terminalReview) cam?.aim(55,41,32);
+      else home();
+      recenter=false;
+    }
     if (!wasLit && data[Meta.FirstLight] && data[Meta.Sun]) {
       say('曙港第一次看见日出');
       if (mode==='orbit' && cam) cam.aim(38,11.6);
@@ -1987,12 +2011,26 @@ function positionMapLabel(cam:Renderer['camera'],element:HTMLSpanElement,x:numbe
   if (!element.hidden) element.style.transform=`translate(${Math.round(sx)}px,${Math.round(sy)}px) translate(-50%,-100%)`;
 }
 
+const viewPadding=2+Math.max(...content.machines.flatMap(({width,height})=>[width,height]));
+function requestView(cam:Renderer['camera']) {
+  if (fullSnapshot) return;
+  const [left,top]=cam.toWorld(0,0), [right,bottom]=cam.toWorld(cam.width,cam.height);
+  const lower=(edge:number)=>Math.max(0,Math.floor((edge-viewPadding)/8)*8);
+  const upper=(edge:number,limit:number)=>Math.min(limit,Math.ceil((edge+viewPadding)/8)*8);
+  const scope=[lower(left),lower(top),upper(right,W),upper(bottom,H),selected,infoTile,groundTile,selectedItem?.tile ?? -1];
+  if (scope.some((word,i)=>word!==lastView[i])) {
+    lastView=scope;
+    worker.postMessage({type:'view',scope});
+  }
+}
+
 function draw(now:number) {
   harvest.tick(now);
   handcraft.tick(now);
   if (renderer) {
     if (ready) {
       const cam=renderer.camera, tile=harvest.mapTile();
+      requestView(cam);
       mapHarvest.hidden=tile===undefined;
       if (tile!==undefined) {
         const [x,y]=xy(tile), [sx,sy]=cam.toScreen(x+.5,y+.5);
@@ -2021,6 +2059,21 @@ applyTranslations();
 
 try {
   renderer=new Renderer(canvas);
+  if (terminalReview) window.addEventListener('terminal-profile-camera', event => {
+    const {x,y,zoom}=(event as CustomEvent<{x:number;y:number;zoom:number}>).detail;
+    renderer?.camera.aim(x,y,zoom);
+  });
+  if (terminalReview) window.addEventListener('terminal-profile-probe', event => {
+    const {tile,pick,reply}=(event as CustomEvent<{
+      tile:number; pick?:boolean;
+      reply(value:unknown):void;
+    }>).detail;
+    if (pick) tap(tile);
+    reply({tick:data[Meta.Tick],selected,visible:viewHasTile(data,tile),kind:cell(data,tile,Field.Kind),
+      grid:cell(data,tile,Field.Grid),wire:cell(data,tile,Field.Wire),
+      status:cell(data,tile,Field.Status),device:deviceAt(data,tile),recipe:selectedRecipe(data,tile),
+      cargo:cargoAt(data,tile,0)});
+  });
   bindMapInput(canvas,renderer.camera,{
     tap,
     inspect:inspectMap,
@@ -2038,12 +2091,12 @@ try {
   const legacy=legacyBlueprint();
   const url=new URL(`${import.meta.env.BASE_URL}sim.wasm`,document.baseURI).href;
   void resumeSave().then(
-    save=>worker.postMessage({type:'init',url,signature:content.signature,save,legacy}),
+    save=>worker.postMessage({type:'init',url,signature:content.signature,save,legacy,fullSnapshot}),
     error=>reviewScene
       ? fail(error instanceof Error ? error.message : '无法载入视觉评审场景。')
-      : worker.postMessage({type:'init',url,signature:content.signature,legacy}),
+      : worker.postMessage({type:'init',url,signature:content.signature,legacy,fullSnapshot}),
   );
-  window.setInterval(()=>{ if (ready && !document.hidden) worker.postMessage({type:'save'}); },8000);
+  if (!terminalReview) window.setInterval(()=>{ if (ready && !document.hidden) worker.postMessage({type:'save'}); },8000);
   document.addEventListener('visibilitychange',()=>{
     if (!ready) return;
     if (document.hidden) worker.postMessage({type:'save'});

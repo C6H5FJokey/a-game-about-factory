@@ -1,6 +1,7 @@
 import { content } from './generated-content';
 import { Field, HEADER, H, Kind, STEP, STRIDE, W, at, cell, isTransport, transportStart, xy } from './model';
 import { transportPorts } from './sim-data';
+import { finishViewDecode, snapshotLayout, startViewDecode, type SnapshotLayout } from './world-view';
 
 type Layout = {
   width:number; height:number; canInput:boolean; canOutput:boolean;
@@ -35,17 +36,21 @@ export function rotatePart(x:number,y:number,kind:number,dir:number,turns:number
   return [x,y,dir];
 }
 
-const indexes=new WeakMap<Int32Array,Map<number,number>>();
+type SpatialIndex = Map<number,{anchor:number; masks:number}>;
+const indexes=new WeakMap<Int32Array|SnapshotLayout,SpatialIndex>();
 function spatialIndex(data:Int32Array) {
-  let index=indexes.get(data);
+  const layout=snapshotLayout(data);
+  const key=layout ?? data;
+  let index=indexes.get(key);
   if (!index) {
+    const started=startViewDecode();
     index=new Map();
     const end=transportStart(data)-14;
     const start=data[end];
-    if (start>=HEADER+W*H*STRIDE+4 && start<=end) {
-      for (let i=start;i<end;i+=3) index.set(data[i],i);
-    }
-    indexes.set(data,index);
+    const rows=layout?.footprints ?? (start>=HEADER+W*H*STRIDE+4 && start<=end ? data.subarray(start,end) : []);
+    for (let i=0;i<rows.length;i+=3) index.set(rows[i],{anchor:rows[i+1],masks:rows[i+2]});
+    indexes.set(key,index);
+    finishViewDecode('footprint-index',started);
   }
   return index;
 }
@@ -54,8 +59,7 @@ export function machineAnchor(data:Int32Array,tile:number) {
   if (tile<0) return -1;
   if (cell(data,tile,Field.Kind)) return tile;
   if (!hasLargeMachine) return -1;
-  const row=spatialIndex(data).get(tile);
-  return row===undefined?-1:data[row+1];
+  return spatialIndex(data).get(tile)?.anchor ?? -1;
 }
 
 export function occupiedKind(data:Int32Array,tile:number) {
@@ -64,11 +68,10 @@ export function occupiedKind(data:Int32Array,tile:number) {
 }
 
 export function machineMasks(data:Int32Array,tile:number) {
-  const row=spatialIndex(data).get(tile);
-  return row===undefined?0:data[row+2];
+  return spatialIndex(data).get(tile)?.masks ?? 0;
 }
 
-const beltLinks=new WeakMap<Int32Array,Uint16Array>();
+const beltLinks=new WeakMap<Int32Array|SnapshotLayout,Uint16Array>();
 
 function connectedPort(data:Int32Array,tile:number,flow:number,input:boolean) {
   if (tile<0) return false;
@@ -80,8 +83,9 @@ function connectedPort(data:Int32Array,tile:number,flow:number,input:boolean) {
 }
 
 export function transportLinks(data:Int32Array,tile:number,kind:number,dir:number) {
-  let cache=beltLinks.get(data);
-  if (!cache) { cache=new Uint16Array(W*H); beltLinks.set(data,cache); }
+  const key=snapshotLayout(data) ?? data;
+  let cache=beltLinks.get(key);
+  if (!cache) { cache=new Uint16Array(W*H); beltLinks.set(key,cache); }
   if (cache[tile]) return cache[tile]&255;
   const first=transportPorts(kind,dir,0), second=transportPorts(kind,dir,1);
   const allowedIn=first.incoming|second.incoming, allowedOut=first.outgoing|second.outgoing;
@@ -97,9 +101,8 @@ export function transportLinks(data:Int32Array,tile:number,kind:number,dir:numbe
 }
 
 export function* machinePortTiles(data:Int32Array) {
-  for (const [tile,row] of spatialIndex(data)) {
-    const masks=data[row+2];
-    if (masks) yield [tile,data[row+1],masks];
+  for (const [tile,{anchor,masks}] of spatialIndex(data)) {
+    if (masks) yield [tile,anchor,masks];
   }
 }
 

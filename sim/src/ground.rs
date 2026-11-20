@@ -115,10 +115,16 @@ impl Ground {
 
     pub fn write_view(&self, out: &mut Vec<i32>) {
         let start = out.len();
-        for (&(tile, item), pile) in &self.piles {
-            out.extend([tile as i32, item.into(), pile.id, pile.count as i32]);
-        }
+        self.append_view(out, |_| true);
         out.push(start as i32);
+    }
+
+    pub fn append_view(&self, out: &mut Vec<i32>, include: impl Fn(usize) -> bool) {
+        for (&(tile, item), pile) in &self.piles {
+            if include(tile) {
+                out.extend([tile as i32, item.into(), pile.id, pile.count as i32]);
+            }
+        }
     }
 
     pub fn write_save(&self, out: &mut Vec<i32>) {
