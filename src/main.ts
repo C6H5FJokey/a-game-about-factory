@@ -82,11 +82,13 @@ const INVENTORY_DOUBLE_CLICK_MS=350;
 type InventoryDevice=Pick<Slot,'tile'|'identity'>;
 type InventoryClick={slot:Slot; device:InventoryDevice; at:number; singleTransfer?:()=>void};
 let inventoryClick:InventoryClick | undefined;
-let dropItem=0, groundTile=-1;
-let dropDraft:{item:number;count:number}|undefined;
+type BackpackStack=Pick<Slot,'item'|'stackIndex'>;
+let dropSource:BackpackStack|undefined, groundTile=-1;
+let dropDraft:(BackpackStack & {count:number})|undefined;
 const groundMarkers=bindGroundMarkers(byId('ground-markers'),openGroundMarker);
 let infoKey='', infoPinned=false, infoTile=-1;
 let balanceItems='\0';
+const inventoryPages=new Map<string,number>();
 
 const languageSelect=byId<HTMLSelectElement>('language-select');
 languageSelect.replaceChildren(...languages.map(locale=>{
@@ -109,23 +111,53 @@ function applyTranslations() {
 languageSelect.addEventListener('change',()=>{ void setLanguage(languageSelect.value); });
 onLanguageChange(applyTranslations);
 
-const slotKey=(role:SlotRole,item:number,tile:number,lane=0)=>`slot-${role}-${item}-${tile}-${lane}`;
 const slotArt=(item:number,count:number)=>itemIcon(item)+`<span class="item-count">${count}</span>`;
 const slotLabel=(role:SlotRole,item:number,count:number)=>t('ui.slotLabel',{role:t('ui.'+role),item:ITEM[item],count});
 const deviceIdentity=(tile:number)=>deviceAt(data,tile)?.identity ?? 0;
-const slotSelected=(role:SlotRole,item:number,tile:number,track?:CargoTrack)=>selectedItem?.role===role && selectedItem.item===item && selectedItem.tile===tile && selectedItem.identity===(track?.identity ?? deviceIdentity(tile)) && selectedItem.cargoId===(track?.id ?? 0);
-const amountBadge=(role:SlotRole,item:number,tile:number,track?:CargoTrack)=>(slotSelected(role,item,tile,track)?selectedItem?.quantity:undefined);
-const slotData=(role:SlotRole,item:number,count:number,tile:number,lane=0)=>`data-slot="${role}" data-item="${item}" data-tile="${tile}" data-count="${count}" data-quick="${slotKey(role,item,tile,lane)}" aria-label="${textHtml(slotLabel(role,item,count))}"`;
-const itemSlot=(role:SlotRole,item:number,count:number,tile=-1,context='',slot?:SlotData,track?:CargoTrack)=>`
-  <button type="button" class="item-slot" ${slotData(role,item,count,tile,(track?.location ?? 0)%2)}
-    ${slot?`data-identity="${deviceIdentity(tile)}" data-stack="${slot.stack}" data-room="${slot.room}" data-put="${slot.canPut}" data-take="${slot.canTake}"`:''}
-    ${track?`data-identity="${track.identity}" data-lane="${track.location%2}" data-cargo-id="${track.id}" data-take="true"`:''}
-    ${role==='held'||slot?.canTake||track?`aria-pressed="${slotSelected(role,item,tile,track)}" data-selected-count="${amountBadge(role,item,tile,track) ?? ''}"`:''}
+const stackCount=(count:number,limit:number,index:number)=>Math.max(0,Math.min(limit,count-index*limit));
+const backpackStackCount=({item,stackIndex}:BackpackStack)=>stackCount(held(data,item),stackLimit(data,item),stackIndex);
+const amountBadge=(pressed:boolean,count:number)=>pressed && selectedItem?.quantity!==undefined
+  ? String(Math.min(selectedItem.quantity,count)):'';
+function itemSlot(role:SlotRole,item:number,count:number,
+  {tile=-1,context='',slot,track,stackIndex=0}:{tile?:number; context?:string; slot?:SlotData; track?:CargoTrack; stackIndex?:number}={}) {
+  const lane=(track?.location ?? 0)%2, cargoId=track?.id ?? 0;
+  const identity=track?.identity ?? (slot?deviceIdentity(tile):0);
+  const pressed=count>0 && sameSlot(selectedItem,{role,item,tile,identity,lane,cargoId,stackIndex});
+  return `<button type="button" class="item-slot" data-slot="${role}" data-item="${item}" data-tile="${tile}"
+    data-count="${count}" data-stack-index="${stackIndex}" data-identity="${identity}"
+    data-quick="slot-${role}-${item}-${tile}-${track?lane:stackIndex}" aria-label="${textHtml(slotLabel(role,item,count))}"
+    ${slot?`data-stack="${slot.stack}" data-room="${slot.room}" data-put="${slot.canPut}" data-take="${slot.canTake}"`:''}
+    ${track?`data-lane="${lane}" data-cargo-id="${cargoId}" data-take="true"`:''}
+    ${role==='held'||slot?.canTake||track?`aria-pressed="${pressed}" data-selected-count="${amountBadge(pressed,count)}"`:''}
     ${context?`data-context="${textHtml(context)}"`:''}>${slotArt(item,count)}</button>`;
+}
 const slotRow=(title:string,slots:string)=>slots?`<div class="slot-row"><span class="slot-label">${title}</span><div class="slots">${slots}</div></div>`:'';
 
 const button=(name:string,action:string,primary=false,disabled=false)=>
   `<button type="button" class="button${primary?' primary':''}" data-action="${action}"${disabled?' disabled':''}>${textHtml(name)}</button>`;
+
+function stackPage<T extends Material & {stack:number}>(key:string,items:T[],keepEmpty=false) {
+  // Older saves can carry more stacks than the current container capacity.
+  const pageSize=32;
+  const rows=items.map(item=>({item,stacks:Math.max(keepEmpty?1:0,Math.ceil(item.count/item.stack))}));
+  const pages=Math.ceil(rows.reduce((sum,row)=>sum+row.stacks,0)/pageSize);
+  const page=Math.min(inventoryPages.get(key) ?? 0,Math.max(0,pages-1));
+  let skip=page*pageSize;
+  const entries:{item:T;index:number}[]=[];
+  for (const {item,stacks} of rows) {
+    const start=Math.min(skip,stacks);
+    skip-=start;
+    const end=Math.min(stacks,start+pageSize-entries.length);
+    for (let index=start; index<end; index++) entries.push({item,index});
+    if (entries.length===pageSize) break;
+  }
+  const pager=pages>1?`<div class="stack-pager">
+    ${button(t('ui.previousPage'),`stack-page-${key}-${page-1}`,false,page===0)}
+    <span>${page+1}/${pages}</span>
+    ${button(t('ui.nextPage'),`stack-page-${key}-${page+1}`,false,page+1===pages)}
+  </div>`:'';
+  return {entries,pager};
+}
 const iconButton=(name:string,action:string,icon:Parameters<typeof actionIcon>[0],pressed?:boolean)=>
   `<button type="button" class="button icon-button icon-button--${icon}" data-action="${action}" aria-label="${textHtml(name)}" title="${textHtml(name)}"${pressed===undefined?'':` aria-pressed="${pressed}"`}>${actionIcon(icon)}</button>`;
 const harvestMeter='<span class="harvest-meter" aria-hidden="true"><span class="harvest-fill"></span></span>';
@@ -647,6 +679,9 @@ function tap(tile:number) {
     const request=dropDraft;
     const [x,y]=xy(tile);
     if (!inBounds(limits,x,y)) { say(t('errors.3'),true); return; }
+    if (request.count>backpackStackCount(request)) {
+      dropDraft=undefined; say(t('errors.9'),true); refresh(); return;
+    }
     submit({op:Op.DropHeld,a:tile,b:request.item,c:request.count},count=>{
       if (dropDraft===request) dropDraft=undefined;
       say(t('ui.dropped',{item:ITEM[request.item],count}));
@@ -880,8 +915,8 @@ function regionalPanel():string[] {
     const end=start+v(CityField.Duration);
     const interval=data[Meta.Stage]>=Stage.Acceptance?time(start)+'–'+time(end):time(v(CityField.Duration));
     rows.push([name+'窗口',interval+' · '+mw(v(CityField.Power))+' · 1 芯/秒']);
-    reserves+=slotRow(name+'校准芯',itemSlot('display',6,contents(data,v(CityField.Site),6),v(CityField.Site),
-      data[Meta.Stage]>=Stage.Acceptance?`下一轮准备 ${v(CityField.CoreReserve)} 枚`:''));
+    reserves+=slotRow(name+'校准芯',itemSlot('display',6,contents(data,v(CityField.Site),6),{tile:v(CityField.Site),
+      context:data[Meta.Stage]>=Stage.Acceptance?`下一轮准备 ${v(CityField.CoreReserve)} 枚`:''}));
     if (data[Meta.Stage]>=Stage.Acceptance) rows.push([name+'所在电网储能', energyMj(v(CityField.Stored)).toFixed(1)+' / '+energyMj(v(CityField.EnergyReserve)).toFixed(1)+' MJ']);
     start=end+v(CityField.Gap);
   }
@@ -951,23 +986,26 @@ function machineSlots(tile:number,kind:Kind) {
     const used=items.reduce((sum,slot)=>sum+Math.ceil(slot.count/slot.stack),0);
     return textHtml(`${title} · ${t('ui.containerUsage',{used,slots:capacity})}`);
   };
+  const stock=(role:string,items:SlotData[],keepEmpty:boolean)=>{
+    const {entries,pager}=stackPage(`device-${tile}-${deviceIdentity(tile)}-${role}`,items,keepEmpty);
+    return entries.map(({item:slot,index})=>itemSlot(slot.role,slot.item,stackCount(slot.count,slot.stack,index),
+      {tile,slot,stackIndex:index})).join('')+pager;
+  };
   if (kind===Kind.Depot || kind===Kind.Yard) {
     const warehouse=kind===Kind.Depot;
     const canPut=warehouse || CITY.some((_,city)=>city>0 && cityValue(data,city,CityField.Sender)===tile);
     const title=warehouse?t('ui.warehouseStock'):canPut?'装箱':'到货';
     return `<div class="slot-row"${canPut?` data-container data-tile="${tile}" data-identity="${deviceIdentity(tile)}"`:''}>
       <span class="slot-label">${label(title,slots,storageSlots)}</span>
-      <div class="slots">${slots.map(slot=>machineSlot(tile,slot)).join('')}
+      <div class="slots">${stock('storage',slots,false)}
         ${canPut?`<button type="button" class="container-put" data-container-put>${textHtml(t('ui.putInStorage'))}</button>`:''}
       </div></div>`;
   }
   const input=slots.filter(slot=>slot.role==='input'), output=slots.filter(slot=>slot.role==='output');
-  return slotRow(label('进料',input,input.length*inputSlots),input.map(slot=>machineSlot(tile,slot)).join(''))+
-    slotRow(label('出料',output,outputSlots),output.map(slot=>machineSlot(tile,slot)).join(''))+
-    slotRow('速度模块',slots.filter(slot=>slot.role==='module').map(slot=>machineSlot(tile,slot)).join(''));
+  return slotRow(label('进料',input,input.length*inputSlots),stock('input',input,true))+
+    slotRow(label('出料',output,outputSlots),stock('output',output,true))+
+    slotRow('速度模块',stock('module',slots.filter(slot=>slot.role==='module'),true));
 }
-
-function machineSlot(tile:number,slot:SlotData) { return itemSlot(slot.role,slot.item,slot.count,tile,'',slot); }
 
 function transportReadout(tile:number,kind:Kind,interactive=false) {
   const entry=design(kind);
@@ -982,7 +1020,7 @@ function transportReadout(tile:number,kind:Kind,interactive=false) {
     const flow=`${sides(incoming,2)}入 · ${sides(outgoing)}出`;
     const status=cargo?.blocked?'堵塞':cargo?'在途':'空闲';
     rows.push(readings([[name,flow],[status,`${cargo?ITEM[cargo.item]+' ':''}${cargo?1:0} / ${entry.laneCapacity}`]])+
-      (interactive && cargo?slotRow('带上货物',itemSlot('cargo',cargo.item,1,tile,`${name} · ${flow}`,undefined,cargo)+
+      (interactive && cargo?slotRow('带上货物',itemSlot('cargo',cargo.item,1,{tile,context:`${name} · ${flow}`,track:cargo})+
         `<button type="button" class="button" data-action="take-cargo" data-tile="${tile}" data-lane="${lane}" data-item="${cargo.item}" data-cargo-id="${cargo.id}" data-identity="${cargo.identity}" aria-label="从${name}取走${textHtml(ITEM[cargo.item])}">取走</button>`):''));
   }
   return rows.join('');
@@ -1255,10 +1293,10 @@ function syncInfo() {
     html=`<strong>${textHtml(ITEM[item])} <span class="quick-count">×${count}</span></strong>`+
       (description?`<p>${textHtml(description)}</p>`:'')+
       (anchor.dataset.context?`<p>${textHtml(anchor.dataset.context)}</p>`:'')+
-      ((role==='held' || role==='input' || role==='output')?`<p>${textHtml(t('ui.stackUsage',{used:Math.ceil(count/stack),limit:stack}))}</p>`:'')+
+      ((role==='held' || role==='input' || role==='output')?`<p>${textHtml(t('ui.stackCapacity',{limit:stack}))}</p>`:'')+
       (help[role]?`<p>${textHtml(help[role])}</p>`:'')+
       (infoPinned && count>1 && sameSlot(selectedItem,slot)?button(selectedItem?.quantity?`数量 ${selectedItem.quantity}`:'指定数量','transfer-amount'):'')+
-      (infoPinned && role==='held' && count>0?button(t('ui.dropTitle'),`drop-item-${item}`):'');
+      (infoPinned && role==='held' && count>0?button(t('ui.dropTitle'),`drop-item-${item}-${slot.stackIndex}`):'');
   }
   if (quickInfo.innerHTML!==html) quickInfo.innerHTML=html;
   const interactive=infoPinned && !!quickInfo.querySelector('button');
@@ -1276,6 +1314,14 @@ function revealInfo(anchor:HTMLButtonElement,pin=false) {
 
 type TransferTarget=Pick<Slot,'role'|'item'|'tile'|'identity'|'canPut'>;
 
+function availableInSlot(source:Selection) {
+  if (source.role==='held') return backpackStackCount(source);
+  const device=deviceAt(data,source.tile);
+  if (device?.identity!==source.identity) return 0;
+  const slot=device.slots.find(slot=>slot.canTake && slot.role===source.role && slot.item===source.item);
+  return slot?stackCount(slot.count,slot.stack,source.stackIndex):0;
+}
+
 function transferSlot(source:Selection,target:TransferTarget) {
   const {role,item,tile,identity,canPut}=target;
   const insert=source.role==='held' && (role==='input' || role==='module') && canPut;
@@ -1286,8 +1332,10 @@ function transferSlot(source:Selection,target:TransferTarget) {
     return false;
   }
   if (source.role==='cargo') return takeCargo(source.tile,source.lane,item,source.cargoId,source.identity);
+  const available=availableInSlot(source);
+  if (!available) return false;
   return submit({op:Op.Transfer,a:source.tile,b:tile,c:item,
-    words:[source.quantity ?? 2147483647,source.identity,identity,source.role==='module'||role==='module'?3:source.role==='input'?1:2]},quantity=>{
+    words:[Math.min(source.quantity ?? available,available),source.identity,identity,source.role==='module'||role==='module'?3:source.role==='input'?1:2]},quantity=>{
     selectedItem=undefined;
     say(t(role==='module'?'ui.installed':role==='input'?'ui.inserted':'ui.received',{item:ITEM[item],count:quantity}));
   });
@@ -1384,14 +1432,16 @@ function fill(element:HTMLElement,html:string) {
 }
 
 function renderBalances() {
-  const items:number[]=[];
+  const items:(Material & {stack:number})[]=[];
   for (let item=1;item<content.items.length;item++) {
-    if (held(data,item)>0) items.push(item);
+    const count=held(data,item);
+    if (count>0) items.push({item,count,stack:stackLimit(data,item)});
   }
-  const key=items.join(',');
+  const {entries,pager}=stackPage('held',items);
+  const key=entries.map(({item,index})=>`${item.item}:${index}`).join(',')+pager;
   if (key!==balanceItems) {
     fill(balances,'<button type="button" class="capacity container-put" id="backpack-capacity" data-container-put></button>'+
-      items.map(item=>itemSlot('held',item,held(data,item))).join(''));
+      entries.map(({item,index})=>itemSlot('held',item.item,stackCount(item.count,item.stack,index),{stackIndex:index})).join('')+pager);
     balanceItems=key;
   }
   const capacity=byId('backpack-capacity');
@@ -1404,16 +1454,17 @@ function renderBalances() {
     capacity.title=t('ui.individualStacks');
     capacity.dataset.full=String(limits.used>=limits.slots);
   }
-  for (const slot of balances.querySelectorAll<HTMLButtonElement>('[data-item]')) {
-    const item=Number(slot.dataset.item), count=held(data,item);
-    const pressed=String(slotSelected('held',item,-1));
-    if (slot.getAttribute('aria-pressed')!==pressed) slot.setAttribute('aria-pressed',pressed);
-    const amount=String(amountBadge('held',item,-1) ?? '');
-    if (slot.dataset.selectedCount!==amount) slot.dataset.selectedCount=amount;
-    if (slot.dataset.count===String(count)) continue;
-    slot.dataset.count=String(count);
-    slot.querySelector('.item-count')!.textContent=String(count);
-    slot.setAttribute('aria-label',slotLabel('held',item,count));
+  for (const [i,anchor] of balances.querySelectorAll<HTMLButtonElement>('[data-slot="held"]').entries()) {
+    const {item,index}=entries[i];
+    const count=stackCount(item.count,item.stack,index);
+    const pressed=sameSlot(selectedItem,readSlot(anchor));
+    if (anchor.getAttribute('aria-pressed')!==String(pressed)) anchor.setAttribute('aria-pressed',String(pressed));
+    const amount=amountBadge(pressed,count);
+    if (anchor.dataset.selectedCount!==amount) anchor.dataset.selectedCount=amount;
+    if (anchor.dataset.count===String(count)) continue;
+    anchor.dataset.count=String(count);
+    anchor.querySelector('.item-count')!.textContent=String(count);
+    anchor.setAttribute('aria-label',slotLabel('held',item.item,count));
   }
 }
 
@@ -1601,26 +1652,33 @@ byId<HTMLFormElement>('transfer-form').addEventListener('submit',event=>{
 byId<HTMLFormElement>('drop-form').addEventListener('submit',event=>{
   event.preventDefault();
   const count=byId<HTMLInputElement>('drop-quantity').valueAsNumber;
-  if (!dropItem || !Number.isInteger(count) || count<1 || count>held(data,dropItem)) return;
+  if (!dropSource || !Number.isInteger(count) || count<1 || count>backpackStackCount(dropSource)) return;
   clearDraft(); closeInfo(); harvest.stop(); handcraft.stop();
   selectedItem=undefined; groundTile=-1;
-  dropDraft={item:dropItem,count};
+  dropDraft={...dropSource,count};
   dropDialog.close();
   setPanel(false);
   refresh();
 });
 
 function onAction(action:string) {
-  const dropAction=/^drop-item-(\d+)$/.exec(action);
+  const dropAction=/^drop-item-(\d+)-(\d+)$/.exec(action);
   if (dropAction) {
-    dropItem=Number(dropAction[1]);
-    const count=held(data,dropItem);
+    const [,item,stackIndex]=dropAction.map(Number);
+    dropSource={item,stackIndex};
+    const count=backpackStackCount(dropSource);
     if (count<=0) return;
-    byId('drop-material').textContent=ITEM[dropItem];
+    byId('drop-material').textContent=ITEM[item];
     const input=byId<HTMLInputElement>('drop-quantity');
     input.max=String(count); input.value='1';
     dropDialog.showModal();
     input.select();
+    return;
+  }
+  const stackPageAction=/^stack-page-(held|device-\d+-\d+-(?:storage|input|output|module))-(\d+)$/.exec(action);
+  if (stackPageAction) {
+    inventoryPages.set(stackPageAction[1],Number(stackPageAction[2]));
+    refresh();
     return;
   }
   const pickup=/^pick-ground-(\d+)-(\d+)-(\d+)$/.exec(action);
@@ -1693,10 +1751,8 @@ function onAction(action:string) {
     case 'dismiss-blueprint': blueprintDialog.close(); return;
     case 'transfer-amount': {
       if (!selectedItem) return;
-      const {role,item,tile,identity,quantity}=selectedItem;
-      const device=deviceAt(data,tile);
-      const available=role==='held'?held(data,item):device?.identity===identity?
-        device.slots.find(slot=>slot.canTake && slot.role===role && slot.item===item)?.count ?? 0:0;
+      const {quantity}=selectedItem;
+      const available=availableInSlot(selectedItem);
       if (!available) return;
       const input=byId<HTMLInputElement>('transfer-quantity');
       input.max=String(available); input.value=String(Math.min(quantity ?? available,available));
@@ -1730,6 +1786,7 @@ function onAction(action:string) {
     case 'import': saveFile.click(); return;
     case 'reset-confirm': byId('reset-warning').hidden=false; return;
     case 'reset': {
+      inventoryPages.clear();
       clearDraft(); closeInfo(); selectedItem=undefined; dropDraft=undefined; groundTile=-1;
       selected=-1; focus=-1; traced=[]; mode='view'; inspectingTile=false; manualWork=false; recenter=true;
       resetDrawers();
@@ -1956,6 +2013,7 @@ worker.onmessage=event=>{
     return;
   }
   if (message.type==='restored') {
+    inventoryPages.clear();
     clearDraft(); closeInfo(); selectedItem=undefined; dropDraft=undefined; groundTile=-1;
     mode='view'; focus=-1; selected=-1; traced=[]; inspectingTile=false; manualWork=false; recenter=true;
     resetDrawers();

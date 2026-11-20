@@ -1,6 +1,7 @@
 export type SlotRole = 'held' | 'input' | 'output' | 'module' | 'cargo' | 'display';
-export type Slot = { role:SlotRole; item:number; tile:number; identity:number; count:number; canPut:boolean; canTake:boolean; lane:number; cargoId:number };
-export type Selection = Pick<Slot,'item'|'tile'|'identity'|'lane'|'cargoId'> & {role:SlotRole; quantity?:number};
+export type Slot = { role:SlotRole; item:number; tile:number; identity:number; count:number; canPut:boolean; canTake:boolean; lane:number; cargoId:number; stackIndex:number };
+type SlotAddress = Pick<Slot,'role'|'item'|'tile'|'identity'|'lane'|'cargoId'|'stackIndex'>;
+export type Selection = SlotAddress & {quantity?:number};
 export type ContainerTarget = Pick<Slot,'tile'|'identity'> & {role:'container'};
 
 export function readContainer(element:Element | null):ContainerTarget | undefined {
@@ -10,14 +11,15 @@ export function readContainer(element:Element | null):ContainerTarget | undefine
 }
 
 export function readSlot(button:HTMLButtonElement):Slot {
-  const {slot,item,tile,identity,count,put,take,lane,cargoId}=button.dataset;
+  const {slot,item,tile,identity,count,put,take,lane,cargoId,stackIndex}=button.dataset;
   return {role:slot as SlotRole,item:Number(item),tile:Number(tile),identity:Number(identity ?? 0),
-    count:Number(count),canPut:put==='true',canTake:take==='true',lane:Number(lane ?? 0),cargoId:Number(cargoId ?? 0)};
+    count:Number(count),canPut:put==='true',canTake:take==='true',lane:Number(lane ?? 0),cargoId:Number(cargoId ?? 0),stackIndex:Number(stackIndex ?? 0)};
 }
 
-export function sameSlot(source:Selection | undefined,slot:Slot) {
+export function sameSlot(source:Selection | undefined,slot:SlotAddress) {
   return !!source && source.role===slot.role && source.tile===slot.tile &&
-    source.item===slot.item && source.identity===slot.identity && source.lane===slot.lane && source.cargoId===slot.cargoId;
+    source.item===slot.item && source.identity===slot.identity && source.lane===slot.lane &&
+    source.cargoId===slot.cargoId && source.stackIndex===slot.stackIndex;
 }
 
 export function canSelectSlot(slot:Slot) { return slot.count>0 && (slot.role==='held' || slot.canTake); }

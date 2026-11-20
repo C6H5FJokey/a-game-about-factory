@@ -158,7 +158,7 @@ export function loadContent(configPath = process.env.DAYBREAK_CONTENT_CONFIG || 
     check(Object.hasOwn(fallback, key) && parameters(fallback[key], key) === '', `${defaultLanguage}.${key}`, 'expected a default translation without parameters');
   }
   const uiParameters = {
-    'ui.backpack': 'slots,used', 'ui.stackUsage': 'limit,used', 'ui.slotLabel': 'count,item,role',
+    'ui.backpack': 'slots,used', 'ui.stackCapacity': 'limit', 'ui.slotLabel': 'count,item,role',
     'ui.capacity': 'capacity,count', 'ui.received': 'count,item', 'ui.inserted': 'count,item', 'ui.installed': 'count,item',
     'tasks.make-miner.progress_one': 'count,required', 'tasks.make-miner.progress_other': 'count,required',
   };
