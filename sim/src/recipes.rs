@@ -312,24 +312,26 @@ impl World {
     }
 
     pub fn append_recipe_view(&self, out: &mut Vec<i32>, include: impl Fn(usize) -> bool) {
-        out.extend([
-            self.legacy_recipes as i32,
-            (32..=MAX_KIND)
+        wire::RecipeHeader {
+            legacy: self.legacy_recipes as i32,
+            unlocked: (32..=MAX_KIND)
                 .filter(|&kind| self.unlocked(kind))
                 .fold(0, |mask, kind| mask | (1 << (kind - 32))),
-        ]);
+        }
+        .append(out);
         out.extend(self.stock[10..].iter().map(|&n| n as i32));
         for &tile in &self.machines {
             let cell = &self.cells[tile];
             if cell.selected_recipe > 0 && include(tile) {
-                out.extend([
-                    tile as i32,
-                    RECIPES[cell.selected_recipe as usize - 1].key,
-                    crate::progression::cycle_ticks(
+                wire::Recipe {
+                    tile: tile as i32,
+                    key: RECIPES[cell.selected_recipe as usize - 1].key,
+                    ticks: crate::progression::cycle_ticks(
                         self.recipe_at(tile).unwrap().ticks,
                         cell.inv[SPEED_MODULE as usize],
                     ) as i32,
-                ]);
+                }
+                .append(out);
             }
         }
     }

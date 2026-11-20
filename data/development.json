@@ -1,0 +1,21 @@
+{
+  "initial": { "slots": 16, "speed": 2, "minZoom": 9, "maxZoom": 64 },
+  "stages": [
+    {
+      "id": "factory-expansion",
+      "minimumStage": 11,
+      "requirements": [
+        { "item": "plate", "amount": 12 },
+        { "item": "iron", "amount": 8 }
+      ],
+      "limits": { "slots": 24, "speed": 4, "minZoom": 6, "maxZoom": 64 },
+      "unlocks": [
+        "express-belt", "ultra-belt", "reinforced-iron-drill",
+        "reinforced-silica-drill", "reinforced-fuel-drill", "reinforced-copper-drill"
+      ],
+      "nameKey": "development.factory-expansion.name",
+      "descriptionKey": "development.factory-expansion.description",
+      "rewardKey": "development.factory-expansion.reward"
+    }
+  ]
+}

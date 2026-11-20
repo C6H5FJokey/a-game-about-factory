@@ -23,7 +23,7 @@ pub struct Cell {
     pub wire: bool,
     pub cfg: u8,
     pub status: u8,
-    pub group: u16,
+    pub group: u32,
     pub progress: u32,
     pub selected_recipe: u16,
     pub belt_iron: u32,
@@ -181,6 +181,16 @@ impl World {
     pub fn rebuild(&mut self) {
         self.rebuild_footprints()
             .expect("validated device footprints");
+        self.rebuild_belts();
+        self.update_grids();
+    }
+
+    pub fn rebuild_transport_layout(&mut self) {
+        self.rebuild_belts();
+        self.view_revision = self.view_revision.wrapping_add(1);
+    }
+
+    fn rebuild_belts(&mut self) {
         self.belt = Belts::rebuild(
             &self.cells,
             &self.cargo,
@@ -189,7 +199,6 @@ impl World {
             self.legacy_recipes,
         );
         self.layout_revision = self.layout_revision.wrapping_add(1);
-        self.update_grids();
     }
 
     pub fn update_grids(&mut self) {
@@ -209,7 +218,7 @@ impl World {
             if !self.cells[start].wire || self.cells[start].group != 0 {
                 continue;
             }
-            let group = self.grids.len() as u16;
+            let group = self.grids.len() as u32;
             self.grids.push(Grid::default());
             self.cells[start].group = group;
             pending.push(start);
@@ -506,7 +515,7 @@ impl World {
     }
 }
 
-fn take_power(grid: &mut Grid, group: u16, need: u32) -> bool {
+fn take_power(grid: &mut Grid, group: u32, need: u32) -> bool {
     grid.demand += need;
     if group == 0 || grid.used + need > grid.generation + grid.discharge {
         return false;

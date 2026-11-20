@@ -2,15 +2,17 @@ import { execFileSync } from 'node:child_process';
 import { copyFile } from 'node:fs/promises';
 import { build } from 'vite';
 
-const target = 'sim/target/terminal-profile';
-const outDir = 'docs/performance.local/terminal-dist';
+const dense = process.argv.includes('--dense');
+const mode = dense ? 'dense-profile' : 'terminal-profile';
+const target = 'sim/target/' + mode;
+const outDir = dense ? 'docs/performance.local/dense-dist' : 'docs/performance.local/terminal-dist';
 execFileSync(process.execPath, ['scripts/content.mjs', '--frontend'], { stdio: 'inherit' });
 execFileSync('cargo', [
   'build', '--release', '--target', 'wasm32-unknown-unknown',
-  '--features', 'terminal-profile', '--manifest-path', 'sim/Cargo.toml', '--target-dir', target,
+  '--features', mode, '--manifest-path', 'sim/Cargo.toml', '--target-dir', target,
 ], { stdio: 'inherit' });
 await build({
-  mode: 'terminal-profile',
+  mode,
   base: './',
   publicDir: false,
   build: { outDir, emptyOutDir: true },

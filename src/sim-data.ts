@@ -1,6 +1,11 @@
-import { Field, HEADER, H, Kind, STRIDE, W, cell, held, transportStart, xy, type Part } from './model';
-import { ViewSection } from './generated-content';
+import { Field, HEADER, H, Kind, STRIDE, W, cell, held, transportStart, type Part } from './model';
+import {
+  BlueprintInfoRecord as BlueprintInfo, BlueprintRecord, CargoRecord, DesignRecord as Design,
+  DesignBeltRecord as DesignBelt, DeviceRecord, LibraryRecord, MaterialRecord, PartRecord, PortRecord,
+  SlotRecord, ViewSection, WarehouseRecord,
+} from './generated-content';
 import { finishViewDecode, startViewDecode, viewSection } from './world-view';
+import { advanceRecords } from './wire-read';
 
 export type Material = { item:number; count:number };
 export type SlotData = { item:number; role:'input'|'output'|'module'; count:number; stack:number; room:boolean; canPut:boolean; canTake:boolean };
@@ -13,13 +18,18 @@ function deviceIndex(data:Int32Array) {
   if (!index) {
     const started=startViewDecode();
     index=new Map();
-    devices.set(data,index);
     const view=viewSection(data,ViewSection.Devices);
     const end=view?.[1] ?? data.length-1;
     const start=view?.[0] ?? data[end];
     if (start>=0 && start<=end && (view || start>=HEADER+W*H*STRIDE+4)) {
-      for (let i=start;i<end;i+=10+5*data[i+9]) index.set(data[i],i);
+      for (let row=start;row<end;) {
+        const slots=advanceRecords('Devices',row,end,1,DeviceRecord.words);
+        const next=advanceRecords('Devices.Slots',slots,end,data[row+DeviceRecord.slots],SlotRecord.words);
+        index.set(data[row+DeviceRecord.tile],row);
+        row=next;
+      }
     }
+    devices.set(data,index);
     finishViewDecode('device-index',started);
   }
   return index;
@@ -29,13 +39,19 @@ export function deviceAt(data:Int32Array,tile:number) {
   const index=deviceIndex(data);
   const record=index.get(tile);
   if (typeof record!=='number') return record;
-  const [,identity,grade,ore,demand,used,generated,charged,discharged,count]=data.subarray(record,record+10);
+  const count=data[record+DeviceRecord.slots];
   const slots:SlotData[]=[];
-  for (let j=0,i=record+10;j<count;j++,i+=5) {
-    const [item,role,count,stack,permissions]=data.subarray(i,i+5);
-    slots.push({item,role:role===3?'module':role===1?'input':'output',count,stack,room:Boolean(permissions&4),canPut:Boolean(permissions&1),canTake:Boolean(permissions&2)});
+  for (let j=0,i=record+DeviceRecord.words;j<count;j++,i+=SlotRecord.words) {
+    const role=data[i+SlotRecord.role], permissions=data[i+SlotRecord.permissions];
+    slots.push({item:data[i+SlotRecord.item],role:role===3?'module':role===1?'input':'output',
+      count:data[i+SlotRecord.count],stack:data[i+SlotRecord.stack],
+      room:Boolean(permissions&4),canPut:Boolean(permissions&1),canTake:Boolean(permissions&2)});
   }
-  const device={identity,grade,ore,demand,used,generated,charged,discharged,slots};
+  const device={
+    identity:data[record+DeviceRecord.identity],grade:data[record+DeviceRecord.grade],ore:data[record+DeviceRecord.ore],
+    demand:data[record+DeviceRecord.demand],used:data[record+DeviceRecord.used],generated:data[record+DeviceRecord.generated],
+    charged:data[record+DeviceRecord.charged],discharged:data[record+DeviceRecord.discharged],slots,
+  };
   index.set(tile,device);
   return device;
 }
@@ -51,13 +67,13 @@ function warehouses(data:Int32Array) {
     const view=viewSection(data,ViewSection.Warehouses);
     if (view) {
       let warehouse:Warehouse | undefined;
-      for (let row=view[0];row<view[1];row+=3) {
-        const tile=data[row];
+      for (let row=view[0];row<view[1];row+=WarehouseRecord.words) {
+        const tile=data[row+WarehouseRecord.tile];
         if (warehouse?.tile!==tile) {
           warehouse={tile,stock:new Map()};
           result.push(warehouse);
         }
-        warehouse.stock.set(data[row+1],data[row+2]);
+        warehouse.stock.set(data[row+WarehouseRecord.item],data[row+WarehouseRecord.count]);
       }
     } else {
       for (const tile of deviceIndex(data).keys()) {
@@ -76,24 +92,15 @@ export function constructionAvailable(data:Int32Array,item:number) {
   return warehouses(data).reduce((total,warehouse)=>total+(warehouse.stock.get(item) ?? 0),held(data,item));
 }
 
-export function constructionSources(data:Int32Array,materials:Material[],anchor:number) {
-  const remaining=materials.map(({item,count})=>({item,count:Math.max(0,count-held(data,item))}));
-  if (!remaining.some(({count})=>count>0)) return [];
-  const [x,y]=xy(anchor);
-  const distance=(tile:number)=>{
-    const [tx,ty]=xy(tile);
-    return Math.abs(tx-x)+Math.abs(ty-y);
-  };
-  return [...warehouses(data)].sort((a,b)=>distance(a.tile)-distance(b.tile)||a.tile-b.tile).flatMap(({tile,stock})=>{
-    const used:Material[]=[];
-    for (const row of remaining) {
-      const amount=Math.min(row.count,stock.get(row.item) ?? 0);
-      if (!amount) continue;
-      row.count-=amount;
-      used.push({item:row.item,count:amount});
-    }
-    return used.length?[{tile,used}]:[];
+export function constructionInventoryKey(data:Int32Array,materials:readonly Material[]) {
+  const shortages=materials.filter(({item,count})=>held(data,item)<count);
+  if (!shortages.length) return '';
+  const counts=materials.map(({item})=>held(data,item)).join(',');
+  const sources=warehouses(data).flatMap(({tile,stock})=>{
+    const relevant=shortages.map(({item})=>stock.get(item) ?? 0);
+    return relevant.some(Boolean)?[`${tile}:${relevant.join(',')}`]:[];
   });
+  return counts+'|'+sources.join('|');
 }
 
 type DirectoryEntry = {
@@ -108,15 +115,25 @@ const directory=new Map<number,DirectoryEntry>();
 export function readDirectory(buffer:ArrayBuffer) {
   directory.clear();
   const data=new Int32Array(buffer);
-  for (let i=0;i<data.length;) {
-    const [kind,minimum,grade,ores,demand,generation,batteryPower,batteryCapacity,output,amount,ticks,span,count]=data.subarray(i,i+13);
-    i+=13;
+  for (let row=0;row<data.length;) {
+    const materialStart=advanceRecords('Directory',row,data.length,1,Design.words);
+    const belt=advanceRecords('Directory.Materials',materialStart,data.length,data[row+Design.materials],MaterialRecord.words);
+    const ports=advanceRecords('Directory.Belt',belt,data.length,1,DesignBelt.words);
+    const next=advanceRecords('Directory.Ports',ports,data.length,2,PortRecord.words);
     const materials:Material[]=[];
-    for (let j=0;j<count;j++,i+=2) materials.push({item:data[i],count:data[i+1]});
-    const [beltTier,lanes,interval,laneCapacity,inA,outA,inB,outB]=data.subarray(i,i+8);
-    i+=8;
-    directory.set(kind,{kind,minimum,grade,ores,demand,generation,batteryPower,batteryCapacity,output,amount,ticks,span,materials,
-      beltTier,lanes,interval,laneCapacity,ports:[[inA,outA],[inB,outB]]});
+    for (let i=materialStart;i<belt;i+=MaterialRecord.words) materials.push({item:data[i+MaterialRecord.item],count:data[i+MaterialRecord.count]});
+    const kind=data[row+Design.kind];
+    directory.set(kind,{
+      kind,minimum:data[row+Design.minimum],grade:data[row+Design.grade],ores:data[row+Design.ores],
+      demand:data[row+Design.demand],generation:data[row+Design.generation],
+      batteryPower:data[row+Design.batteryPower],batteryCapacity:data[row+Design.batteryCapacity],
+      output:data[row+Design.output],amount:data[row+Design.amount],ticks:data[row+Design.ticks],span:data[row+Design.span],
+      materials,beltTier:data[belt+DesignBelt.tier],lanes:data[belt+DesignBelt.lanes],
+      interval:data[belt+DesignBelt.interval],laneCapacity:data[belt+DesignBelt.laneCapacity],
+      ports:[[data[ports+PortRecord.input],data[ports+PortRecord.output]],
+        [data[ports+PortRecord.words+PortRecord.input],data[ports+PortRecord.words+PortRecord.output]]],
+    });
+    row=next;
   }
 }
 
@@ -128,7 +145,6 @@ export function transportPorts(kind:number,dir:number,lane:number) {
   return {incoming:rotate(input),outgoing:rotate(output)};
 }
 
-export const TRANSPORT_RECORD_WORDS=8;
 const projections=new WeakMap<Int32Array,{cargo:Map<number,number>;arrivals:Int32Array}>();
 export type CargoTrack = { location:number; id:number; item:number; identity:number; from:number; since:number; until:number; blocked:boolean };
 
@@ -142,7 +158,7 @@ function transportProjection(data:Int32Array) {
   const start=transportStart(data), end=viewSection(data,ViewSection.Transport)?.[1] ?? data[data.length-1]-1;
   // Visual arrivals follow the real cargo records with a negative source tag.
   let i=start>=0?start+1:end;
-  for (;i<end && data[i]>=0;i+=TRANSPORT_RECORD_WORDS) cargo.set(data[i],i);
+  for (;i<end && data[i+CargoRecord.location]>=0;i+=CargoRecord.words) cargo.set(data[i+CargoRecord.location],i);
   const projection={cargo,arrivals:data.subarray(i,end)};
   projections.set(data,projection);
   finishViewDecode('cargo-index',started);
@@ -155,8 +171,9 @@ export function beltArrivalData(data:Int32Array) { return transportProjection(da
 export function cargoAt(data:Int32Array,tile:number,lane:number):CargoTrack | undefined {
   const index=cargoIndex(data).get(tile*2+lane);
   if (index===undefined) return undefined;
-  const [location,id,item,identity,from,since,until,blocked]=data.subarray(index,index+TRANSPORT_RECORD_WORDS);
-  return {location,id,item,identity,from,since,until,blocked:blocked===1};
+  return {location:data[index+CargoRecord.location],id:data[index+CargoRecord.id],item:data[index+CargoRecord.item],
+    identity:data[index+CargoRecord.identity],from:data[index+CargoRecord.from],since:data[index+CargoRecord.since],
+    until:data[index+CargoRecord.until],blocked:data[index+CargoRecord.blocked]===1};
 }
 
 export function drillVariant(data:Int32Array,tile:number,kind:number) {
@@ -173,18 +190,27 @@ const decoder=new TextDecoder();
 export function readBlueprints(buffer:ArrayBuffer) {
   const data=new Int32Array(buffer);
   const rows:Blueprint[]=[];
-  let i=2;
-  for (let n=0;n<data[1];n++) {
-    const [width,height,devices,item,count,id,version,bytes,partsCount]=data.subarray(i,i+9);
-    i+=9;
-    const name=decoder.decode(Uint8Array.from(data.subarray(i,i+bytes)));
-    i+=bytes;
+  let i=advanceRecords('Blueprints',0,data.length,1,LibraryRecord.words);
+  const entries=data[LibraryRecord.entries];
+  advanceRecords('Blueprints.Entries',i,data.length,entries,BlueprintInfo.words+BlueprintRecord.words);
+  for (let n=0;n<entries;n++) {
+    const info=i;
+    const header=advanceRecords('Blueprints.Info',info,data.length,1,BlueprintInfo.words);
+    const nameStart=advanceRecords('Blueprints.Header',header,data.length,1,BlueprintRecord.words);
+    const partsStart=advanceRecords('Blueprints.Name',nameStart,data.length,data[header+BlueprintRecord.nameBytes],1);
+    const next=advanceRecords('Blueprints.Parts',partsStart,data.length,data[header+BlueprintRecord.parts],PartRecord.words);
+    const name=decoder.decode(Uint8Array.from(data.subarray(nameStart,partsStart)));
     const parts:Part[]=[];
-    for (let j=0;j<partsCount;j++,i+=6) {
-      parts.push([data[i],data[i+1],data[i+2],data[i+3],data[i+4],data[i+5]]);
+    for (let p=partsStart;p<next;p+=PartRecord.words) {
+      parts.push([data[p+PartRecord.x],data[p+PartRecord.y],data[p+PartRecord.kind],
+        data[p+PartRecord.direction],data[p+PartRecord.wire],data[p+PartRecord.config]]);
     }
-    rows.push({id,version,name,width,height,devices,parts,material:{item,count}});
+    rows.push({id:data[header+BlueprintRecord.id],version:data[header+BlueprintRecord.version],name,
+      width:data[info+BlueprintInfo.width],height:data[info+BlueprintInfo.height],devices:data[info+BlueprintInfo.devices],
+      material:{item:data[info+BlueprintInfo.item],count:data[info+BlueprintInfo.count]},parts});
+    i=next;
   }
+  if (i!==data.length) throw new RangeError(`Invalid Blueprints tail at word ${i}`);
   return rows;
 }
 

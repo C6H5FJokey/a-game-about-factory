@@ -9,6 +9,7 @@ const sim = instance.exports;
 const hz = sim.tick_rate();
 assert.equal(hz, 30);
 const width = 56;
+const { commands } = content.protocol;
 const tile = (x,y) => y * width + x;
 const header = 98;
 const fieldAt = (position,field) => snapshot()[header + 19 * position + field];
@@ -17,6 +18,13 @@ function command(op, a = 0, b = 0, c = 0, words = []) {
   const pointer = sim.reserve_input(words.length);
   new Int32Array(sim.memory.buffer, pointer, words.length).set(words);
   return sim.command(op, a, b, c, words.length);
+}
+
+function previewPayment(anchor, words) {
+  const pointer = sim.reserve_input(words.length);
+  new Int32Array(sim.memory.buffer, pointer, words.length).set(words);
+  const length = sim.preview_construction_payment(anchor, words.length);
+  return Array.from(new Int32Array(sim.memory.buffer, sim.output_ptr(), length));
 }
 
 function advance(ticks) {
@@ -449,6 +457,22 @@ function testWarehouseStorage(empty) {
   assert.equal(restore(legacySave(provided,11)),1);
   assert.equal(snapshot()[36],115,'V11 backpack remains in the backpack.');
   assert.equal(warehouseStock(west,1),0,'A legacy warehouse starts empty.');
+  assert.equal(restore(provided),1);
+  const partialBackpack=provided.slice();
+  partialBackpack[8]=1;
+  assert.equal(restore(partialBackpack),1);
+  assert.deepEqual(previewPayment(middle,[4,3]),[1,west,4,2],
+    'Use one backpack item, then prefer the lower tile at equal distance.');
+  assert.deepEqual(previewPayment(middle,[4,10]),[-4,west,4,4,east,4,4]);
+  assert.deepEqual(save(),partialBackpack,'Construction previews leave all inventories intact.');
+  assert.equal(takeFromWarehouse(west,4,4),4);
+  fundWarehouse(east,4,4);
+  assert.deepEqual(previewPayment(middle,[4,3]),[1,east,4,2]);
+  const revision=previewTransports([middle,1,0])[2];
+  assert.equal(command(commands.BuildTransport,revision,0,0,
+    [middle,1,0,middle+width,1,1,middle+2*width,1,1]),1);
+  assert.equal(warehouseStock(east,4),6,'Confirmation plans against live stock after the preview.');
+  assert.equal(snapshot()[1],0);
   assert.equal(restore(provided),1);
   assert.equal(previewTransports([middle,1,0])[0],1);
   place(18,21,1);
@@ -1060,10 +1084,19 @@ function tracksById() {
 
 if (captureVisual) await writeFixtures(new URL('../docs/visual-review.local/', import.meta.url), reviewSaves);
 if (capturePerformance) {
+  const operationsSeed = legacySave(modernEmpty,9);
+  operationsSeed[23] = 13;
+  operationsSeed[5] = 117;
+  operationsSeed[8] = 32;
   const fixtures = new Map([
     ['opening', new Uint8Array(modernEmpty.buffer)],
     ['three-cities', reviewSaves.get('three-cities')],
     ['dense-belts', denseBeltFixture()],
   ]);
+  assert.equal(restore(operationsSeed),1);
+  place(20,16,12);
+  place(22,16,25);
+  assert.deepEqual(device(tile(20,16)).slots,[]);
+  fixtures.set('browser-operations',new Uint8Array(save().buffer));
   await writeFixtures(new URL('../docs/performance.local/', import.meta.url), fixtures);
 }

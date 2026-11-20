@@ -38,6 +38,11 @@ try {
     { role:'output', x:1, y:2, side:'east' },
   ];
   const alternateZh = await json(join(root, 'data/locales/zh-CN.json'));
+  const development = await json(join(root, 'data/development.json'));
+  development.stages[0].requirements = [{item:'plate',amount:13}];
+  development.stages[0].limits.slots = 25;
+  development.stages[0].nameKey = 'test.expansion-delivery';
+  alternateZh['test.expansion-delivery'] = '试验交付';
   alternateZh['items.iron.description'] = '配重试验中的铁矿说明。';
   alternateZh['test.iron-inlet'] = '矿物入口';
   const profile = {
@@ -49,7 +54,7 @@ try {
   const config = {
     dataset: 'review', datasets: { review: profile },
     files: { items: await write('items.json', items), recipes: await write('recipes.json', recipeFile),
-      machines: await write('machines.json', machines) },
+      machines: await write('machines.json', machines), development: await write('development.json', development) },
   };
   const configPath = await write('config.json', config);
   const { frontend: variant, tag } = loadContent(configPath);
@@ -57,6 +62,8 @@ try {
   assert.equal(variant.items[1].id, 'iron', 'Reordering data files does not change the stock ABI');
   assert.equal(variant.items[1].stackLimit, 25);
   assert.equal(variant.items[2].stackLimit, 100);
+  const stage = variant.development.stages[0];
+  assert.deepEqual(stage.requirements, [{item:4,amount:13}]);
   assert.notEqual(variant.saveIdentity, base.saveIdentity);
   assert.ok(variant.compatibleRecipes[5].some(i => variant.recipes[i].id === 'smelt-plate'));
   assert.ok(!variant.compatibleRecipes[8].some(i => variant.recipes[i].id === 'smelt-plate'));
@@ -86,6 +93,8 @@ try {
   assert.match(language.t('tasks.make-miner.progress', { count: 2, required: 5 }), /2 \/ 5 pieces$/);
   await language.changeLanguage('zh-CN');
   assert.equal(language.t(variant.items[1].descriptionKey), '配重试验中的铁矿说明。');
+  assert.equal(language.t(stage.nameKey), '试验交付');
+  assert.match(language.t(stage.rewardKey, stage.limits), /25 格/);
 
   for (const [label, change, diagnostic] of [
     ['stack', value => { value.at(-1).stackLimit = 0; }, /items\.json\.iron\.stackLimit/],
@@ -177,6 +186,43 @@ try {
   const beforeReject = review.save();
   assert.equal(review.restore(original), -25);
   assert.deepEqual(review.save(), beforeReject, 'A save from a different profile must leave the current game intact');
+  const delivery = beforeReject.slice();
+  const station = 16*56+23, depot = 16*56+22;
+  const { commands } = loadContent(configPath).protocol;
+  delivery[23] = stage.minimumStage;
+  delivery[5] = 125;
+  delivery[6] = 1;
+  delivery[8] = 12+8+4;
+  assert.equal(review.restore(delivery),1);
+  assert.equal(review.command(commands.SubmitDevelopment,station,1),-6,'Require a built station');
+  assert.equal(review.command(commands.Place,station,25),1);
+  assert.equal(review.command(commands.Place,depot,12),1);
+  const unready = review.save();
+  assert.equal(review.command(commands.SubmitDevelopment,station,1),-4);
+  assert.deepEqual(review.save(),unready,'A changed material target is enforced without partial payment');
+  const provisioned = unready.slice();
+  provisioned[8]++;
+  assert.equal(review.restore(provisioned),1);
+  const stockView = review.snapshot();
+  const depotIdentity = stockView[stockView.at(-1)+1];
+  assert.equal(review.command(commands.Transfer,-1,depot,1,[50,0,depotIdentity]),50);
+  assert.equal(review.command(commands.SubmitDevelopment,station,1),1);
+  const upgraded = review.save();
+  assert.equal(upgraded[8],0,'Consume the exact configured requirement');
+  assert.equal(review.command(commands.Transfer,-1,depot,2,[1,0,depotIdentity]),1,
+    'An existing warehouse immediately uses the upgraded stack size');
+  const upgradedWithMaterials = review.save();
+  assert.equal(review.command(commands.SubmitDevelopment,station,1),-6);
+  assert.deepEqual(review.save(),upgradedWithMaterials);
+  assert.equal(review.restore(upgradedWithMaterials),1);
+  assert.deepEqual(review.save(),upgradedWithMaterials);
+  const upgradedView = review.snapshot();
+  const progressionAt = upgradedView[upgradedView.at(-1)-1]-13;
+  assert.deepEqual(Array.from(upgradedView.slice(progressionAt,progressionAt+6)),[1,25,1,4,6,64]);
+  assert.ok(upgradedView[34] & (1<<26),'Restoring a completed stage preserves belt availability');
+  assert.equal(review.command(commands.SubmitDevelopment,station,1),-6);
+  assert.equal(review.command(commands.Transfer,-1,depot,1,[75,0,depotIdentity]),75,
+    'The stock uses the upgraded stack size after delivery and restore');
   const warehouseStart=beforeReject.slice();
   warehouseStart[23]=13;
   warehouseStart[5]=26;
@@ -330,7 +376,7 @@ try {
   assert.equal(review.restore(roundTrip),1);
   assert.deepEqual(occupied(outlet),[bench,16]);
   assert.ok(review.snapshot()[98+19*bench+6]>0);
-  console.log('数据回归通过：配置、存档隔离、调价后返还、逐物品堆叠、配方周期、语言回退、多格占地、旋转、端口交接及蓝图。');
+  console.log('数据回归通过：配置、存档隔离、调价后返还、逐物品堆叠、阶段交付、配方周期、语言回退、多格占地、旋转、端口交接及蓝图。');
 } finally {
   for (const file of created) await unlink(file);
   await rmdir(work);

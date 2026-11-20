@@ -289,26 +289,49 @@ impl Library {
     }
 
     pub fn write_view(&self, out: &mut Vec<i32>, legacy: bool) {
-        out.extend([self.legacy_imported as i32, (self.entries.len() + 1) as i32]);
+        wire::Library {
+            legacy_imported: self.legacy_imported.into(),
+            entries: (self.entries.len() + 1) as i32,
+        }
+        .append(out);
         for entry in std::iter::once(&Blueprint::standard(legacy)).chain(&self.entries) {
-            out.extend([
-                entry
+            wire::BlueprintInfo {
+                width: entry
                     .parts
                     .iter()
                     .map(|part| part.extent().0)
                     .max()
                     .unwrap_or(0),
-                entry
+                height: entry
                     .parts
                     .iter()
                     .map(|part| part.extent().1)
                     .max()
                     .unwrap_or(0),
-                entry.pieces() as i32,
-                KIT.into(),
-                entry.kits() as i32,
-            ]);
-            entry.write(out);
+                devices: entry.pieces() as i32,
+                item: KIT.into(),
+                count: entry.kits() as i32,
+            }
+            .append(out);
+            wire::Blueprint {
+                id: entry.id,
+                version: entry.version,
+                name_bytes: entry.name.len() as i32,
+                parts: entry.parts.len() as i32,
+            }
+            .append(out);
+            out.extend(entry.name.bytes().map(i32::from));
+            for part in &entry.parts {
+                wire::Part {
+                    x: part.x,
+                    y: part.y,
+                    kind: part.kind.into(),
+                    direction: part.dir.into(),
+                    wire: part.wire.into(),
+                    config: part.config,
+                }
+                .append(out);
+            }
         }
     }
 

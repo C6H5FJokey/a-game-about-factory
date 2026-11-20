@@ -1,5 +1,5 @@
-import { content } from './generated-content';
-import { Field, HEADER, H, Kind, STEP, STRIDE, W, at, cell, isTransport, transportStart, xy } from './model';
+import { content, FootprintRecord } from './generated-content';
+import { Field, HEADER, H, Kind, STEP, STRIDE, W, at, cell, footprintsEnd, isTransport, xy } from './model';
 import { transportPorts } from './sim-data';
 import { finishViewDecode, snapshotLayout, startViewDecode, type SnapshotLayout } from './world-view';
 
@@ -45,10 +45,12 @@ function spatialIndex(data:Int32Array) {
   if (!index) {
     const started=startViewDecode();
     index=new Map();
-    const end=transportStart(data)-14;
+    const end=footprintsEnd(data);
     const start=data[end];
     const rows=layout?.footprints ?? (start>=HEADER+W*H*STRIDE+4 && start<=end ? data.subarray(start,end) : []);
-    for (let i=0;i<rows.length;i+=3) index.set(rows[i],{anchor:rows[i+1],masks:rows[i+2]});
+    for (let i=0;i<rows.length;i+=FootprintRecord.words) {
+      index.set(rows[i+FootprintRecord.tile],{anchor:rows[i+FootprintRecord.anchor],masks:rows[i+FootprintRecord.masks]});
+    }
     indexes.set(key,index);
     finishViewDecode('footprint-index',started);
   }

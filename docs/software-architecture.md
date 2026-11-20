@@ -33,18 +33,18 @@ flowchart LR
 
 | 改动范围 | 代码归属 | 关系 |
 | --- | --- | --- |
-| 面板、操作流程、键鼠与触屏 | [main.ts](../src/main.ts) · [input.ts](../src/input.ts) · [inventory-drag.ts](../src/inventory-drag.ts) · [action-hold.ts](../src/action-hold.ts) | `main.ts` 装配 UI 和 Worker，手势绑定把输入交给相同的操作入口。 |
+| 面板、操作流程、键鼠与触屏 | [main.ts](../src/main.ts) · [inventory-interaction.ts](../src/inventory-interaction.ts) · [inventory-drag.ts](../src/inventory-drag.ts) · [input.ts](../src/input.ts) | `main.ts` 装配 UI 和 Worker。库存交互模块管理选中、双击、取消、分页与转移回执。 |
 | 地图绘制、端口与路径 | [renderer.ts](../src/renderer.ts) · [icons.ts](../src/icons.ts) · [machine-layout.ts](../src/machine-layout.ts) · [belt-route.ts](../src/belt-route.ts) · [footprints.rs](../sim/src/footprints.rs) | 地图和货物用 WebGL 图元，界面图标用代码生成的 SVG。TypeScript 负责寻路与施工预览，Rust 校验占地、朝向和端口。 |
-| 通信协议 | [protocol.json](../data/protocol.json) · [worker.ts](../src/worker.ts) · [world-view.ts](../src/world-view.ts) · [snapshot_view.rs](../sim/src/snapshot_view.rs) | 命令编号、地图尺寸、布局和动态列、视野帧段目录从协议声明生成。目录、蓝图库和运输预览有各自的返回消息。 |
+| 通信协议 | [protocol.json](../data/protocol.json) · [worker.ts](../src/worker.ts) · [world-view.ts](../src/world-view.ts) · [snapshot_view.rs](../sim/src/snapshot_view.rs) | 命令编号、地图尺寸、视野帧段目录和变长记录的字段来自同一份声明。Rust 按命名字段写入，TS 用生成的偏移读取快照、设备目录、蓝图库与施工预览。 |
 | 物流与运输 | [belts.rs](../sim/src/belts.rs) · [transport.rs](../sim/src/transport.rs) · [transport_save.rs](../sim/src/transport_save.rs) · [regions.rs](../sim/src/regions.rs) | 管运输段、普通带优先级、专用装置、库存端点、货箱和运输持久化。 |
 | 加工、电力、库存、建造 | [world.rs](../sim/src/world.rs) · [recipes.rs](../sim/src/recipes.rs) · [inventory.rs](../sim/src/inventory.rs) · [construction.rs](../sim/src/construction.rs) · [ground.rs](../sim/src/ground.rs) | `World::step` 分配供电和推进工序。容量、取放、支付和退款由 Rust 校验。 |
-| 进度、地图限制、轨道、蓝图 | [campaign.rs](../sim/src/campaign.rs) · [progression.rs](../sim/src/progression.rs) · [regions.rs](../sim/src/regions.rs) · [blueprints.rs](../sim/src/blueprints.rs) | 模拟决定解锁和验收，前端任务与手册读取当前阶段。 |
+| 进度、地图限制、轨道、蓝图 | [campaign.rs](../sim/src/campaign.rs) · [progression.rs](../sim/src/progression.rs) · [development.json](../data/development.json) · [regions.rs](../sim/src/regions.rs) · [blueprints.rs](../sim/src/blueprints.rs) | 首档交付从配置生成两端定义。模拟原子结算材料和档位，前端任务读取同一完成状态。 |
 | 内容、本地化与部署 | [content.config.json](../data/content.config.json) · [registry.json](../data/registry.json) · [content.mjs](../scripts/content.mjs) · [i18n.ts](../src/i18n.ts) · [pages.yml](../.github/workflows/pages.yml) | 同一套配置生成 Rust 常量和前端目录。GitHub Actions 构建并校验静态包后部署。 |
 
 ## 内容、协议与存档的兼容边界
 
-- **内容配置**。构建时读取物品、机器、配方与语言资源，校验稳定 ID、引用与数值，再生成两端目录。运行时常见的数值查询使用索引表。现有物品和设备可以改参数，注册表范围、阶段条件和新设备行为仍由代码约定。内容签名用于核对网页与 Wasm 是否为同一套构建。[内容生成](../scripts/content.mjs) · [内容交接](data-driven-handoff.md)
-- **存档**。IndexedDB 按数据集身份保存本局，文件导入也走同一套 Rust 校验。存档使用独立的格式版本与内容标记；其中内容身份由稳定注册及相关工艺、占地等兼容字段决定，与运行时内容签名分开。Rust 先解析并验证候选世界，成功后才替换当前 `World`。当前格式为 V14，兼容 V4 至 V13 的旧档规则。[浏览器存储](../src/storage.ts) · [存档读写与迁移](../sim/src/lib.rs)
+- **内容配置**。构建时读取物品、机器、配方、发展阶段与语言资源，校验稳定 ID、引用与数值，再生成两端目录。运行时常见的数值查询使用索引表。首档交付的前置、材料和奖励由配置指定。注册表范围、开场教学和新设备行为由代码约定。内容签名用于核对网页与 Wasm 是否为同一套构建。[内容生成](../scripts/content.mjs) · [内容交接](data-driven-handoff.md)
+- **存档**。IndexedDB 按数据集身份保存本局，文件导入也走同一套 Rust 校验。存档使用独立的格式版本与内容标记；其中内容身份由稳定注册及相关工艺、占地等兼容字段决定，与运行时内容签名分开。Rust 先解析并验证候选世界，成功后才替换当前 `World`。当前格式为 V14，兼容 V4 至 V13 的旧档规则。生产来源使用现有的 32 位存档字段，占地归属和电网分组随读档重建。[浏览器存储](../src/storage.ts) · [存档读写与迁移](../sim/src/lib.rs)
 - **运行快照**。视野帧和布局随网页与 Wasm 一起发布。布局消息先于使用它的帧，成功读档或新开局时 Worker 重新发送布局。暂停时改变镜头和面板订阅也会刷新动态帧。整图快照用于测试和同工况对照。存档保存可继续模拟的库存、拓扑与在途货物。[运输投影与存档](../sim/src/transport_save.rs)
 
 ## 技术债与处理时机
@@ -55,17 +55,16 @@ flowchart LR
 
 | 技术债 | 证据与影响 | 建议处理时机与验收 |
 | --- | --- | --- |
-| **手工维护部分记录字段** | 视野快照使用共用段目录。设备、库存等变长记录的字段仍需同步，整图测试快照仍用原偏移。[协议声明](../data/protocol.json) · [设备记录](../sim/src/interface.rs) · [TS 读端](../src/sim-data.ts) | 下次扩展相关记录时从同一份声明生成双方的字段常量，用固定编码样本验收。 |
-| **前端入口集中承担交互状态** | `main.ts` 约两千行，同时控制抽屉、地图选中、库存点击时序、施工草稿、Worker 回执和存档。库存与施工改动容易碰到焦点、取消和暂停的联动。仓库供料预览还在 TypeScript 与 Rust 两侧分别计算。[页面编排](../src/main.ts) · [前端供料预览](../src/sim-data.ts) · [模拟施工](../sim/src/construction.rs) | 碰到下一项库存或施工功能时，先将对应交互状态收进独立模块，把可复用的预览结果从 Rust 返回给界面。用实际浏览器覆盖点选、拖拽、取消和命令被拒绝后的状态。 |
-| **拓扑重建与设备调度的工作量绑定** | `World::rebuild` 一次重建占地、输送拓扑和电网，`update_grids` 遍历整图。电力和生产按已登记设备逐步扫描。传送段已有就绪时间跳过无须推进的队列，规格中的设备级唤醒和局部电网重建仍是扩展方向。[拓扑与设备调度](../sim/src/world.rs) · [运输段调度](../sim/src/belts.rs) | 批量施工或更大地图前测量单次施工尖峰与稳态开销。若重建成为瓶颈，再按电网和运输段拆分失效范围。用拆接电缆、阻塞恢复和货物守恒回归验证。 |
-| **进度规则仍与固定标识耦合** | 物品和机种的注册范围受到构建校验及运行时常量约束。教学阶段与机种开放条件在 Rust 和前端任务说明之间绑定。阶段提交、奖励和速度模块来源仍在交接待办。[注册与校验](../scripts/content.mjs) · [阶段规则](../sim/src/campaign.rs) · [阶段交付待办](progression-handoff.md#阶段交付待办) | 接阶段交付时，把要求、奖励和任务文案键放入共用数据表。验证更换一项交付需求后，界面、扣料、奖励和存档恢复保持一致。 |
-| **浏览器回归和扩容性能基线还需补齐** | 现有回归强项是 Rust 规则、Wasm 主线和自定义数据。性能工具已分开记录 Node 下的步进与快照成本，以及浏览器帧和快照到达节奏。Pages 工作流覆盖静态包与默认配置的模拟，浏览器操作仍主要靠本地评审。[Pages 工作流](../.github/workflows/pages.yml) · [工程质量基线](quality-baseline.md) | 优先固定开局、空容器投放、批量铺拆和存档导入几条浏览器冒烟路径。扩图时保存可复现样本，分别记录浏览器与设备环境和各阶段计时。 |
+| **前端入口集中承担交互状态** | `main.ts` 仍负责抽屉、地图选中、施工草稿、Worker 路由与存档。库存交互已有独立模块，仓库供料规则由 Rust 统一计算。[页面编排](../src/main.ts) · [库存交互](../src/inventory-interaction.ts) · [供料预览](../src/construction-supply.ts) | 修改施工流程时检查草稿、确认、取消与命令回执涉及的文件，复测桌面和触屏。 |
+| **输送段与电网仍分别全量重建** | 纯输送施工只写改动格的占地、重算运输段，保留电网及设备供电状态。拆接电缆全量更新电网连通性，电力与生产按已登记设备逐步扫描。[拓扑与设备调度](../sim/src/world.rs) · [运输段调度](../sim/src/belts.rs) | 以命令计时确定分区重建的优先级，验证拆接、堵塞恢复和货物守恒。现有电缆批改在桌面评审中约 2–3 ms。[施工对照](quality-baseline.md#p2-施工重建对照) |
+| **教学规则与内容注册仍使用固定标识** | 物品和机种的注册范围受到构建校验及运行时常量约束。前端任务说明仍与 Rust 教学阶段绑定。首档交付已有共用数据，速度模块来源待定。[注册与校验](../scripts/content.mjs) · [阶段规则](../sim/src/campaign.rs) · [模块待办](progression-handoff.md#模块待办) | 扩展普通任务前，以现有首档数据回归为参照，验证指标、扣料和读档同步。 |
 
 ## 验证入口
 
 - `cargo test --manifest-path sim/Cargo.toml` 验证存取与运输等 Rust 规则。
 - `npm run build` 生成目录、编译 Wasm、检查 TypeScript 并构建静态包。随后 `npm run test:sim` 验证完整主线、守恒、旧档和真实 Wasm 接口，`npm run test:bundle` 检查发布包的内容签名与存档往返。
 - `npm run test:content` 以多套配置验证存档隔离、调价返还、逐物品堆叠、多格占地与实际端口交接。
+- 日常回归使用桌面浏览器和模拟触屏。Android 真机只在架构大改且需要重建性能基线时复测。[真机基线与复测](quality-baseline.md#android-真机基线)
 - `npm run review:visual` 提供本地浏览器评审场景。大地图的性能指标仍应按规格目标单独验收。[构建与部署说明](../README.md#构建与部署) · [桌面和触屏评审](game-spec.md#可交互视觉稿)
 
 ## 同类项目与参考来源

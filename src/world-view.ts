@@ -1,7 +1,9 @@
 import {
   SNAPSHOT_CELL_WORDS, SNAPSHOT_HEADER_WORDS, VIEW_BOUNDS_WORDS, VIEW_DYNAMIC_FIELDS,
-  VIEW_LAYOUT_FIELDS, VIEW_LAYOUT_HEADER_WORDS, VIEW_SECTION_COUNT, ViewSection,
+  VIEW_LAYOUT_FIELDS, VIEW_LAYOUT_HEADER_WORDS, VIEW_SECTION_COUNT, VIEW_SECTION_NAMES, ViewSection,
+  CargoRecord, FootprintRecord, GridRecord, GroundRecord, ProgressionRecord, RecipeHeaderRecord, RecipeRecord, WarehouseRecord, content,
 } from './generated-content';
+import { checkRows } from './wire-read';
 
 const directory=SNAPSHOT_HEADER_WORDS+VIEW_BOUNDS_WORDS;
 const viewCells=directory+VIEW_SECTION_COUNT+1;
@@ -12,7 +14,8 @@ const fieldOffsets=(fields:number[])=>{
   return offsets;
 };
 const layoutOffsets=fieldOffsets(VIEW_LAYOUT_FIELDS), dynamicOffsets=fieldOffsets(VIEW_DYNAMIC_FIELDS);
-const profile=import.meta.env.MODE==='terminal-profile';
+const mode=import.meta.env?.MODE;
+const profile=mode==='terminal-profile' || mode==='dense-profile';
 
 export function startViewDecode() { return profile ? performance.now() : 0; }
 export function finishViewDecode(section:string,started:number) {
@@ -23,7 +26,7 @@ export class SnapshotLayout {
   readonly footprints:Int32Array;
   constructor(readonly words:Int32Array, readonly width:number, readonly height:number) {
     const start=VIEW_LAYOUT_HEADER_WORDS+width*height*layoutStride;
-    if (words.length<start || (words.length-start)%3!==0) throw new Error('Invalid snapshot layout');
+    checkRows('Footprint',start,words.length,FootprintRecord.words);
     this.footprints=words.subarray(start);
   }
 }
@@ -41,14 +44,21 @@ export function attachView(data:Int32Array,layout:SnapshotLayout) {
   for (let i=0;i<=VIEW_SECTION_COUNT;i++) {
     const offset=data[directory+i];
     if (offset===undefined || offset<previous || offset>data.length || (i===0 && offset!==previous)) {
-      throw new Error(`Invalid snapshot section ${i}`);
+      throw new Error(`Invalid snapshot section ${VIEW_SECTION_NAMES[i] ?? 'end'}`);
     }
     previous=offset;
   }
   if (previous!==data.length) throw new Error('Invalid snapshot length');
+  const at=(section:ViewSection)=>data[directory+section];
+  checkRows('Grids',at(ViewSection.Grids),at(ViewSection.Ground),GridRecord.words);
+  checkRows('Ground',at(ViewSection.Ground),at(ViewSection.Recipes),GroundRecord.words);
+  checkRows('Recipes',at(ViewSection.Recipes)+RecipeHeaderRecord.words+content.items.length-10,at(ViewSection.Progression),RecipeRecord.words);
+  if (at(ViewSection.Transport)-at(ViewSection.Progression)!==ProgressionRecord.words) throw new Error('Invalid Progression record');
+  checkRows('Transport',at(ViewSection.Transport)+1,at(ViewSection.Devices),CargoRecord.words);
+  checkRows('Warehouses',at(ViewSection.Warehouses),at(ViewSection.Faults),WarehouseRecord.words);
   const extras=new Map<number,number>();
   const start=data[directory+ViewSection.ExtraTiles], end=data[directory+ViewSection.Grids];
-  if ((end-start)%(dynamicStride+1)!==0) throw new Error('Invalid watched tiles');
+  checkRows('ExtraTiles',start,end,dynamicStride+1);
   for (let row=start;row<end;row+=dynamicStride+1) extras.set(data[row],row+1);
   frames.set(data,{layout,left,top,right,bottom,extras});
 }

@@ -40,7 +40,7 @@ fn has_output(kind: u8, dir: u8, flow: u8) -> bool {
 
 impl World {
     // Use the backpack first, then nearby warehouses with tile order as a tie-break.
-    fn construction_payment(&self, anchor: usize, mut cost: [u32; ITEMS]) -> Option<Payment> {
+    fn plan_construction_payment(&self, anchor: usize, mut cost: [u32; ITEMS]) -> (Payment, bool) {
         let mut payment = Payment {
             backpack: self.stock,
             withdrawals: Vec::new(),
@@ -51,7 +51,7 @@ impl World {
             *held -= taken;
         }
         if cost.iter().all(|&amount| amount == 0) {
-            return Some(payment);
+            return (payment, true);
         }
         let mut warehouses = self
             .machines
@@ -77,10 +77,15 @@ impl World {
                 }
             }
             if cost.iter().all(|&amount| amount == 0) {
-                return Some(payment);
+                return (payment, true);
             }
         }
-        None
+        (payment, false)
+    }
+
+    fn construction_payment(&self, anchor: usize, cost: [u32; ITEMS]) -> Option<Payment> {
+        let (payment, complete) = self.plan_construction_payment(anchor, cost);
+        complete.then_some(payment)
     }
 
     pub fn spend_construction(&mut self, anchor: usize, materials: &[(u8, u32)]) -> bool {
@@ -257,11 +262,13 @@ impl World {
                     kind: part.kind,
                     dir: part.dir,
                     wire: old.wire,
+                    group: old.group,
                     cfg: if same_kind { old.cfg } else { 0 },
                     split_turn: same_kind && old.split_turn,
                     ..Cell::default()
                 },
             );
+            self.footprints.set_transport(part.tile, true);
             if !same_kind {
                 self.ground
                     .record_device(part.tile, self.build_materials(part.kind), false);
@@ -270,9 +277,56 @@ impl World {
                 self.cargo[node(part.tile, lane)] = cargo;
             }
         }
-        self.rebuild();
+        self.rebuild_transport_layout();
         1
     }
+}
+
+#[no_mangle]
+pub extern "C" fn preview_construction_payment(anchor: i32, len: usize) -> usize {
+    RUNTIME.with(|runtime| {
+        let mut runtime = runtime.borrow_mut();
+        let Runtime {
+            world,
+            input,
+            output,
+        } = &mut *runtime;
+        output.clear();
+        let plan = (|| {
+            if !(0..N as i32).contains(&anchor) || len % 2 != 0 || len / 2 > ITEMS {
+                return None;
+            }
+            let mut cost = [0u32; ITEMS];
+            for &[item, amount] in input.get(..len)?.as_chunks::<2>().0 {
+                if !(1..ITEMS as i32).contains(&item) || amount <= 0 {
+                    return None;
+                }
+                let total = &mut cost[item as usize];
+                *total = total.checked_add(amount as u32)?;
+                if *total > i32::MAX as u32 {
+                    return None;
+                }
+            }
+            Some(world.plan_construction_payment(anchor as usize, cost))
+        })();
+        if let Some((payment, complete)) = plan {
+            wire::ConstructionPayment {
+                status: if complete { 1 } else { -4 },
+            }
+            .append(output);
+            for (tile, item, amount) in payment.withdrawals {
+                wire::Warehouse {
+                    tile: tile as i32,
+                    item: item.into(),
+                    count: amount as i32,
+                }
+                .append(output);
+            }
+        } else {
+            wire::ConstructionPayment { status: -1 }.append(output);
+        }
+        output.len()
+    })
 }
 
 #[no_mangle]
@@ -291,22 +345,32 @@ pub extern "C" fn preview_transports(len: usize) -> usize {
             .and_then(|words| world.transport_plan(words));
         match result {
             Ok(plan) => {
-                output.extend([
-                    if world.construction_payment(plan.anchor, plan.cost).is_some() {
+                wire::TransportPreview {
+                    status: if world.construction_payment(plan.anchor, plan.cost).is_some() {
                         1
                     } else {
                         -4
                     },
-                    -1,
-                    world.layout_revision,
-                ]);
+                    tile: -1,
+                    revision: world.layout_revision,
+                }
+                .append(output);
                 for (item, count) in plan.cost.into_iter().enumerate() {
                     if count > 0 {
-                        output.extend([item as i32, count as i32]);
+                        wire::Material {
+                            item: item as i32,
+                            count: count as i32,
+                        }
+                        .append(output);
                     }
                 }
             }
-            Err((error, tile)) => output.extend([error, tile, world.layout_revision]),
+            Err((error, tile)) => wire::TransportPreview {
+                status: error,
+                tile,
+                revision: world.layout_revision,
+            }
+            .append(output),
         }
         output.len()
     })

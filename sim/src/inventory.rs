@@ -4,7 +4,6 @@ use crate::progression::accepts_module;
 use crate::world::{Cell, World};
 
 pub const STOCK_TILE: i32 = -1;
-const WRITTEN_SLOT_WORDS: usize = 5;
 
 pub fn occupied_slots(count: u32, stack: u32) -> u32 {
     count.div_ceil(stack)
@@ -238,11 +237,10 @@ impl World {
     }
 
     // Slot records share capacity calculations with the automatic transport.
-    pub fn write_slots(&self, tile: usize, out: &mut Vec<i32>) {
+    pub fn append_slots(&self, tile: usize, out: &mut Vec<i32>) -> i32 {
         let cell = self.cells[tile];
         let recipe = self.recipe_at(tile);
         let header = out.len();
-        out.push(0);
         for item in 1..MATERIAL_ITEMS as u8 {
             if item == SPEED_MODULE && cell.kind != DEPOT {
                 continue;
@@ -253,32 +251,48 @@ impl World {
             }
             let stack = self.progression.stack_limit(item) as i32;
             if let Some(room) = self.input_room(tile, item) {
-                out.extend([
-                    item as i32,
-                    1,
-                    count as i32,
+                wire::Slot {
+                    item: item.into(),
+                    role: 1,
+                    count: count as i32,
                     stack,
-                    self.manual_input(tile) as i32
+                    permissions: self.manual_input(tile) as i32
                         | ((self.manual_input_take(tile) as i32) << 1)
                         | ((i32::from(room > 0)) << 2),
-                ]);
+                }
+                .append(out);
             }
             if cell.kind == FREIGHT_YARD && RECEIVERS.contains(&tile) {
-                out.extend([item as i32, 2, count as i32, stack, 0]);
+                wire::Slot {
+                    item: item.into(),
+                    role: 2,
+                    count: count as i32,
+                    stack,
+                    permissions: 0,
+                }
+                .append(out);
             } else if recipe.as_ref().is_some_and(|r| r.output == item) {
-                out.extend([item as i32, 2, count as i32, stack, 2]);
+                wire::Slot {
+                    item: item.into(),
+                    role: 2,
+                    count: count as i32,
+                    stack,
+                    permissions: 2,
+                }
+                .append(out);
             }
         }
         if accepts_module(cell.kind) {
-            out.extend([
-                SPEED_MODULE.into(),
-                3,
-                cell.inv[SPEED_MODULE as usize] as i32,
-                self.progression.stack_limit(SPEED_MODULE) as i32,
-                3 | (i32::from(cell.inv[SPEED_MODULE as usize] == 0) << 2),
-            ]);
+            wire::Slot {
+                item: SPEED_MODULE.into(),
+                role: 3,
+                count: cell.inv[SPEED_MODULE as usize] as i32,
+                stack: self.progression.stack_limit(SPEED_MODULE) as i32,
+                permissions: 3 | (i32::from(cell.inv[SPEED_MODULE as usize] == 0) << 2),
+            }
+            .append(out);
         }
-        out[header] = ((out.len() - header - 1) / WRITTEN_SLOT_WORDS) as i32;
+        ((out.len() - header) / wire::Slot::WORDS) as i32
     }
 }
 

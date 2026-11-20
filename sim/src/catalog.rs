@@ -7,8 +7,8 @@ pub const W: usize = WORLD_WIDTH;
 #[cfg(not(feature = "terminal-profile"))]
 pub const H: usize = WORLD_HEIGHT;
 pub const N: usize = W * H;
-// Footprint owners and producer IDs reserve a sentinel above the last tile.
-const _: () = assert!(N < u16::MAX as usize);
+// Transport nodes and cable payment sites share signed 32-bit wire words.
+const _: () = assert!(N <= i32::MAX as usize / 2);
 pub const BELT_TICKS: u32 = 5;
 pub const LEGACY_MATERIAL_ITEMS: usize = 9;
 pub const MATERIAL_ITEMS: usize = ITEMS;

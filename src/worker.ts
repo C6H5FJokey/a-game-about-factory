@@ -7,6 +7,7 @@ type Kernel = WebAssembly.Exports & {
   snapshot_view(...scope:ViewScope):number;
   directory():number; blueprints():number;
   preview_transports(len:number):number;
+  preview_construction_payment(anchor:number,len:number):number;
   reset():void; step(ticks:number):void; max_speed():number;
   content_signature():number; tick_rate():number;
   world_width():number; world_height():number;
@@ -24,6 +25,7 @@ type Message = { type:'init'; url:string; signature:number; save?:unknown; legac
   { type:'speed'; speed:number } | { type:'recycle'; buffer:ArrayBuffer } |
   { type:'restore'; buffer:ArrayBuffer } | { type:'reset' } | { type:'save' } |
   { type:'transport-preview'; request:number; words:number[] } |
+  { type:'construction-payment'; request:number; anchor:number; words:number[] } |
   { type:'profile-stats' } | { type:'profile-exercise' } | { type:'profile-advance'; ticks:number }
   | { type:'profile-line' } | { type:'view'; scope:ViewScope };
 
@@ -209,6 +211,12 @@ worker.onmessage = event => {
       if (!input(message.words)) return;
       const result=copyOutput(kernel.preview_transports(message.words.length));
       worker.postMessage({type:'transport-preview',request:message.request,result},[result]);
+      return;
+    }
+    case 'construction-payment': {
+      if (!input(message.words)) return;
+      const result=copyOutput(kernel.preview_construction_payment(message.anchor,message.words.length));
+      worker.postMessage({type:'construction-payment',request:message.request,result},[result]);
       return;
     }
     case 'recycle': if (buffers.length < 3) buffers.push(message.buffer); return;

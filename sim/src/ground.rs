@@ -122,7 +122,13 @@ impl Ground {
     pub fn append_view(&self, out: &mut Vec<i32>, include: impl Fn(usize) -> bool) {
         for (&(tile, item), pile) in &self.piles {
             if include(tile) {
-                out.extend([tile as i32, item.into(), pile.id, pile.count as i32]);
+                wire::Ground {
+                    tile: tile as i32,
+                    item: item.into(),
+                    id: pile.id,
+                    count: pile.count as i32,
+                }
+                .append(out);
             }
         }
     }
@@ -378,7 +384,7 @@ impl World {
             rest = tail;
             let materials = if grouped_materials {
                 let (materials, tail) =
-                    read_materials(rest, *value, i32::from(u16::MAX) * N as i32)?;
+                    read_materials(rest, *value, i32::from(u16::MAX).saturating_mul(N as i32))?;
                 rest = tail;
                 materials
             } else {

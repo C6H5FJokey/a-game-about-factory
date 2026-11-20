@@ -8,6 +8,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 terminal-profile = []
+dense-profile = ["terminal-profile"]
 
 [profile.release]
 lto = true

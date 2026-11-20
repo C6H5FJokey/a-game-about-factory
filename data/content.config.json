@@ -7,6 +7,7 @@
         "items": "items.json",
         "machines": "machines.json",
         "recipes": "recipes.json",
+        "development": "development.json",
         "locales": {
           "zh-CN": "locales/zh-CN.json",
           "en": "locales/en.json"

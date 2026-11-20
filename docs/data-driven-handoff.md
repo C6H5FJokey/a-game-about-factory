@@ -4,7 +4,7 @@
 
 ## 1. 构建配置与目录
 
-默认配置在 `data/content.config.json`，其中 `dataset` 选择 `datasets` 中的一项。数据集的 `version` 是存档兼容版本，`files` 指定物品、机器、配方及语言资源。顶层 `files` 可以按类别覆盖文件，也可以在 `files.locales` 单独覆盖一种语言。相对路径以配置文件所在目录为准。可设置 `DAYBREAK_CONTENT_CONFIG` 指向另一份配置，GitHub Pages 手动构建使用 `content_config` 输入。
+默认配置在 `data/content.config.json`，其中 `dataset` 选择 `datasets` 中的一项。数据集的 `version` 是存档兼容版本，`files` 指定物品、机器、配方、发展阶段及语言资源。顶层 `files` 可以按类别覆盖文件，也可以在 `files.locales` 单独覆盖一种语言。相对路径以配置文件所在目录为准。可设置 `DAYBREAK_CONTENT_CONFIG` 指向另一份配置，GitHub Pages 手动构建使用 `content_config` 输入。
 
 - `data/registry.json` 记录现有稳定 ID、数值索引和设备行为。构建校验重复 ID、引用、字段、数值、图标 ID 和配方兼容性。文件中的物品与机器排序可以独立调整。
 - `npm run content` 生成 TypeScript 目录，Cargo 构建生成 Rust 数值表。模拟按数值索引读取，不在模拟步解析 JSON。Worker 启动时校验界面与 Wasm 的内容指纹。
@@ -24,7 +24,8 @@
 - 机器数据用 `storageSlots` 配置储物仓与站场，站场的 `crateSlots` 指定每班货箱格数。`inputSlots` 按每种专用进料缓存取值，`outputSlots` 指定出料缓存格数。旧机器配置中的 `inputCapacity`、`outputCapacity` 可读取，实际容量使用格数配置和默认值。
 - P1 接入选配方、手工制作目录、有效工序周期和开场教学。[配方与手工制作](inventory-handoff.md#手工制作)
 - `TODO` 迁移手采时长、独立的矿脉参数、机器加工倍率与输送通道的在途位置数。[物流参数迁移](conveyor-handoff.md#物流参数迁移)
-- `TODO` 从数据读取模块容量、适用规则和数值修正，以及阶段交付前置、需求和奖励。材料入口、完成流程和模块取得方式见[发展阶段交接](progression-handoff.md#阶段交付待办)。
+- `files.development` 指定首档阶段文件，旧配置省略时沿用内置文件。它定义初始上限、首档前置阶段、需求、奖励与文案键。同一份文件生成模拟和界面数据。修改数值后，已结算档位仍从存档恢复。[首档阶段交付](progression-handoff.md#首档阶段交付)
+- `TODO` 从数据读取模块容量、适用规则和数值修正。[模块待办](progression-handoff.md#模块待办)
 - `TODO` 接入任务定义、目标类型和提交，并迁移其余游戏进度指标、文本和状态提示。交付类目标复用指定站点的交付记录。手册按教学事件和条目 ID 读取，见[任务与手册](progression-handoff.md#任务与手册)。
 
 ### 机器尺寸与物资端口
@@ -65,5 +66,6 @@
 
 ## 后续扩展
 
+- `TODO` 补一份可按文件查阅的 `data/` 编写指南，列出必填字段、默认值、数值单位、跨文件 ID 引用和存档兼容规则。明确哪些玩法参数可直接调整，哪些 `registry.json` 与 `protocol.json` 变更需要同步修改代码。用可通过构建校验的示例演示如何改物品、机器、配方、阶段交付和翻译，以及如何选择数据集并验证静态包。
 - `TODO` 基础目录通过验收后，外置地图布局、班线和照明窗口参数。
 - `TODO` 扩展物品定长索引、建筑解锁位标记和存档映射，再开放新增注册项。验收一项普通物品和一个复用已实现行为的机器型号通过数据加入。

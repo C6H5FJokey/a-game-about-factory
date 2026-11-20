@@ -6,7 +6,11 @@ use crate::catalog::*;
 use crate::world::{Cell, World};
 use crate::{Runtime, RUNTIME};
 
-const BLOCK_WIDTH: usize = 28;
+const BLOCK_WIDTH: usize = if cfg!(feature = "dense-profile") {
+    33
+} else {
+    28
+};
 const BLOCK_HEIGHT: usize = 10;
 const MERGE_COLUMN: usize = 3;
 const SPLIT_COLUMN: usize = 19;
@@ -27,7 +31,14 @@ thread_local! {
     static LINES: RefCell<Vec<Line>> = const { RefCell::new(Vec::new()) };
 }
 
-const EXERCISE_PROCESSOR: usize = index(39, 42);
+const EXERCISE_PROCESSOR: usize = index(
+    BLOCK_WIDTH + 11,
+    if cfg!(feature = "dense-profile") {
+        41
+    } else {
+        42
+    },
+);
 
 fn with_exercise_line<T>(use_line: impl FnOnce(&Line) -> T) -> T {
     LINES.with(|lines| {
@@ -70,7 +81,12 @@ fn add_block(world: &mut World, lines: &mut Vec<Line>, left: usize, top: usize) 
     let branch = BLOCK_HEIGHT - 1;
     let processor_column = if top / BLOCK_HEIGHT % 2 == 0 { 11 } else { 16 };
     for y in 0..branch {
-        let input = if y < 4 { COPPER } else { SILICA };
+        let copper_rows = if cfg!(feature = "dense-profile") {
+            2
+        } else {
+            4
+        };
+        let input = if y < copper_rows { COPPER } else { SILICA };
         let source = tile(0, y);
         let sink = tile(LAST_COLUMN, y);
         let processor = tile(processor_column, y);
@@ -313,7 +329,7 @@ pub extern "C" fn terminal_exercise_state() -> usize {
                 cargo_count as i32,
                 blocked,
                 i32::from(machine.status),
-                i32::from(machine.group),
+                machine.group as i32,
                 total as i32,
                 world.grids[machine.group as usize].generation as i32,
                 line.supplied as i32,

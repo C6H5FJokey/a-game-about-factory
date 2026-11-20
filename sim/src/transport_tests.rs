@@ -58,7 +58,7 @@ fn advance(world: &mut World, ticks: u32) {
     world.materialize();
 }
 
-fn load(world: &mut World, tile: usize, lane: usize, item: u8, source: u16) -> i32 {
+fn load(world: &mut World, tile: usize, lane: usize, item: u8, source: u32) -> i32 {
     let id = world.next_cargo_id;
     world.next_cargo_id += 1;
     world.cargo[node(tile, lane)] = Cargo {
@@ -76,6 +76,76 @@ fn rewrite(world: &mut World, tile: usize, kind: u8, dir: u8) -> i32 {
         world.layout_revision,
         &[tile as i32, kind.into(), dir.into()],
     )
+}
+
+#[cfg(feature = "dense-profile")]
+#[test]
+fn wide_footprints_producer_ids_and_cable_payments_round_trip() {
+    use crate::{command, reserve_input, restore, save, RUNTIME};
+
+    let mut world = World::new();
+    world.stage = Stage::Sunlight;
+    let x = W - 12;
+    let y = H - 6;
+    let producer = place(&mut world, x, y, SPLICER, 0, 0);
+    let belt = place(&mut world, x + 2, y, BELT, 0, 0);
+    let sink = place(&mut world, x + 3, y, DEPOT, 0, 0);
+    let recipe = RECIPES
+        .iter()
+        .position(|spec| {
+            spec.modern && spec.machines.contains(&SPLICER) && spec.recipe.output == KIT
+        })
+        .unwrap();
+    world.cells[producer].selected_recipe = (recipe + 1) as u16;
+    world.cells[producer].inv[KIT as usize] = 1;
+    for &(item, amount) in world.build_materials(CABLE) {
+        world.stock[item as usize] = amount;
+    }
+    world.rebuild();
+    assert!(producer > u16::MAX as usize);
+    assert_eq!(world.footprints.owner(producer + W + 1), Some(producer));
+    advance(&mut world, HZ * 2);
+    // Keep a second delivery on the belt for the save round trip.
+    world.cells[producer].inv[KIT as usize] = 1;
+    for _ in 0..HZ * 2 {
+        advance(&mut world, 1);
+        if world.cargo[node(belt, 0)].item == KIT {
+            break;
+        }
+    }
+    let cargo = world.cargo[node(belt, 0)];
+    assert_eq!(cargo.source, producer as u32 + 1);
+    assert_eq!(cargo.from, node(producer + 1, 0) as i32);
+    RUNTIME.with(|rt| rt.borrow_mut().world = world);
+
+    let cable = index(x, y - 1);
+    RUNTIME.with(|rt| rt.borrow_mut().input[..2].copy_from_slice(&[cable as i32, 0]));
+    assert_eq!(command(op::ROUTE, 1, 0, 0, 2), 1);
+    let words = save();
+    let saved = RUNTIME.with(|rt| rt.borrow().output.clone());
+    assert!(!reserve_input(words).is_null());
+    RUNTIME.with(|rt| rt.borrow_mut().input[..words].copy_from_slice(&saved));
+    assert_eq!(restore(words), 1);
+    RUNTIME.with(|rt| {
+        let mut runtime = rt.borrow_mut();
+        let world = &mut runtime.world;
+        assert_eq!(world.footprints.owner(producer + W + 1), Some(producer));
+        assert!(world.cells[cable].wire);
+        assert_eq!(world.cargo[node(belt, 0)].source, cargo.source);
+        assert_eq!(world.cargo[node(belt, 0)].id, cargo.id);
+        let received = world.cells[sink].inv[KIT as usize];
+        for _ in 0..HZ * 2 {
+            advance(world, 1);
+            if world.cells[sink].inv[KIT as usize] > received {
+                break;
+            }
+        }
+        assert_eq!(world.cells[sink].inv[KIT as usize], received + 1);
+        assert!(world
+            .belt_arrivals
+            .iter()
+            .any(|arrival| arrival.target as usize == sink));
+    });
 }
 
 #[test]
@@ -267,9 +337,14 @@ fn transport_rebuild_is_atomic_and_keeps_order_source_and_lane() {
     let upstream = place(&mut world, 9, 10, BELT, 0, 0);
     let downstream = place(&mut world, 10, 10, BELT, 0, 0);
     let sink = place(&mut world, 11, 10, DEPOT, 0, FUEL);
-    let a = load(&mut world, upstream, 0, PLATE, source as u16 + 1);
-    let b = load(&mut world, downstream, 0, PLATE, source as u16 + 1);
+    let a = load(&mut world, upstream, 0, PLATE, source as u32 + 1);
+    let b = load(&mut world, downstream, 0, PLATE, source as u32 + 1);
+    for tile in [upstream, downstream, sink] {
+        world.cells[tile].wire = true;
+    }
     world.rebuild();
+    let group = world.cells[upstream].group;
+    assert!(group > 0);
     let revision = world.layout_revision;
     let old_device = world.cells[downstream].identity;
     let plan = [
@@ -298,7 +373,7 @@ fn transport_rebuild_is_atomic_and_keeps_order_source_and_lane() {
         -22
     );
     let cargo = world.cargo[node(downstream, 1)];
-    assert_eq!((cargo.id, cargo.source), (b, source as u16 + 1));
+    assert_eq!((cargo.id, cargo.source), (b, source as u32 + 1));
     assert_eq!(world.cargo[node(downstream, 0)].id, 0);
     advance(&mut world, simulation_ticks(15));
     assert!(world.cargo[node(downstream, 1)].blocked);
@@ -308,6 +383,14 @@ fn transport_rebuild_is_atomic_and_keeps_order_source_and_lane() {
     assert_eq!(world.cargo[node(downstream, 1)].id, a);
     advance(&mut world, simulation_ticks(5));
     assert_eq!(world.delivered, 2);
+    assert_eq!(world.cells[upstream].group, group);
+    assert_eq!(world.remove(upstream, false), 1);
+    assert_eq!(world.footprints.owner(upstream), None);
+    assert!(world.cells[upstream].wire);
+    assert_eq!(
+        (world.cells[upstream].group, world.cells[sink].group),
+        (group, group)
+    );
 
     let full = place(&mut world, 20, 10, CROSSING, 0, 0);
     let a = load(&mut world, full, 0, IRON, 0);

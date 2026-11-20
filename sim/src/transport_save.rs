@@ -33,16 +33,17 @@ impl World {
     pub fn append_cargo_view(&self, out: &mut Vec<i32>, location: usize) {
         let cargo = self.cargo[location];
         if cargo.item != 0 {
-            out.extend([
-                location as i32,
-                cargo.id,
-                cargo.item.into(),
-                self.cells[location / 2].identity,
-                cargo.from,
-                cargo.since as i32,
-                cargo.ready as i32,
-                cargo.blocked as i32,
-            ]);
+            wire::Cargo {
+                location: location as i32,
+                id: cargo.id,
+                item: cargo.item.into(),
+                identity: self.cells[location / 2].identity,
+                from: cargo.from,
+                since: cargo.since as i32,
+                until: cargo.ready as i32,
+                blocked: cargo.blocked as i32,
+            }
+            .append(out);
         }
     }
 
@@ -50,19 +51,20 @@ impl World {
         // Nonnegative locations are live belt cargo; negative locations tag
         // transient arrivals without changing projection or save offsets.
         for arrival in &self.belt_arrivals {
-            if !include(arrival.from as usize / 2) && !include(usize::from(arrival.target)) {
+            if !include(arrival.from as usize / 2) && !include(arrival.target as usize) {
                 continue;
             }
-            out.extend([
-                -1 - arrival.from,
-                arrival.id,
-                arrival.item.into(),
-                arrival.target.into(),
-                arrival.flow.into(),
-                arrival.tick as i32,
-                arrival.tick.saturating_add(BELT_ARRIVAL_TICKS) as i32,
-                arrival.crossing as i32,
-            ]);
+            wire::Arrival {
+                origin: -1 - arrival.from,
+                id: arrival.id,
+                item: arrival.item.into(),
+                target: arrival.target as i32,
+                flow: arrival.flow.into(),
+                since: arrival.tick as i32,
+                until: arrival.tick.saturating_add(BELT_ARRIVAL_TICKS) as i32,
+                crossing: arrival.crossing as i32,
+            }
+            .append(out);
         }
     }
 
@@ -82,7 +84,7 @@ impl World {
                 loc as i32,
                 cargo.id,
                 cargo.item.into(),
-                cargo.source.into(),
+                cargo.source as i32,
                 cargo.from,
                 cargo.since as i32,
                 cargo.ready as i32,
@@ -129,7 +131,7 @@ impl World {
                 || id >= *next
                 || !used_ids.insert(id)
                 || !(1..MATERIAL_ITEMS as i32).contains(&item)
-                || !(0..=RETIRED_SOURCE.into()).contains(&source)
+                || !(0..=RETIRED_SOURCE as i32).contains(&source)
                 || !(0..NODES as i32).contains(&from)
                 || since > self.tick
                 || !(since..=self.tick + MAX_BELT_INTERVAL).contains(&ready)
@@ -139,7 +141,7 @@ impl World {
             }
             let cargo = Cargo {
                 item: item as u8,
-                source: source as u16,
+                source: source as u32,
                 id,
                 from,
                 since,
@@ -182,7 +184,7 @@ impl World {
         Some(&rest[gate_end..])
     }
 
-    pub fn add_legacy_cargo(&mut self, tile: usize, item: u8, source: u16) -> Option<()> {
+    pub fn add_legacy_cargo(&mut self, tile: usize, item: u8, source: u32) -> Option<()> {
         if item == 0 {
             return Some(());
         }
@@ -205,7 +207,7 @@ impl World {
         if cargo.source == 0 || cargo.source == RETIRED_SOURCE {
             return Some(());
         }
-        let kind = self.cells[usize::from(cargo.source) - 1].kind;
+        let kind = self.cells.get(cargo.source as usize - 1)?.kind;
         matches!(
             (cargo.item, kind),
             (KIT, KIT_PRESS | SPLICER) | (PLATE, SMELTER | BENCH)

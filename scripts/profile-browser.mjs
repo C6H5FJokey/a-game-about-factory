@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -7,19 +7,25 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { loadContent } from './content.mjs';
+import { observeGame, percentiles, readTerminalWorkload } from './observe-browser-profile.mjs';
+import { browserSmoke, observeSmoke } from './browser-smoke.mjs';
 
 const args = process.argv.slice(2);
 const softwareRenderer = args.includes('--swiftshader');
 const exercise = args.includes('--exercise');
-const terminal = args.includes('--terminal') || exercise;
+const dense = args.includes('--dense');
+const android = args.includes('--android');
+const smoke = args.includes('--smoke');
+const terminal = args.includes('--terminal') || exercise || dense;
 const full = args.includes('--full');
-const [browser, ...fixturePaths] = args.filter(value => !['--swiftshader', '--terminal', '--full', '--exercise'].includes(value));
-if (!browser || (!terminal && fixturePaths.length === 0) || typeof WebSocket !== 'function') {
-  console.error('Usage: node --experimental-websocket scripts/profile-browser.mjs [--swiftshader] [--terminal [--full] | --exercise] <Chromium executable> [<save.dawn>...]');
+const [browser, ...fixturePaths] = args.filter(value => !['--swiftshader', '--terminal', '--dense', '--full', '--exercise', '--android', '--smoke'].includes(value));
+if ((!android && !browser) || (!terminal && fixturePaths.length === 0) || (android && (!dense || browser || softwareRenderer || full || exercise))
+  || (smoke && (terminal || fixturePaths.length!==1)) || typeof WebSocket !== 'function') {
+  console.error('Usage: node --experimental-websocket scripts/profile-browser.mjs [--swiftshader] [--terminal [--full] | --dense | --exercise | --smoke] <Chromium executable> [<save.dawn>...]\n       node --experimental-websocket scripts/profile-browser.mjs --dense --android');
   process.exit(1);
 }
 
-const dist = resolve(terminal ? 'docs/performance.local/terminal-dist' : 'dist');
+const dist = resolve(dense ? 'docs/performance.local/dense-dist' : terminal ? 'docs/performance.local/terminal-dist' : 'dist');
 const wasmSha256 = createHash('sha256').update(await readFile(join(dist, 'sim.wasm'))).digest('hex');
 const mime = {
   '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm',
@@ -28,7 +34,7 @@ const viewport = { width: 1920, height: 1080, deviceScaleFactor: 1, mobile: fals
 const { frontend:{saveIdentity}, protocol } = loadContent();
 const profilePrefix = 'daybreak-profile-';
 const tempRoot = await realpath(tmpdir());
-const profileDirectory = await mkdtemp(join(tempRoot, profilePrefix));
+const profileDirectory = android ? undefined : await mkdtemp(join(tempRoot, profilePrefix));
 let fixture;
 const site = createServer(async (request, response) => {
   try {
@@ -53,30 +59,37 @@ const site = createServer(async (request, response) => {
   }
 });
 
-let child, socket;
+let child, socket, androidSession;
 try {
   await new Promise((ok, fail) => {
     site.once('error', fail);
     site.listen(0, '127.0.0.1', ok);
   });
   const origin = 'http://127.0.0.1:' + site.address().port;
-  child = spawn(browser, [
-    '--headless=new', '--no-first-run', '--no-default-browser-check', '--disable-background-networking',
-    '--no-proxy-server', '--remote-debugging-port=0',
-    ...(softwareRenderer ? ['--enable-unsafe-swiftshader', '--use-angle=swiftshader'] : []),
-    '--user-data-dir=' + profileDirectory, 'about:blank',
-  ], { windowsHide: true, stdio: 'ignore' });
-  let spawnError;
-  child.on('error', error => { spawnError = error; });
-  await waitFor(async () => {
-    if (spawnError) throw spawnError;
-    return readFile(join(profileDirectory, 'DevToolsActivePort'), 'utf8').catch(() => undefined);
-  }, 'Chromium DevTools port');
-  const [port] = (await readFile(join(profileDirectory, 'DevToolsActivePort'), 'utf8')).split(/\r?\n/);
-  const base = 'http://127.0.0.1:' + port;
+  let base, tab;
+  if (android) {
+    androidSession = await openAndroid(site.address().port);
+    ({base, tab} = androidSession);
+  } else {
+    child = spawn(browser, [
+      '--headless=new', '--no-first-run', '--no-default-browser-check', '--disable-background-networking',
+      '--no-proxy-server', '--remote-debugging-port=0',
+      ...(softwareRenderer ? ['--enable-unsafe-swiftshader', '--use-angle=swiftshader'] : []),
+      '--user-data-dir=' + profileDirectory, 'about:blank',
+    ], { windowsHide: true, stdio: 'ignore' });
+    let spawnError;
+    child.on('error', error => { spawnError = error; });
+    await waitFor(async () => {
+      if (spawnError) throw spawnError;
+      return readFile(join(profileDirectory, 'DevToolsActivePort'), 'utf8').catch(() => undefined);
+    }, 'Chromium DevTools port');
+    const [port] = (await readFile(join(profileDirectory, 'DevToolsActivePort'), 'utf8')).split(/\r?\n/);
+    base = 'http://127.0.0.1:' + port;
+    const tabs = await fetch(base + '/json/list').then(response => response.json());
+    tab = tabs.find(value => value.type === 'page');
+  }
   const browserInfo = await fetch(base + '/json/version').then(response => response.json());
-  const tabs = await fetch(base + '/json/list').then(response => response.json());
-  socket = new WebSocket(tabs.find(tab => tab.type === 'page').webSocketDebuggerUrl);
+  socket = new WebSocket(tab.webSocketDebuggerUrl);
   await new Promise((ok, fail) => {
     socket.addEventListener('open', ok, { once: true });
     socket.addEventListener('error', fail, { once: true });
@@ -88,10 +101,21 @@ try {
     return result.value;
   };
   await cdp('Page.enable');
-  await cdp('Emulation.setDeviceMetricsOverride', viewport);
+  if (!android) await cdp('Emulation.setDeviceMetricsOverride', viewport);
   await cdp('Page.addScriptToEvaluateOnNewDocument', { source: '(' + observeGame.toString() + ')()' });
 
-  for (const path of exercise ? ['construction-and-recovery'] : terminal ? ['terminal-1', 'terminal-2', 'terminal-3'] : fixturePaths) {
+  const repeats = Array.from({length:3},(_,i)=>`${dense ? 'dense' : 'terminal'}-${i+1}`);
+  if (smoke) {
+    const world={width:protocol.world.width,fields:protocol.view.layoutFields,layoutHeader:protocol.view.layoutHeaderWords};
+    await cdp('Page.addScriptToEvaluateOnNewDocument',{source:`(${observeSmoke.toString()})(${JSON.stringify(world)})`});
+    const resetStorage=async()=>{
+      await cdp('Page.navigate',{url:origin+'/profile-setup'});
+      await waitFor(()=>js("document.title==='Profile setup'"),'setup for a new game');
+      await js(`(${installSave.toString()})(${JSON.stringify('campaign:'+saveIdentity)},true)`);
+    };
+    await browserSmoke({cdp,js,waitFor,origin,fixturePath:fixturePaths[0],resetStorage,commands:protocol.commands});
+  }
+  for (const path of smoke ? [] : exercise ? ['construction-and-recovery'] : terminal ? repeats : fixturePaths) {
     if (!terminal) {
       fixture = await readFile(path);
       await cdp('Page.navigate', { url: origin + '/profile-setup' });
@@ -106,24 +130,28 @@ try {
       const debug = gl?.getExtension('WEBGL_debug_renderer_info');
       return debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : gl?.getParameter(gl.RENDERER);
     })()`);
+    const measuredViewport = android
+      ? await js('({width:innerWidth,height:innerHeight,deviceScaleFactor:devicePixelRatio,mobile:true})')
+      : viewport;
     if (exercise) {
       console.log(JSON.stringify({
         fixture:path, wasmSha256, browser:browserInfo.Browser, graphics, viewport,
-        ...await exerciseTerminal(js,protocol,full),
+        ...await exerciseTerminal(js,dense ? protocol.denseWorld : protocol.terminalWorld,protocol.commands,full),
       }, null, 2));
       continue;
     }
     await delay(4000);
     const beginning = terminal ? await js("profileStats.request({type:'profile-stats'},'profile-stats')") : null;
     await js('profileStats.start()');
-    await delay(10000);
+    await delay(dense ? 30000 : 10000);
     const samples = await js('profileStats.finish()');
     const ending = terminal ? await js("profileStats.request({type:'profile-stats'},'profile-stats')") : null;
     assert.ok(samples.frames.length > 1 && samples.frames.some(([, , drawn]) => drawn > 0)
       && samples.snapshots.length > 1 && samples.endTick > samples.startTick,
       'The game must render and advance during sampling.');
-    const workload = beginning && readTerminalWorkload(beginning, ending);
+    const workload = beginning && readTerminalWorkload(beginning, ending, dense);
     const timings = samples.snapshots.flatMap(([, , record]) => record ? [record] : []);
+    const rendered = samples.frames.filter(([, , instances])=>instances>0);
     const p = field => percentiles(timings.map(value => value[field]));
     const decodes = groupDecodes(samples.decodes);
     console.log(JSON.stringify({
@@ -133,13 +161,17 @@ try {
       workload,
       camera: terminal ? [55, 41, 32] : undefined,
       browser: browserInfo.Browser,
+      device: androidSession?.device,
       graphics,
-      viewport,
+      viewport: measuredViewport,
       frames: samples.frames.length,
+      renderedFrames: rendered.length,
       snapshots: samples.snapshots.length,
+      elapsedSeconds: samples.elapsed / 1000,
       tickRate: (samples.endTick - samples.startTick) / (samples.elapsed / 1000),
       milliseconds: {
         frameInterval: percentiles(samples.frames.slice(1).map(([time], i) => time - samples.frames[i][0])),
+        renderedFrameInterval: percentiles(rendered.slice(1).map(([time], i) => time - rendered[i][0])),
         frameCallbackCpu: percentiles(samples.frames.map(([, duration]) => duration)),
         snapshotInterval: percentiles(samples.snapshots.slice(1).map(([time], i) => time - samples.snapshots[i][0])),
         workerStep: terminal ? percentiles(timings.flatMap(value => value.steps ?? [])) : undefined,
@@ -158,11 +190,48 @@ try {
 } finally {
   socket?.close();
   child?.kill();
+  await androidSession?.close();
   site.close();
   site.closeAllConnections();
-  const temp = await realpath(profileDirectory).catch(() => undefined);
+  const temp = profileDirectory && await realpath(profileDirectory).catch(() => undefined);
   if (temp && dirname(temp) === tempRoot && basename(temp).startsWith(profilePrefix)) {
     await rm(temp, { recursive: true, force: true, maxRetries: 4 }).catch(() => {});
+  }
+}
+
+async function openAndroid(sitePort) {
+  const adb = (...args) => execFileSync('adb', args, { encoding:'utf8', windowsHide:true, timeout:5000 }).trim();
+  try {
+    assert.equal(adb('get-state'),'device');
+  } catch {
+    throw new Error('Connect one authorized Android device with USB debugging and open Chrome.');
+  }
+  let forward, reverse, base, tab;
+  const close = async () => {
+    if (tab) await fetch(base + '/json/close/' + encodeURIComponent(tab.id),{signal:AbortSignal.timeout(2000)}).catch(()=>{});
+    if (forward) try { adb('forward','--remove','tcp:'+forward); } catch {}
+    if (reverse) try { adb('reverse','--remove','tcp:'+sitePort); } catch {}
+  };
+  try {
+    adb('reverse','--no-rebind','tcp:'+sitePort,'tcp:'+sitePort);
+    reverse=true;
+    forward=adb('forward','tcp:0','localabstract:chrome_devtools_remote');
+    assert.match(forward,/^\d+$/);
+    base='http://127.0.0.1:'+forward;
+    const version = await fetch(base+'/json/version',{signal:AbortSignal.timeout(3000)});
+    assert.ok(version.ok,'Open Chrome on the Android device before running the profile.');
+    const response = await fetch(base+'/json/new?about:blank',{method:'PUT',signal:AbortSignal.timeout(3000)});
+    assert.ok(response.ok,'Could not create a Chrome test tab.');
+    tab=await response.json();
+    const socketUrl=new URL(tab.webSocketDebuggerUrl);
+    socketUrl.host='127.0.0.1:'+forward;
+    tab.webSocketDebuggerUrl=socketUrl.href;
+    const device={model:adb('shell','getprop','ro.product.model'),android:adb('shell','getprop','ro.build.version.release'),
+      soc:adb('shell','getprop','ro.soc.model')};
+    return {base,tab,device,close};
+  } catch (error) {
+    await close();
+    throw error;
   }
 }
 
@@ -198,13 +267,6 @@ function client(socket) {
   });
 }
 
-function percentiles(samples) {
-  assert.ok(samples.length, 'Missing measurement samples');
-  const sorted = samples.toSorted((a, b) => a - b);
-  const at = p => Number(sorted[Math.ceil(sorted.length * p) - 1].toFixed(3));
-  return { p50: at(0.50), p95: at(0.95), p99: at(0.99) };
-}
-
 function groupDecodes(samples) {
   const decodes = new Map();
   for (const record of samples) {
@@ -215,26 +277,7 @@ function groupDecodes(samples) {
   return decodes;
 }
 
-function readTerminalWorkload(beginning, ending) {
-  const read = ({values:[transport, processors, running, grids, stock, delivered, upperSources, cargo, tick],supplied}) =>
-    ({transport, processors, running, grids, stock, delivered, upperSources, cargo, tick, supplied});
-  const start = read(beginning), end = read(ending);
-  assert.equal(start.transport, 46020);
-  assert.equal(start.processors, 1755);
-  assert.equal(start.running, start.processors);
-  assert.equal(end.running, start.running);
-  assert.equal(start.grids, 195);
-  assert.ok(start.cargo > 17000 && end.cargo > 17000);
-  assert.ok(start.upperSources > 0 && end.upperSources > 0);
-  const deliveries = end.delivered - start.delivered;
-  assert.ok(deliveries > start.processors);
-  const handoffsPerSecond = (end.supplied - start.supplied + start.stock - end.stock + deliveries)
-    * 30 / (end.tick - start.tick);
-  return {start, end, deliveries, handoffsPerSecond};
-}
-
-async function exerciseTerminal(js,{commands,terminalWorld},full) {
-  const {width} = terminalWorld;
+async function exerciseTerminal(js,{width},commands,full) {
   const tile = (x,y) => y*width+x;
   const send = (message,type=message.type) => js(`profileStats.request(${JSON.stringify(message)},${JSON.stringify(type)})`);
   const post = message => js(`profileStats.worker.postMessage(${JSON.stringify(message)})`);
@@ -296,16 +339,18 @@ async function exerciseTerminal(js,{commands,terminalWorld},full) {
   assert.equal(recovered.total-released.total,recovered.supplied-released.supplied,'Conserve material through recovery');
   await js("(async()=>{ profileStats.exerciseSave=(await profileStats.request({type:'save'},'save')).buffer; })()");
 
-  const laid = Array.from({length:112},(_,i)=>tile(253,8+i));
-  await camera(227,62,29);
+  const laid = Array.from({length:112},(_,i)=>tile(width-3,8+i));
+  await camera(width-29,62,29);
   if (!full) await waitFor(async () => (await probe(laid[40])).visible,'construction camera subscription');
   const revisionBeforeLay = (await line()).revision;
   await command('lay-112-belts',{op:commands.BuildTransport,a:revisionBeforeLay,words:laid.flatMap(at=>[at,1,1])});
   const afterLay = await line();
   assert.notEqual(afterLay.revision,revisionBeforeLay);
+  assert.deepEqual([afterLay.grid,afterLay.generation],[recovered.grid,recovered.generation],
+    'Laying belts leaves the live power network intact while paused');
   assert.ok((await js(`Promise.all(${JSON.stringify(laid)}.map(at=>profileStats.probe(at)))`)).every(cell=>cell.kind===1));
 
-  const upgraded = Array.from({length:12},(_,i)=>tile(43+i,42));
+  const upgraded = Array.from({length:12},(_,i)=>initial.sink-12+i);
   await camera(55,41);
   if (!full) await waitFor(async () => (await probe(upgraded[0])).visible,'overwrite camera subscription');
   const occupiedBefore = (await js(`[${upgraded.join(',')}].map(at=>profileStats.probe(at).cargo?.id ?? null)`)).filter(id=>id!==null);
@@ -315,9 +360,12 @@ async function exerciseTerminal(js,{commands,terminalWorld},full) {
   assert.notEqual(afterUpgrade.revision,afterLay.revision);
   assert.equal(afterUpgrade.total,afterLay.total);
   assert.deepEqual(afterUpgrade.cargoIds,afterLay.cargoIds);
+  assert.deepEqual([afterUpgrade.grid,afterUpgrade.generation],[afterLay.grid,afterLay.generation],
+    'Rebuilding a loaded belt leaves the live power network intact while paused');
   assert.ok((await js(`[${upgraded.join(',')}].map(at=>profileStats.probe(at).kind)`)).every(kind=>kind===26));
 
-  const bridge = [38,39,40].map(x=>tile(x,49));
+  const processorColumn=initial.processor%width;
+  const bridge = [-1,0,1].map(dx=>tile(processorColumn+dx,49));
   await advance(1);
   const beforeCut = await line();
   assert.ok(beforeCut.grid>0 && beforeCut.generation>0,'Begin with a powered line');
@@ -338,7 +386,7 @@ async function exerciseTerminal(js,{commands,terminalWorld},full) {
     const selected = await probe(restoredPower.processor,true);
     assert.equal(selected.selected,restoredPower.processor);
     const layoutBeforePan = await js('profileStats.layoutMessages');
-    await camera(225,170);
+    await camera(width-31,170);
     await waitFor(async () => !(await probe(upgraded[0])).visible,'old viewport excluded while paused');
     const outside = await probe(restoredPower.processor);
     assert.deepEqual(outside.device,selected.device,'Keep an inspected offscreen machine available');
@@ -372,86 +420,8 @@ async function exerciseTerminal(js,{commands,terminalWorld},full) {
   };
 }
 
-function observeGame() {
-  let startedAt, startTick, instances = 0;
-  const stats = window.profileStats = {
-    tick: -1,
-    layoutMessages: 0,
-    camera(x,y,zoom) {
-      window.dispatchEvent(new CustomEvent('terminal-profile-camera',{detail:{x,y,zoom}}));
-    },
-    probe(tile,pick=false) {
-      let result;
-      window.dispatchEvent(new CustomEvent('terminal-profile-probe',{detail:{tile,pick,reply:value=>{ result=value; }}}));
-      return result;
-    },
-    start() {
-      startedAt = performance.now();
-      startTick = stats.tick;
-      stats.samples = { frames: [], snapshots: [], decodes: [], bytes: 0 };
-    },
-    finish() {
-      const values = stats.samples;
-      stats.samples = undefined;
-      return { ...values, elapsed: performance.now() - startedAt, startTick, endTick: stats.tick };
-    },
-    request(message, type) {
-      return new Promise((resolve, reject) => {
-        const worker = stats.worker;
-        const listener = ({data}) => {
-          const failedRestore = type==='restored' && data.type==='invalid-save';
-          if (data.type !== type && data.type !== 'error' && !failedRestore) return;
-          clearTimeout(timer);
-          worker.removeEventListener('message', listener);
-          if (failedRestore) reject(new Error('Restore rejected: ' + data.status));
-          else if (data.type === 'error') reject(new Error(data.message ?? data.key));
-          else resolve(data);
-        };
-        const timer = setTimeout(() => {
-          worker.removeEventListener('message', listener);
-          reject(new Error('Timed out waiting for worker ' + type));
-        }, 8000);
-        worker.addEventListener('message', listener);
-        worker.postMessage(message, message.buffer ? [message.buffer] : []);
-      });
-    },
-  };
-  window.addEventListener('terminal-profile-decode', ({detail}) => stats.samples?.decodes.push(detail));
-  const NativeWorker = window.Worker;
-  window.Worker = class extends NativeWorker {
-    constructor(...args) {
-      super(...args);
-      stats.worker = this;
-      this.addEventListener('message', event => {
-        const {type,buffer,profile} = event.data;
-        if (type !== 'snapshot' && type !== 'snapshot-layout') return;
-        if (stats.samples) stats.samples.bytes += buffer.byteLength;
-        if (type !== 'snapshot') { stats.layoutMessages++; return; }
-        stats.tick = new Int32Array(buffer, 0, 1)[0];
-        if (stats.samples) {
-          const now = performance.now();
-          stats.samples.snapshots.push([now,buffer.byteLength,profile &&
-            {...profile,messageMs: Math.max(0, performance.timeOrigin + now - profile.sentAt)}]);
-        }
-      });
-    }
-  };
-  const nativeDraw = WebGL2RenderingContext.prototype.drawArraysInstanced;
-  WebGL2RenderingContext.prototype.drawArraysInstanced = function (mode, first, count, drawn) {
-    instances += drawn;
-    return nativeDraw.call(this, mode, first, count, drawn);
-  };
-  const raf = window.requestAnimationFrame.bind(window);
-  window.requestAnimationFrame = callback => raf(time => {
-    instances = 0;
-    const start = performance.now();
-    callback(time);
-    stats.samples?.frames.push([time, performance.now() - start, instances]);
-  });
-}
-
-async function installSave(key) {
-  const seed = await fetch('/profile-fixture').then(response => response.arrayBuffer());
+async function installSave(key,clear=false) {
+  const seed = clear ? undefined : await fetch('/profile-fixture').then(response => response.arrayBuffer());
   const db = await new Promise((ok, fail) => {
     const request = indexedDB.open('daybreak-factory', 1);
     request.onupgradeneeded = () => request.result.createObjectStore('campaign');
@@ -460,7 +430,8 @@ async function installSave(key) {
   });
   await new Promise((ok, fail) => {
     const transaction = db.transaction('campaign', 'readwrite');
-    transaction.objectStore('campaign').put(seed, key);
+    if (clear) transaction.objectStore('campaign').clear();
+    else transaction.objectStore('campaign').put(seed, key);
     transaction.oncomplete = () => { db.close(); ok(); };
     transaction.onabort = transaction.onerror = () => { db.close(); fail(transaction.error); };
   });

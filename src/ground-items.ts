@@ -3,7 +3,7 @@ import { ITEM } from './catalog-text';
 import { t } from './i18n';
 import { W, recipesStart, xy } from './model';
 import type { Camera } from './renderer';
-import { ViewSection } from './generated-content';
+import { GroundRecord, ViewSection } from './generated-content';
 import { finishViewDecode, startViewDecode, viewSection } from './world-view';
 
 export type GroundPile = { tile:number; item:number; id:number; count:number };
@@ -18,9 +18,9 @@ export function groundPiles(data:Int32Array) {
   cachedPiles.set(data,grouped);
   const view=viewSection(data,ViewSection.Ground);
   const end=view?.[1] ?? recipesStart(data)-1, start=view?.[0] ?? data[end];
-  if (!Number.isInteger(start) || start<0 || start>end || (end-start)%4) return grouped;
-  for (let i=start;i<end;i+=4) {
-    const [tile,item,id,count]=data.subarray(i,i+4);
+  if (!Number.isInteger(start) || start<0 || start>end || (end-start)%GroundRecord.words) return grouped;
+  for (let i=start;i<end;i+=GroundRecord.words) {
+    const tile=data[i+GroundRecord.tile], item=data[i+GroundRecord.item], id=data[i+GroundRecord.id], count=data[i+GroundRecord.count];
     const piles=grouped.get(tile) ?? [];
     piles.push({tile,item,id,count});
     grouped.set(tile,piles);

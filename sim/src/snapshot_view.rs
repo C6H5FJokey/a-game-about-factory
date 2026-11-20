@@ -2,7 +2,7 @@ use crate::belts::node;
 use crate::campaign::Stage;
 use crate::catalog::*;
 use crate::world::World;
-use crate::{write_snapshot_header, Runtime, HEADER, RUNTIME};
+use crate::{write_snapshot_grids, write_snapshot_header, Runtime, HEADER, RUNTIME};
 
 const DIRECTORY: usize = HEADER + view::BOUNDS_WORDS;
 const VIEW_CELLS: usize = DIRECTORY + view::SECTION_COUNT + 1;
@@ -75,7 +75,7 @@ pub extern "C" fn snapshot_layout(revision: i32, stage: i32, cached: i32) -> usi
                 cell.dir.into(),
                 cell.wire.into(),
                 world.known_ore(tile).into(),
-                cell.group.into(),
+                cell.group as i32,
             ];
             output.extend(row);
         }
@@ -157,14 +157,7 @@ pub extern "C" fn snapshot_view(
             append_dynamic_cell(world, tile, output);
         }
         section(output, view::GRIDS);
-        for grid in &world.grids {
-            output.extend([
-                grid.generation as i32,
-                grid.demand as i32,
-                grid.discharge as i32,
-                grid.stored as i32,
-            ]);
-        }
+        write_snapshot_grids(world, output);
         section(output, view::GROUND);
         world
             .ground
@@ -193,7 +186,12 @@ pub extern "C" fn snapshot_view(
                     .skip(1)
                     .filter(|(_, count)| **count > 0)
                 {
-                    output.extend([tile as i32, item as i32, count as i32]);
+                    wire::Warehouse {
+                        tile: tile as i32,
+                        item: item as i32,
+                        count: count as i32,
+                    }
+                    .append(output);
                 }
             }
         }

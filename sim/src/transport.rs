@@ -8,7 +8,7 @@ pub(crate) const BELT_ARRIVAL_TICKS: u32 = 12;
 
 pub(crate) struct BeltArrival {
     pub from: i32,
-    pub target: u16,
+    pub target: u32,
     pub flow: u8,
     pub item: u8,
     pub id: i32,
@@ -65,7 +65,7 @@ impl World {
             }
             if cargo.item == KIT && cargo.source != 0 {
                 self.kit_total = self.kit_total.saturating_add(1);
-                if let Some(press) = self.cells.get_mut(usize::from(cargo.source) - 1) {
+                if let Some(press) = self.cells.get_mut(cargo.source as usize - 1) {
                     press.last_kit_delivery = self.tick;
                 }
             }
@@ -125,7 +125,7 @@ impl World {
             (
                 r.output,
                 if matches!(r.output, KIT | PLATE) {
-                    tile as u16 + 1
+                    tile as u32 + 1
                 } else {
                     0
                 },
@@ -151,7 +151,7 @@ impl World {
                 if !is_belt(self.cells[next].kind) {
                     self.belt_arrivals.push_back(BeltArrival {
                         from: from as i32,
-                        target: next as u16,
+                        target: next as u32,
                         flow,
                         item: cargo.item,
                         id: cargo.id,

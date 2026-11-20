@@ -17,24 +17,15 @@ pub struct Limits {
     pub max_zoom: u32,
 }
 
-const LIMITS: [Limits; 2] = [
-    Limits {
-        slots: 16,
-        speed: 2,
-        min_zoom: 9,
-        max_zoom: 64,
-    },
-    Limits {
-        slots: 24,
-        speed: 4,
-        min_zoom: 6,
-        max_zoom: 64,
-    },
-];
+pub struct DevelopmentStage {
+    pub minimum_stage: u8,
+    pub requirements: &'static [(u8, u32)],
+    pub unlocks: &'static [u8],
+}
 
 impl Progression {
     pub fn limits(&self) -> &'static Limits {
-        &LIMITS[self.tier as usize]
+        &DEVELOPMENT_LIMITS[self.tier as usize]
     }
 
     pub fn stack_limits(&self) -> &'static [u32; ITEMS] {
@@ -78,6 +69,29 @@ pub fn contains_tile([left, top, right, bottom]: [usize; 4], tile: usize) -> boo
 }
 
 impl World {
+    pub fn submit_development(&mut self, tile: usize, tier: i32) -> i32 {
+        if tier != 1
+            || self.progression.tier != 0
+            || (self.stage as u8) < DEVELOPMENT_STAGE.minimum_stage
+            || self.cells[tile].kind != DEVELOPMENT_HUB
+        {
+            return -6;
+        }
+        if !self.spend(DEVELOPMENT_STAGE.requirements, 1) {
+            return -4;
+        }
+        self.progression.tier = 1;
+        let stacks = self.progression.stack_limits();
+        for &tile in &self.machines {
+            let cell = &mut self.cells[tile];
+            if matches!(cell.kind, DEPOT | FREIGHT_YARD) {
+                cell.used_storage_slots = used_slots(&cell.inv, stacks);
+            }
+        }
+        self.view_revision = self.view_revision.wrapping_add(1);
+        1
+    }
+
     pub fn map_contains(&self, tile: usize) -> bool {
         contains_tile(self.progression.bounds(self.stage), tile)
     }
@@ -111,24 +125,26 @@ impl World {
     pub fn write_progression(&self, out: &mut Vec<i32>) {
         let limits = self.progression.limits();
         let [left, top, right, bottom] = self.progression.bounds(self.stage);
-        out.extend([
-            self.progression.tier.into(),
-            limits.slots as i32,
-            self.progression.regional_map as i32,
-            limits.speed as i32,
-            limits.min_zoom as i32,
-            limits.max_zoom as i32,
-            left as i32,
-            top as i32,
-            right as i32,
-            bottom as i32,
-            used_slots(&self.stock, self.progression.stack_limits()).min(i32::MAX as u32) as i32,
-            self.stock[SPEED_MODULE as usize] as i32,
-            self.machines.iter().any(|&tile| {
+        wire::Progression {
+            tier: self.progression.tier.into(),
+            slots: limits.slots as i32,
+            regional: self.progression.regional_map as i32,
+            speed: limits.speed as i32,
+            min_zoom: limits.min_zoom as i32,
+            max_zoom: limits.max_zoom as i32,
+            left: left as i32,
+            top: top as i32,
+            right: right as i32,
+            bottom: bottom as i32,
+            used: used_slots(&self.stock, self.progression.stack_limits()).min(i32::MAX as u32)
+                as i32,
+            modules: self.stock[SPEED_MODULE as usize] as i32,
+            installed: self.machines.iter().any(|&tile| {
                 let cell = &self.cells[tile];
                 accepts_module(cell.kind) && cell.inv[SPEED_MODULE as usize] != 0
             }) as i32,
-        ]);
+        }
+        .append(out);
     }
 
     pub fn write_progression_save(&self, out: &mut Vec<i32>) {
@@ -149,7 +165,7 @@ impl World {
         let [tier, legacy, modules, count, rest @ ..] = words else {
             return None;
         };
-        if !(0..LIMITS.len() as i32).contains(tier)
+        if !(0..DEVELOPMENT_LIMITS.len() as i32).contains(tier)
             || !matches!(legacy, 0 | 1)
             || !(0..1_000_000_000).contains(modules)
             || !(0..=N as i32).contains(count)

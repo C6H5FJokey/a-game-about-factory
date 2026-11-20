@@ -1,6 +1,7 @@
 {
   "world": { "width": 56, "height": 34 },
   "terminalWorld": { "width": 256, "height": 224 },
+  "denseWorld": { "width": 532, "height": 250 },
   "snapshot": { "headerWords": 98, "cellWords": 19 },
   "view": {
     "boundsWords": 4,
@@ -9,6 +10,29 @@
     "layoutFields": [0, 1, 2, 3, 6],
     "dynamicFields": [4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
     "sections": ["ExtraTiles", "Grids", "Ground", "Recipes", "Progression", "Transport", "Devices", "Warehouses", "Faults"]
+  },
+  "records": {
+    "Footprint": ["tile", "anchor", "masks"],
+    "Grid": ["generation", "demand", "discharge", "stored"],
+    "Ground": ["tile", "item", "id", "count"],
+    "RecipeHeader": ["legacy", "unlocked"],
+    "Recipe": ["tile", "key", "ticks"],
+    "Progression": ["tier", "slots", "regional", "speed", "minZoom", "maxZoom", "left", "top", "right", "bottom", "used", "modules", "installed"],
+    "Cargo": ["location", "id", "item", "identity", "from", "since", "until", "blocked"],
+    "Arrival": ["origin", "id", "item", "target", "flow", "since", "until", "crossing"],
+    "Device": ["tile", "identity", "grade", "ore", "demand", "used", "generated", "charged", "discharged", "slots"],
+    "Slot": ["item", "role", "count", "stack", "permissions"],
+    "Warehouse": ["tile", "item", "count"],
+    "Design": ["kind", "minimum", "grade", "ores", "demand", "generation", "batteryPower", "batteryCapacity", "output", "amount", "ticks", "span", "materials"],
+    "DesignBelt": ["tier", "lanes", "interval", "laneCapacity"],
+    "Port": ["input", "output"],
+    "Material": ["item", "count"],
+    "TransportPreview": ["status", "tile", "revision"],
+    "ConstructionPayment": ["status"],
+    "Library": ["legacyImported", "entries"],
+    "BlueprintInfo": ["width", "height", "devices", "item", "count"],
+    "Blueprint": ["id", "version", "nameBytes", "parts"],
+    "Part": ["x", "y", "kind", "direction", "wire", "config"]
   },
   "commands": {
     "Place": 1,
@@ -38,6 +62,7 @@
     "FinishHandcraft": 25,
     "DropHeld": 26,
     "PickGround": 27,
-    "RemoveCables": 28
+    "RemoveCables": 28,
+    "SubmitDevelopment": 29
   }
 }

@@ -4,7 +4,7 @@ use crate::catalog::*;
 use crate::footprints::Outlet;
 use crate::world::Cell;
 
-pub const RETIRED_SOURCE: u16 = N as u16 + 1;
+pub const RETIRED_SOURCE: u32 = N as u32 + 1;
 pub const NODES: usize = N * 2;
 pub const fn node(tile: usize, lane: usize) -> usize {
     tile * 2 + lane
@@ -13,9 +13,9 @@ pub const fn node(tile: usize, lane: usize) -> usize {
 #[derive(Clone, Copy, Default)]
 pub struct Cargo {
     pub item: u8,
-    pub source: u16,
+    pub source: u32,
     pub id: i32,
-    pub offset: u16,
+    pub offset: u32,
     pub from: i32,
     pub since: u32,
     pub ready: u32,
@@ -51,7 +51,7 @@ impl Segment {
 
     pub fn outgoing(&self, tick: u32) -> Option<Cargo> {
         self.queue.front().copied().filter(|cargo| {
-            usize::from(cargo.offset) + 1 == self.nodes.len()
+            cargo.offset as usize + 1 == self.nodes.len()
                 && cargo.ready <= tick
                 && self.next_exit <= tick
         })
@@ -70,14 +70,14 @@ impl Segment {
         self.next_motion = u32::MAX;
         let mut ahead = self.nodes.len();
         for cargo in &mut self.queue {
-            let mut current = usize::from(cargo.offset);
+            let mut current = cargo.offset as usize;
             if current + 1 < ahead {
                 if cargo.ready <= tick {
                     cargo.from = self.nodes[current] as i32;
                     cargo.since = tick;
                     cargo.ready = belt_deadline(tick, self.interval, self.rate);
                     current += 1;
-                    cargo.offset = current as u16;
+                    cargo.offset = current as u32;
                     cargo.blocked = false;
                 }
                 self.next_motion = self.next_motion.min(cargo.ready);
@@ -94,9 +94,7 @@ impl Segment {
 
     pub fn take(&mut self, location: usize, item: u8, id: i32, tick: u32) -> bool {
         let Some(index) = self.queue.iter().position(|cargo| {
-            cargo.id == id
-                && cargo.item == item
-                && self.nodes[usize::from(cargo.offset)] == location
+            cargo.id == id && cargo.item == item && self.nodes[cargo.offset as usize] == location
         }) else {
             return false;
         };
@@ -183,7 +181,7 @@ impl Belts {
                 .filter_map(|(offset, &loc)| {
                     let item = cargo[loc];
                     (item.item != 0).then_some(Cargo {
-                        offset: offset as u16,
+                        offset: offset as u32,
                         ..item
                     })
                 })
@@ -243,7 +241,7 @@ impl Belts {
         cargo.fill(Cargo::default());
         for segment in &self.segments {
             for &item in &segment.queue {
-                cargo[segment.nodes[usize::from(item.offset)]] = item;
+                cargo[segment.nodes[item.offset as usize]] = item;
             }
         }
     }

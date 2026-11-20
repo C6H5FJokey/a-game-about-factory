@@ -3,7 +3,7 @@ use crate::world::World;
 
 #[derive(Clone, Copy, Default)]
 struct Space {
-    owner: u16,
+    owner: u32,
     input: u8,
     output: u8,
 }
@@ -57,12 +57,20 @@ impl Footprints {
     }
 
     pub fn owner(&self, tile: usize) -> Option<usize> {
-        usize::from(self.space[tile].owner).checked_sub(1)
+        (self.space[tile].owner as usize).checked_sub(1)
     }
 
     pub fn masks(&self, tile: usize) -> (u8, u8) {
         let space = self.space[tile];
         (space.input, space.output)
+    }
+
+    pub fn set_transport(&mut self, tile: usize, present: bool) {
+        // Transport devices occupy a single tile and have no machine material ports.
+        self.space[tile] = Space {
+            owner: if present { (tile + 1) as u32 } else { 0 },
+            ..Space::default()
+        };
     }
 }
 
@@ -107,7 +115,7 @@ impl World {
                 {
                     return None;
                 }
-                footprints.space[tile].owner = (anchor + 1) as u16;
+                footprints.space[tile].owner = (anchor + 1) as u32;
             }
             if is_belt(kind) {
                 continue;
@@ -168,7 +176,12 @@ impl World {
             let cell = &self.cells[anchor];
             for tile in covered(anchor, cell.kind, cell.dir).unwrap() {
                 let (input, output) = self.material_masks(tile, anchor);
-                out.extend([tile as i32, anchor as i32, i32::from(input | (output << 4))]);
+                wire::Footprint {
+                    tile: tile as i32,
+                    anchor: anchor as i32,
+                    masks: i32::from(input | (output << 4)),
+                }
+                .append(out);
             }
         }
         out.push(start as i32);

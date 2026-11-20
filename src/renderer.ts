@@ -1,5 +1,6 @@
 import { CityField, Field, H, Kind, Meta, Stage, STEP, W, at, cell, cityValue, inBounds, isTransport, legacyRecipes, xy, type MapLimits, type Mode, type PreviewCell } from './model';
-import { beltArrivalData, cargoIndex, design, deviceAt, transportPorts, TRANSPORT_RECORD_WORDS } from './sim-data';
+import { beltArrivalData, cargoIndex, design, deviceAt, transportPorts } from './sim-data';
+import { ArrivalRecord, CargoRecord } from './generated-content';
 import { machineAnchor, machinePortTiles, machineSize, previewPorts, transportLinks } from './machine-layout';
 
 type Color = [number,number,number,number];
@@ -340,15 +341,15 @@ export class Renderer {
 
   private drawBeltArrivals(data:Int32Array,tick:number,size:number,left:number,top:number,right:number,bottom:number) {
     const arrivals=beltArrivalData(data);
-    for (let i=0;i<arrivals.length;i+=TRANSPORT_RECORD_WORDS) {
-      const item=arrivals[i+2], target=arrivals[i+3], flow=arrivals[i+4];
-      const since=arrivals[i+5], until=arrivals[i+6];
+    for (let i=0;i<arrivals.length;i+=ArrivalRecord.words) {
+      const item=arrivals[i+ArrivalRecord.item], target=arrivals[i+ArrivalRecord.target], flow=arrivals[i+ArrivalRecord.flow];
+      const since=arrivals[i+ArrivalRecord.since], until=arrivals[i+ArrivalRecord.until];
       if (tick>=until) continue;
       const [x,y]=xy(target);
       if (x<left-1 || x>=right+1 || y<top-1 || y>=bottom+1) continue;
       const [dx,dy]=STEP[flow];
-      const [sx,sy]=xy(Math.floor((-1-arrivals[i])/2));
-      const offset=arrivals[i+7] ? .18 : 0;
+      const [sx,sy]=xy(Math.floor((-1-arrivals[i+ArrivalRecord.origin])/2));
+      const offset=arrivals[i+ArrivalRecord.crossing] ? .18 : 0;
       const fromX=sx+.5-dy*offset, fromY=sy+.5+dx*offset;
       const portX=x+.5-dx*.44, portY=y+.5-dy*.44;
       const phase=Math.max(0,(tick-since)/(until-since));
@@ -499,10 +500,11 @@ export class Renderer {
         for (let lane=1;lane>=0;lane--) {
           const loc=tile*2+lane, row=tracks.get(loc);
           if (row===undefined) continue;
-          const item=data[row+2], from=data[row+4], since=data[row+5], until=data[row+6];
+          const item=data[row+CargoRecord.item], from=data[row+CargoRecord.from];
+          const since=data[row+CargoRecord.since], until=data[row+CargoRecord.until];
           const [tx,ty]=this.cargoCenter(data,loc);
           const [fx,fy]=this.cargoCenter(data,from);
-          const phase=data[row+7]?1:Math.max(0,Math.min(1,(scene.tick-since)/Math.max(1,until-since)));
+          const phase=data[row+CargoRecord.blocked]?1:Math.max(0,Math.min(1,(scene.tick-since)/Math.max(1,until-since)));
           const px=fx+(tx-fx)*phase, py=fy+(ty-fy)*phase;
           this.box(px,py,size+.08,size+.08,ink,shapeForItem[item]);
           this.box(px,py,size,size,mineral[item],shapeForItem[item]);

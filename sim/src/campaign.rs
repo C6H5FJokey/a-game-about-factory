@@ -108,6 +108,14 @@ impl World {
                 .into_iter()
                 .any(|ore| self.unlocked(drill_kind(kind, ore).unwrap()));
         }
+        if matches!(
+            kind,
+            EXPRESS_BELT | REINFORCED_IRON_DRILL
+                ..=REINFORCED_FUEL_DRILL | REINFORCED_COPPER_DRILL | ULTRA_BELT
+        ) && (self.progression.tier == 0 || !DEVELOPMENT_STAGE.unlocks.contains(&kind))
+        {
+            return false;
+        }
         if !self.legacy_recipes {
             return self.stage
                 >= match kind {
@@ -116,14 +124,6 @@ impl World {
                     FUEL_DRILL => Stage::Power,
                     KILN | ASSEMBLER => Stage::Silica,
                     GRINDER | CALIBRATOR | KIT_PRESS => return false,
-                    EXPRESS_BELT
-                    | REINFORCED_IRON_DRILL..=REINFORCED_FUEL_DRILL
-                    | REINFORCED_COPPER_DRILL
-                        if self.progression.tier == 0 =>
-                    {
-                        return false
-                    }
-                    ULTRA_BELT if self.progression.tier == 0 => return false,
                     _ => match Stage::required_for(kind) {
                         Some(stage) => stage,
                         None => return false,
@@ -138,9 +138,6 @@ impl World {
         }
         self.stage.allows(kind)
             && match kind {
-                EXPRESS_BELT | REINFORCED_IRON_DRILL..=REINFORCED_FUEL_DRILL => {
-                    self.progression.tier >= 1
-                }
                 IRON_DRILL => self.delivered > 0,
                 FUEL_DRILL if self.stage == Stage::Power => self
                     .machines

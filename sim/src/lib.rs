@@ -175,6 +175,7 @@ pub extern "C" fn command(op: i32, a: i32, b: i32, c: i32, len: usize) -> i32 {
             op::DROP_HELD => world.drop_held(tile, b, c),
             op::PICK_GROUND => world.pick_ground(tile, b, c),
             op::REMOVE_CABLES => world.remove_cables(words),
+            op::SUBMIT_DEVELOPMENT if tile < N => world.submit_development(tile, b),
             _ => -1,
         }
     })
@@ -286,6 +287,18 @@ fn write_snapshot_header(world: &World, output: &mut Vec<i32>) {
     debug_assert_eq!(HEADER, output.len());
 }
 
+fn write_snapshot_grids(world: &World, out: &mut Vec<i32>) {
+    for grid in &world.grids {
+        wire::Grid {
+            generation: grid.generation as i32,
+            demand: grid.demand as i32,
+            discharge: grid.discharge as i32,
+            stored: grid.stored as i32,
+        }
+        .append(out);
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn snapshot() -> usize {
     RUNTIME.with(|rt| {
@@ -324,14 +337,7 @@ pub extern "C" fn snapshot() -> usize {
             output.push(c.delivering_kits(world.tick) as i32);
         }
         debug_assert_eq!(HEADER + N * SNAPSHOT_CELL_WORDS, output.len());
-        for g in &world.grids {
-            output.extend([
-                g.generation as i32,
-                g.demand as i32,
-                g.discharge as i32,
-                g.stored as i32,
-            ]);
-        }
+        write_snapshot_grids(world, output);
         world.ground.write_view(output);
         world.write_recipe_view(output);
         world.write_machine_footprints(output);
@@ -693,16 +699,22 @@ impl World {
         }
         if matches!(c.kind, KIT_PRESS | SPLICER | SMELTER | BENCH) {
             for cargo in &mut self.cargo {
-                if cargo.source == tile as u16 + 1 {
+                if cargo.source == tile as u32 + 1 {
                     cargo.source = RETIRED_SOURCE;
                 }
             }
         }
         self.cells[tile] = Cell {
             wire: c.wire,
+            group: c.group,
             ..Cell::default()
         };
-        self.rebuild();
+        if is_belt(c.kind) {
+            self.footprints.set_transport(tile, false);
+            self.rebuild_transport_layout();
+        } else {
+            self.rebuild();
+        }
         1
     }
 
@@ -857,7 +869,7 @@ impl World {
                 || last_kit_delivery > tick
                 || !(0..MATERIAL_ITEMS as i32).contains(&s[8])
                 || ticks(s[9])? >= clock_limit
-                || !(0..=i32::from(RETIRED_SOURCE)).contains(&s[18])
+                || !(0..=RETIRED_SOURCE as i32).contains(&s[18])
             {
                 return None;
             }
@@ -927,7 +939,7 @@ impl World {
                 },
             );
             if data[0] < 6 {
-                w.add_legacy_cargo(i, s[8] as u8, s[18] as u16)?;
+                w.add_legacy_cargo(i, s[8] as u8, s[18] as u32)?;
             }
         }
         if data[0] < 7 {

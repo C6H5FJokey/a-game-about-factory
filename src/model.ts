@@ -1,11 +1,13 @@
-import { content, Op, SIM_HZ as HZ, WORLD_WIDTH, WORLD_HEIGHT, TERMINAL_WIDTH, TERMINAL_HEIGHT,
-  SNAPSHOT_HEADER_WORDS as HEADER, SNAPSHOT_CELL_WORDS as STRIDE, ViewSection } from './generated-content';
+import { content, Op, SIM_HZ as HZ, WORLD_WIDTH, WORLD_HEIGHT, TERMINAL_WIDTH, TERMINAL_HEIGHT, DENSE_WIDTH, DENSE_HEIGHT,
+  SNAPSHOT_HEADER_WORDS as HEADER, SNAPSHOT_CELL_WORDS as STRIDE, ViewSection,
+  ProgressionRecord as Progression, RecipeHeaderRecord, RecipeRecord } from './generated-content';
 import { readViewCell, viewSection } from './world-view';
 
 export { HZ, HEADER, STRIDE, Op };
-export const terminalReview = import.meta.env.MODE === 'terminal-profile';
-export const W = terminalReview ? TERMINAL_WIDTH : WORLD_WIDTH;
-export const H = terminalReview ? TERMINAL_HEIGHT : WORLD_HEIGHT;
+const denseReview = import.meta.env?.MODE === 'dense-profile';
+export const terminalReview = denseReview || import.meta.env?.MODE === 'terminal-profile';
+export const W = denseReview ? DENSE_WIDTH : terminalReview ? TERMINAL_WIDTH : WORLD_WIDTH;
+export const H = denseReview ? DENSE_HEIGHT : terminalReview ? TERMINAL_HEIGHT : WORLD_HEIGHT;
 export const STATION = 15 * W + 33;
 export const STEP = [[1,0],[0,1],[-1,0],[0,-1]] as const;
 export const DIRECTION = ['东', '南', '西', '北'];
@@ -53,9 +55,11 @@ export function transportStart(data:Int32Array) {
   return pointer>=HEADER+W*H*STRIDE ? data[pointer] : -1;
 }
 export function progression(data:Int32Array) {
-  const i=viewSection(data,ViewSection.Progression)?.[0] ?? transportStart(data)-13;
-  return { tier:data[i], slots:data[i+1], regional:Boolean(data[i+2]), speed:data[i+3], minZoom:data[i+4], maxZoom:data[i+5],
-    left:data[i+6], top:data[i+7], right:data[i+8], bottom:data[i+9], used:data[i+10], modules:data[i+11], installed:data[i+12] };
+  const i=viewSection(data,ViewSection.Progression)?.[0] ?? transportStart(data)-Progression.words;
+  return { tier:data[i+Progression.tier], slots:data[i+Progression.slots], regional:Boolean(data[i+Progression.regional]),
+    speed:data[i+Progression.speed], minZoom:data[i+Progression.minZoom], maxZoom:data[i+Progression.maxZoom],
+    left:data[i+Progression.left], top:data[i+Progression.top], right:data[i+Progression.right], bottom:data[i+Progression.bottom],
+    used:data[i+Progression.used], modules:data[i+Progression.modules], installed:data[i+Progression.installed] };
 }
 export function stackLimit(data:Int32Array,item:number) {
   const entry=content.items[item];
@@ -69,20 +73,22 @@ export function cell(data:Int32Array, tile:number, field:number) {
   if (tile<0 || tile>=W*H) return 0;
   return readViewCell(data,tile,field) ?? data[HEADER + tile * STRIDE + field] ?? 0;
 }
-function recipesEnd(data:Int32Array) { return viewSection(data,ViewSection.Recipes)?.[1] ?? data[transportStart(data)-14]-1; }
+export function footprintsEnd(data:Int32Array) { return transportStart(data)-Progression.words-1; }
+function recipesEnd(data:Int32Array) { return viewSection(data,ViewSection.Recipes)?.[1] ?? data[footprintsEnd(data)]-1; }
 export function recipesStart(data:Int32Array) { return viewSection(data,ViewSection.Recipes)?.[0] ?? data[recipesEnd(data)]; }
-export function legacyRecipes(data:Int32Array) { return data[recipesStart(data)]!==0; }
+export function legacyRecipes(data:Int32Array) { return data[recipesStart(data)+RecipeHeaderRecord.legacy]!==0; }
 export function selectedRecipe(data:Int32Array,tile:number) {
-  for (let i=recipesStart(data)+2+content.items.length-10;i<recipesEnd(data);i+=3) {
-    if (data[i]===tile) return {key:data[i+1],ticks:data[i+2]};
+  const end=recipesEnd(data);
+  for (let i=recipesStart(data)+RecipeHeaderRecord.words+content.items.length-10;i<end;i+=RecipeRecord.words) {
+    if (data[i+RecipeRecord.tile]===tile) return {key:data[i+RecipeRecord.key],ticks:data[i+RecipeRecord.ticks]};
   }
   return undefined;
 }
 export function unlocked(data:Int32Array,kind:Kind) {
-  return Boolean(kind<32?data[Meta.Unlocked]&(1<<kind):data[recipesStart(data)+1]&(1<<(kind-32)));
+  return Boolean(kind<32?data[Meta.Unlocked]&(1<<kind):data[recipesStart(data)+RecipeHeaderRecord.unlocked]&(1<<(kind-32)));
 }
 export function held(data:Int32Array,item:number) {
-  return item===SPEED_MODULE?progression(data).modules:(data[item>=10?recipesStart(data)+2+item-10:Meta.Stock+item-1] ?? 0);
+  return item===SPEED_MODULE?progression(data).modules:(data[item>=10?recipesStart(data)+RecipeHeaderRecord.words+item-10:Meta.Stock+item-1] ?? 0);
 }
 export function xy(tile:number) { return [tile % W, Math.floor(tile / W)]; }
 export function at(x:number,y:number) { return x >= 0 && x < W && y >= 0 && y < H ? y * W + x : -1; }

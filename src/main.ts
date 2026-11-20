@@ -2,7 +2,8 @@ import './style.css';
 import { bindMapInput } from './input';
 import { beltTerminal, detourLockedCrossing, dragTiles, findBeltPath, findCablePath, flowTo, projectBeltPath } from './belt-route';
 import { bindActionHold } from './action-hold';
-import { bindInventoryDrag, canSelectSlot, readContainer, readSlot, sameSlot, type ContainerTarget, type Selection, type Slot, type SlotRole } from './inventory-drag';
+import { bindInventoryDrag, readContainer, readSlot, sameSlot, type SlotRole } from './inventory-drag';
+import { createInventoryInteraction, sameDevice, stackCount, type BackpackStack } from './inventory-interaction';
 import { bindGroundMarkers, groundPiles, type GroundPile } from './ground-items';
 import {
   DIRECTION, Field, H, HEADER, HZ, Kind, Meta, Op, energyMj, legacyRecipes, selectedRecipe,
@@ -14,9 +15,11 @@ import { campaignTask, contents, firstMachine, guideText, handbook, visibleGuide
 import { clearLegacyBlueprint, downloadSave, legacyBlueprint, persistSave, resumeSave, reviewScene } from './storage';
 import { actionIcon, itemIcon, machineIcon } from './icons';
 import { devicePower, designPower } from './power-readout';
-import { cargoAt, constructionAvailable, constructionSources, design, deviceAt, drillVariant, layoutRevision, preparedMaterials, readBlueprints, readDirectory, transportPorts, type Blueprint, type CargoTrack, type Material, type SlotData } from './sim-data';
+import { cargoAt, constructionAvailable, design, deviceAt, drillVariant, layoutRevision, preparedMaterials, readBlueprints, readDirectory, transportPorts, type Blueprint, type CargoTrack, type Material, type SlotData } from './sim-data';
+import { ConstructionSupply } from './construction-supply';
 import { ERRORS, ITEM, MACHINE, itemDescription } from './catalog-text';
-import { content, ViewSection } from './generated-content';
+import { content, GridRecord, MaterialRecord, TransportPreviewRecord as PreviewRecord, ViewSection } from './generated-content';
+import { checkRows } from './wire-read';
 import { SnapshotLayout, attachView, finishViewDecode, startViewDecode, viewHasTile, viewSection } from './world-view';
 import { language, languages, onLanguageChange, setLanguage, t, textHtml } from './i18n';
 import { footprint, machineAnchor, machineMasks, machineSize, occupiedKind, previewPorts, rotatePart } from './machine-layout';
@@ -45,6 +48,7 @@ const blueprintDialog=byId<HTMLDialogElement>('blueprint-dialog'), transferDialo
 const dropDialog=byId<HTMLDialogElement>('drop-dialog');
 const notice=byId('notice'), balances=byId('balances'), quickInfo=byId('quick-info');
 const worker=new Worker(new URL('./worker.ts',import.meta.url),{type:'module'});
+const constructionSupply=new ConstructionSupply(message=>worker.postMessage(message));
 const fullSnapshot=terminalReview && new URLSearchParams(location.search).get('snapshot')==='full';
 let snapshotLayout:SnapshotLayout | undefined;
 let lastView:number[]=[];
@@ -77,18 +81,12 @@ let confirmTransport=0;
 type Draft = { cells:PreviewCell[]; command?:Command; materials:Material[]; label:string; conflict:boolean; capture?:boolean };
 let ghost:Draft={cells:[],materials:[],label:'',conflict:false};
 
-let selectedItem:Selection | undefined;
-const INVENTORY_DOUBLE_CLICK_MS=350;
-type InventoryDevice=Pick<Slot,'tile'|'identity'>;
-type InventoryClick={slot:Slot; device:InventoryDevice; at:number; singleTransfer?:()=>void};
-let inventoryClick:InventoryClick | undefined;
-type BackpackStack=Pick<Slot,'item'|'stackIndex'>;
 let dropSource:BackpackStack|undefined, groundTile=-1;
 let dropDraft:(BackpackStack & {count:number})|undefined;
 const groundMarkers=bindGroundMarkers(byId('ground-markers'),openGroundMarker);
 let infoKey='', infoPinned=false, infoTile=-1;
 let balanceItems='\0';
-const inventoryPages=new Map<string,number>();
+const inventory=createInventoryInteraction({snapshot:()=>data,panel,panelBody,submit,say,closeInfo,revealInfo,refresh});
 
 const languageSelect=byId<HTMLSelectElement>('language-select');
 languageSelect.replaceChildren(...languages.map(locale=>{
@@ -114,15 +112,13 @@ onLanguageChange(applyTranslations);
 const slotArt=(item:number,count:number)=>itemIcon(item)+`<span class="item-count">${count}</span>`;
 const slotLabel=(role:SlotRole,item:number,count:number)=>t('ui.slotLabel',{role:t('ui.'+role),item:ITEM[item],count});
 const deviceIdentity=(tile:number)=>deviceAt(data,tile)?.identity ?? 0;
-const stackCount=(count:number,limit:number,index:number)=>Math.max(0,Math.min(limit,count-index*limit));
-const backpackStackCount=({item,stackIndex}:BackpackStack)=>stackCount(held(data,item),stackLimit(data,item),stackIndex);
-const amountBadge=(pressed:boolean,count:number)=>pressed && selectedItem?.quantity!==undefined
-  ? String(Math.min(selectedItem.quantity,count)):'';
+const amountBadge=(pressed:boolean,count:number)=>pressed && inventory.selection?.quantity!==undefined
+  ? String(Math.min(inventory.selection.quantity,count)):'';
 function itemSlot(role:SlotRole,item:number,count:number,
   {tile=-1,context='',slot,track,stackIndex=0}:{tile?:number; context?:string; slot?:SlotData; track?:CargoTrack; stackIndex?:number}={}) {
   const lane=(track?.location ?? 0)%2, cargoId=track?.id ?? 0;
   const identity=track?.identity ?? (slot?deviceIdentity(tile):0);
-  const pressed=count>0 && sameSlot(selectedItem,{role,item,tile,identity,lane,cargoId,stackIndex});
+  const pressed=count>0 && sameSlot(inventory.selection,{role,item,tile,identity,lane,cargoId,stackIndex});
   return `<button type="button" class="item-slot" data-slot="${role}" data-item="${item}" data-tile="${tile}"
     data-count="${count}" data-stack-index="${stackIndex}" data-identity="${identity}"
     data-quick="slot-${role}-${item}-${tile}-${track?lane:stackIndex}" aria-label="${textHtml(slotLabel(role,item,count))}"
@@ -141,7 +137,7 @@ function stackPage<T extends Material & {stack:number}>(key:string,items:T[],kee
   const pageSize=32;
   const rows=items.map(item=>({item,stacks:Math.max(keepEmpty?1:0,Math.ceil(item.count/item.stack))}));
   const pages=Math.ceil(rows.reduce((sum,row)=>sum+row.stacks,0)/pageSize);
-  const page=Math.min(inventoryPages.get(key) ?? 0,Math.max(0,pages-1));
+  const page=Math.min(inventory.page(key),Math.max(0,pages-1));
   let skip=page*pageSize;
   const entries:{item:T;index:number}[]=[];
   for (const {item,stacks} of rows) {
@@ -207,9 +203,9 @@ const handcraft=bindActionHold(app,{
 });
 
 bindInventoryDrag(app,byId('item-drag'),{
-  selected:()=>selectedItem,
-  select:source=>{ inventoryClick=undefined; selectedItem=source; closeInfo(); refresh(); },
-  drop:(source,target)=>target.role==='container'?transferToContainer(source,target):transferSlot(source,target),
+  selected:()=>inventory.selection,
+  select:source=>{ inventory.select(source); closeInfo(); refresh(); },
+  drop:(source,target)=>target.role==='container'?inventory.transferToContainer(source,target):inventory.transferSlot(source,target),
   art:itemIcon,
 });
 const blueprintById=(id:number)=>blueprints.find(entry=>entry.id===id);
@@ -248,7 +244,7 @@ function syncDrawers() {
     surface.inert=!visible;
   }
   if (panel.dataset.expanded!=='true') {
-    inventoryClick=undefined;
+    inventory.cancelClick();
     if (infoKey && panel.querySelector(`[data-quick="${infoKey}"]`)) closeInfo();
   }
 }
@@ -287,7 +283,7 @@ function selectMode(next:NavigationPage,crafting?:boolean) {
     setPanel(true); refresh(); return;
   }
   if (tool==='cut' && pending) return;
-  inventoryClick=undefined;
+  inventory.cancelClick();
   dropDraft=undefined;
   groundTile=-1;
   clearDraft();
@@ -312,6 +308,7 @@ function togglePage(page:NavigationPage) {
 }
 
 function clearDraft() {
+  constructionSupply.clear();
   tool=undefined; anchors=[];
   catalogTool=false; pathStarted=false; beltFacing=false; pathMessage=''; dragOrigin=undefined;
   transportPreview=undefined; confirmTransport=0;
@@ -375,13 +372,16 @@ function transportDraft(result:Draft) {
     worker.postMessage({type:'transport-preview',request:previewSequence,words});
   }
   const check=transportPreview?.result;
-  if (!check || check[2]!==revision) { result.label='正在检查端口与在途货物'; return result; }
-  if (check[0]<0 && check[0]!==-4) {
-    result.conflict=true; result.label=ERRORS[check[0]];
-    for (const part of result.cells) part.conflict=check[1]<0 || check[1]===part.tile;
+  if (!check || check[PreviewRecord.revision]!==revision) { result.label='正在检查端口与在途货物'; return result; }
+  const status=check[PreviewRecord.status], invalidTile=check[PreviewRecord.tile];
+  if (status<0 && status!==-4) {
+    result.conflict=true; result.label=ERRORS[status];
+    for (const part of result.cells) part.conflict=invalidTile<0 || invalidTile===part.tile;
     return result;
   }
-  for (let i=3;i<check.length;i+=2) result.materials.push({item:check[i],count:check[i+1]});
+  for (let i=PreviewRecord.words;i<check.length;i+=MaterialRecord.words) {
+    result.materials.push({item:check[i+MaterialRecord.item],count:check[i+MaterialRecord.count]});
+  }
   result.command={op:Op.BuildTransport,a:revision,words};
   return result;
 }
@@ -539,7 +539,7 @@ function updateDraft() {
     return ` <span class="inline-cost${available<count?' missing':''}" aria-label="${textHtml(ITEM[item])} ${available} / ${count}">${itemIcon(item)}${available} / ${count}</span>`;
   }).join('');
   const sourceTile=ghost.command?.op===Op.Blueprint?ghost.command.a:ghost.cells[0]?.tile;
-  const sources=sourceTile===undefined || sourceTile<0?[]:constructionSources(data,ghost.materials,sourceTile);
+  const sources=constructionSupply.preview(data,sourceTile,ghost.materials);
   const supply=sources.map(({tile,used})=>t('ui.constructionWarehouse',{
     site:coordinates(tile), materials:used.map(({item,count})=>`${ITEM[item]} ×${count}`).join(' · '),
   })).join(' / ');
@@ -549,7 +549,7 @@ function updateDraft() {
     ((cableTool(tool) || plainBelt(tool)) && anchors.length>1?button('退一步','back-path'):'')+
     (canRotateDraft()?iconButton('旋转','rotate-draft','rotate'):'')+
     button('取消','cancel-draft')+button(tool===Kind.SimpleMiner?'安放':tool==='capture'?'保存蓝图':'确认','confirm-draft',true,!canConfirm);
-  if (draft.innerHTML!==html) draft.innerHTML=html;
+  fill(draft,html);
 }
 
 function canRotateDraft() {
@@ -679,7 +679,7 @@ function tap(tile:number) {
     const request=dropDraft;
     const [x,y]=xy(tile);
     if (!inBounds(limits,x,y)) { say(t('errors.3'),true); return; }
-    if (request.count>backpackStackCount(request)) {
+    if (request.count>inventory.backpackStackCount(request)) {
       dropDraft=undefined; say(t('errors.9'),true); refresh(); return;
     }
     submit({op:Op.DropHeld,a:tile,b:request.item,c:request.count},count=>{
@@ -795,9 +795,29 @@ function inspectors() {
 }
 
 function referenceContent() {
-  if (referencePage==='task') return missionPanel();
+  if (referencePage==='task') {
+    const [tag,title,html]=missionPanel();
+    return [tag,title,html+developmentDelivery()];
+  }
   return ['',t('ui.guide'),(Object.keys(handbook) as (keyof typeof handbook)[]).filter(
     id=>visibleGuide(data,id)).map(id=>guideEntry(id,true)).join('')];
+}
+
+function developmentDelivery(station?:number) {
+  const stage=content.development.stages[0];
+  if (limits.tier>0 || data[Meta.Stage]<stage.minimumStage) return '';
+  station ??= firstMachine(data,Kind.DevelopmentHub);
+  const canSubmit=station>=0 && stage.requirements.every(({item,amount})=>held(data,item)>=amount);
+  const unlocks=stage.unlocks.map(kind=>MACHINE[kind].name).join(' · ');
+  return `<section class="grid-details" data-development-stage="${stage.id}">
+    <h3>${textHtml(t(stage.nameKey))}</h3>
+    <p class="lead">${textHtml(t(stage.descriptionKey))}</p>
+    ${readings(stage.requirements.map(({item,amount})=>[ITEM[item],`${held(data,item)} / ${amount}`]))}
+    ${signal(textHtml(t(stage.rewardKey,stage.limits)))}
+    ${unlocks?signal(textHtml(unlocks)):''}
+    ${station<0?signal(textHtml(t('ui.developmentStationRequired'))):''}
+    ${actions(button(t('ui.submitDevelopment'),`submit-development-${station}`,true,!canSubmit))}
+  </section>`;
 }
 
 function pickGround(pile:GroundPile) {
@@ -970,9 +990,9 @@ function gridDetails(group:number) {
     const tile=faultView?data[i]:i;
     if ((faultView || cell(data,tile,Field.Status)===3) && cell(data,tile,Field.Grid)===group) faults.push(tile);
   }
-  const index=(viewSection(data,ViewSection.Grids)?.[0] ?? HEADER+W*H*STRIDE)+group*4;
-  const rows:[string,string][]=[['电网总发电',mw(data[index])],['请求负荷',mw(data[index+1])],
-    ['电池可放电',mw(data[index+2])],['电网储能',energyMj(data[index+3]).toFixed(1)+' MJ']];
+  const index=(viewSection(data,ViewSection.Grids)?.[0] ?? HEADER+W*H*STRIDE)+group*GridRecord.words;
+  const rows:[string,string][]=[['电网总发电',mw(data[index+GridRecord.generation])],['请求负荷',mw(data[index+GridRecord.demand])],
+    ['电池可放电',mw(data[index+GridRecord.discharge])],['电网储能',energyMj(data[index+GridRecord.stored]).toFixed(1)+' MJ']];
   return `<section class="grid-details"><h3>供电区 #${group}</h3>`+readings(rows)+
     (faults.length ? `<div class="fault-list">${faults.map(i=>`<button type="button" class="button" data-fault="${i}">${textHtml(MACHINE[cell(data,i,Field.Kind)].name)}<small>${coordinates(i)} · 缺电</small></button>`).join('')}</div>`:'')+
     (unlocked(data,Kind.Battery)?actions(button('预览蓄电池','battery')):'')+'</section>';
@@ -1087,7 +1107,7 @@ function devicePanel(kind:number) {
     return [`设备检查 · ${coordinates(selected)}`,'阶段交付站',
       readings([...machineLayoutRows(selected,kind),['已完成阶段',limits.tier],['背包占用',t('ui.backpack',{used:limits.used,slots:limits.slots})],['堆叠上限',t('ui.individualStacks')],['时间倍速上限',`${limits.speed}×`],
         [t('ui.zoomRange'),t('ui.zoomRangeValue',{min,max})],['开放地图',`${limits.right-limits.left} × ${limits.bottom-limits.top} 格`]])+
-      signal(textHtml(t(limits.tier===0?'ui.nextDevelopmentStage':'ui.allDevelopmentStages')))+
+      (limits.tier>0?signal(textHtml(t('ui.allDevelopmentStages'))):developmentDelivery(selected))+
       actions(iconButton('拆除设备','remove','hammer'))];
   }
   const device=machineText(kind), status=cell(data,selected,Field.Status), cfg=cell(data,selected,Field.Config);
@@ -1295,7 +1315,7 @@ function syncInfo() {
       (anchor.dataset.context?`<p>${textHtml(anchor.dataset.context)}</p>`:'')+
       ((role==='held' || role==='input' || role==='output')?`<p>${textHtml(t('ui.stackCapacity',{limit:stack}))}</p>`:'')+
       (help[role]?`<p>${textHtml(help[role])}</p>`:'')+
-      (infoPinned && count>1 && sameSlot(selectedItem,slot)?button(selectedItem?.quantity?`数量 ${selectedItem.quantity}`:'指定数量','transfer-amount'):'')+
+      (infoPinned && count>1 && sameSlot(inventory.selection,slot)?button(inventory.selection?.quantity?`数量 ${inventory.selection.quantity}`:'指定数量','transfer-amount'):'')+
       (infoPinned && role==='held' && count>0?button(t('ui.dropTitle'),`drop-item-${item}-${slot.stackIndex}`):'');
   }
   if (quickInfo.innerHTML!==html) quickInfo.innerHTML=html;
@@ -1310,108 +1330,6 @@ function syncInfo() {
 function revealInfo(anchor:HTMLButtonElement,pin=false) {
   if (!anchor.dataset.quick || (!pin && infoPinned)) return;
   infoTile=-1; infoKey=anchor.dataset.quick; infoPinned=pin; syncInfo();
-}
-
-type TransferTarget=Pick<Slot,'role'|'item'|'tile'|'identity'|'canPut'>;
-
-function availableInSlot(source:Selection) {
-  if (source.role==='held') return backpackStackCount(source);
-  const device=deviceAt(data,source.tile);
-  if (device?.identity!==source.identity) return 0;
-  const slot=device.slots.find(slot=>slot.canTake && slot.role===source.role && slot.item===source.item);
-  return slot?stackCount(slot.count,slot.stack,source.stackIndex):0;
-}
-
-function transferSlot(source:Selection,target:TransferTarget) {
-  const {role,item,tile,identity,canPut}=target;
-  const insert=source.role==='held' && (role==='input' || role==='module') && canPut;
-  const extract=role==='held' && (source.role==='input' || source.role==='output' || source.role==='module' || source.role==='cargo');
-  if (!insert && !extract) return false;
-  if (source.item!==item) {
-    say('所选物料与槽位不符。',true);
-    return false;
-  }
-  if (source.role==='cargo') return takeCargo(source.tile,source.lane,item,source.cargoId,source.identity);
-  const available=availableInSlot(source);
-  if (!available) return false;
-  return submit({op:Op.Transfer,a:source.tile,b:tile,c:item,
-    words:[Math.min(source.quantity ?? available,available),source.identity,identity,source.role==='module'||role==='module'?3:source.role==='input'?1:2]},quantity=>{
-    selectedItem=undefined;
-    say(t(role==='module'?'ui.installed':role==='input'?'ui.inserted':'ui.received',{item:ITEM[item],count:quantity}));
-  });
-}
-
-function transferToContainer(source:Selection,{tile,identity}:ContainerTarget) {
-  return transferSlot(source,{role:tile===-1?'held':'input',item:source.item,tile,identity,canPut:true});
-}
-
-function takeCargo(tile:number,lane:number,item:number,cargoId:number,identity:number) {
-  return submit({op:Op.TakeCargo,a:tile,b:lane,c:item,words:[cargoId,identity]},()=>{
-    selectedItem=undefined;
-    say(t('ui.received',{item:ITEM[item],count:1}));
-  });
-}
-
-function openInventory() {
-  if (panel.dataset.expanded!=='true') return undefined;
-  const container=readContainer(panelBody.querySelector('[data-container]'));
-  if (container) return container;
-  const slot=panelBody.querySelector<HTMLButtonElement>('[data-slot="input"],[data-slot="output"],[data-slot="module"]');
-  return slot?readSlot(slot):undefined;
-}
-
-function sameDevice(slot:InventoryDevice | undefined,device:InventoryDevice) {
-  return slot?.tile===device.tile && slot.identity===device.identity;
-}
-
-function quickTransfer(slot:Slot) {
-  if (!slot.count) return;
-  if (slot.role==='held') {
-    const container=readContainer(panelBody.querySelector('[data-container]'));
-    if (container) {
-      if (transferToContainer(slot,container)) closeInfo();
-      return;
-    }
-    const target=panelBody.querySelector<HTMLButtonElement>(`button[data-item="${slot.item}"][data-put="true"]`);
-    if (target && transferSlot(slot,readSlot(target))) closeInfo();
-  } else if (slot.canTake && transferSlot(slot,{role:'held',item:slot.item,tile:-1,identity:0,canPut:false})) {
-    closeInfo();
-  }
-}
-
-function activateSlot(anchor:HTMLButtonElement,event:MouseEvent) {
-  const slot=readSlot(anchor), {role,item,canPut}=slot;
-  const device=event.detail>0 && role!=='cargo' && role!=='display'?openInventory():undefined;
-  const previous=inventoryClick;
-  inventoryClick=undefined;
-  if (device && previous && sameDevice(device,previous.device) && sameSlot(previous.slot,slot) &&
-      event.timeStamp-previous.at<=INVENTORY_DOUBLE_CLICK_MS) {
-    quickTransfer(slot);
-    return;
-  }
-  previous?.singleTransfer?.();
-  const click:InventoryClick | undefined=device?{slot,device,at:event.timeStamp}:undefined;
-  inventoryClick=click;
-  const source=selectedItem;
-  const shouldTransfer=source && ((role==='held' && source.role!=='held' && source.item===item) ||
-    ((role==='input' || role==='module') && canPut && source.role==='held' && source.item===item));
-  if (shouldTransfer && source) {
-    if (click) {
-      // A second click turns this into a full-stack transfer from the clicked slot.
-      click.singleTransfer=()=>{
-        if (selectedItem===source && sameDevice(openInventory(),click.device)) transferSlot(source,slot);
-      };
-      window.setTimeout(()=>{
-        if (inventoryClick!==click) return;
-        inventoryClick=undefined;
-        click.singleTransfer?.();
-      },INVENTORY_DOUBLE_CLICK_MS);
-    } else transferSlot(source,slot);
-  } else if (canSelectSlot(slot)) {
-    selectedItem=sameSlot(selectedItem,slot)?undefined:slot;
-  }
-  revealInfo(anchor,true);
-  refresh();
 }
 
 const rendered=new WeakMap<HTMLElement,string>();
@@ -1457,7 +1375,7 @@ function renderBalances() {
   for (const [i,anchor] of balances.querySelectorAll<HTMLButtonElement>('[data-slot="held"]').entries()) {
     const {item,index}=entries[i];
     const count=stackCount(item.count,item.stack,index);
-    const pressed=sameSlot(selectedItem,readSlot(anchor));
+    const pressed=sameSlot(inventory.selection,readSlot(anchor));
     if (anchor.getAttribute('aria-pressed')!==String(pressed)) anchor.setAttribute('aria-pressed',String(pressed));
     const amount=amountBadge(pressed,count);
     if (anchor.dataset.selectedCount!==amount) anchor.dataset.selectedCount=amount;
@@ -1523,7 +1441,7 @@ function traceCargo() {
   if (selected<0) return;
   const chain:[number,number][]=[];
   let current=selected;
-  let lane=selectedItem?.role==='cargo' && selectedItem.tile===selected?selectedItem.lane:0;
+  let lane=inventory.selection?.role==='cargo' && inventory.selection.tile===selected?inventory.selection.lane:0;
   const seen=new Set<number>();
   let loop=false;
   for (let i=0;i<W*H;i++) {
@@ -1645,16 +1563,16 @@ byId<HTMLFormElement>('transfer-form').addEventListener('submit',event=>{
   event.preventDefault();
   const quantity=byId<HTMLInputElement>('transfer-quantity').valueAsNumber;
   if (!Number.isInteger(quantity) || quantity<1) return;
-  if (selectedItem) selectedItem.quantity=quantity;
+  inventory.setQuantity(quantity);
   transferDialog.close(); refresh();
 });
 
 byId<HTMLFormElement>('drop-form').addEventListener('submit',event=>{
   event.preventDefault();
   const count=byId<HTMLInputElement>('drop-quantity').valueAsNumber;
-  if (!dropSource || !Number.isInteger(count) || count<1 || count>backpackStackCount(dropSource)) return;
+  if (!dropSource || !Number.isInteger(count) || count<1 || count>inventory.backpackStackCount(dropSource)) return;
   clearDraft(); closeInfo(); harvest.stop(); handcraft.stop();
-  selectedItem=undefined; groundTile=-1;
+  inventory.select(undefined); groundTile=-1;
   dropDraft={...dropSource,count};
   dropDialog.close();
   setPanel(false);
@@ -1662,11 +1580,16 @@ byId<HTMLFormElement>('drop-form').addEventListener('submit',event=>{
 });
 
 function onAction(action:string) {
+  const delivery=/^submit-development-(\d+)$/.exec(action);
+  if (delivery) {
+    submit({op:Op.SubmitDevelopment,a:Number(delivery[1]),b:1},()=>say(t('ui.developmentSubmitted')));
+    return;
+  }
   const dropAction=/^drop-item-(\d+)-(\d+)$/.exec(action);
   if (dropAction) {
     const [,item,stackIndex]=dropAction.map(Number);
     dropSource={item,stackIndex};
-    const count=backpackStackCount(dropSource);
+    const count=inventory.backpackStackCount(dropSource);
     if (count<=0) return;
     byId('drop-material').textContent=ITEM[item];
     const input=byId<HTMLInputElement>('drop-quantity');
@@ -1677,7 +1600,7 @@ function onAction(action:string) {
   }
   const stackPageAction=/^stack-page-(held|device-\d+-\d+-(?:storage|input|output|module))-(\d+)$/.exec(action);
   if (stackPageAction) {
-    inventoryPages.set(stackPageAction[1],Number(stackPageAction[2]));
+    inventory.setPage(stackPageAction[1],Number(stackPageAction[2]));
     refresh();
     return;
   }
@@ -1750,9 +1673,9 @@ function onAction(action:string) {
     case 'capture': if (data[Meta.FirstLight]) { buildTab='blueprints'; choose('capture'); } return;
     case 'dismiss-blueprint': blueprintDialog.close(); return;
     case 'transfer-amount': {
-      if (!selectedItem) return;
-      const {quantity}=selectedItem;
-      const available=availableInSlot(selectedItem);
+      if (!inventory.selection) return;
+      const {quantity}=inventory.selection;
+      const available=inventory.availableInSlot(inventory.selection);
       if (!available) return;
       const input=byId<HTMLInputElement>('transfer-quantity');
       input.max=String(available); input.value=String(Math.min(quantity ?? available,available));
@@ -1786,8 +1709,8 @@ function onAction(action:string) {
     case 'import': saveFile.click(); return;
     case 'reset-confirm': byId('reset-warning').hidden=false; return;
     case 'reset': {
-      inventoryPages.clear();
-      clearDraft(); closeInfo(); selectedItem=undefined; dropDraft=undefined; groundTile=-1;
+      inventory.reset();
+      clearDraft(); closeInfo(); dropDraft=undefined; groundTile=-1;
       selected=-1; focus=-1; traced=[]; mode='view'; inspectingTile=false; manualWork=false; recenter=true;
       resetDrawers();
       buildTab='catalog';
@@ -1799,13 +1722,13 @@ function onAction(action:string) {
 document.addEventListener('click',event=>{
   const target=event.target as Element;
   const el=target.closest<HTMLButtonElement>('button');
-  if (!el?.dataset.slot) inventoryClick=undefined;
+  if (!el?.dataset.slot) inventory.cancelClick();
   if (target!==canvas && !el?.dataset.quick && !quickInfo.contains(target)) closeInfo();
   if (!el || el.disabled || !ready) return;
-  if (el.dataset.slot) activateSlot(el,event);
+  if (el.dataset.slot) inventory.activateSlot(el,event);
   else if (el.hasAttribute('data-container-put')) {
     const container=readContainer(el);
-    if (selectedItem && container) transferToContainer(selectedItem,container);
+    if (inventory.selection && container) inventory.transferToContainer(inventory.selection,container);
   }
   else if (el.dataset.tool) {
     const next=el.dataset.tool==='wire'?'wire':Number(el.dataset.tool);
@@ -1822,7 +1745,7 @@ document.addEventListener('click',event=>{
   }
   else if (el.dataset.action==='take-cargo') {
     const {tile,lane,item,cargoId,identity}=el.dataset;
-    takeCargo(Number(tile),Number(lane),Number(item),Number(cargoId),Number(identity));
+    inventory.takeCargo(Number(tile),Number(lane),Number(item),Number(cargoId),Number(identity));
   }
   else if (el.dataset.action) onAction(el.dataset.action);
   else if (el.dataset.fault) { selected=Number(el.dataset.fault); inspectingTile=true; focus=selected; renderer?.camera.focus(selected); refresh(); }
@@ -1850,7 +1773,9 @@ document.addEventListener('focusout',event=>{
 window.addEventListener('scroll',syncInfo,true);
 window.addEventListener('resize',syncInfo);
 portraitDrawer.addEventListener('change',()=>{ syncDrawers(); refresh(); });
-panelBody.addEventListener('pointerdown',()=>{panelPointer=true;});
+for (const body of [panelBody,referenceBody]) {
+  body.addEventListener('pointerdown',()=>{panelPointer=true;});
+}
 window.addEventListener('pointerup',()=>{panelPointer=false;});
 window.addEventListener('pointercancel',()=>{panelPointer=false;});
 window.addEventListener('blur',()=>{panelPointer=false;});
@@ -1863,8 +1788,8 @@ window.addEventListener('keydown',event=>{
     setDrawer('reference',false); refresh(); return;
   }
   if (event.key==='Escape' && tool!==undefined && !dialog.open) { onAction('cancel-draft'); return; }
-  if (event.key==='Escape' && (infoKey || infoTile>=0 || selectedItem)) {
-    closeInfo(); selectedItem=undefined; refresh(); return;
+  if (event.key==='Escape' && (infoKey || infoTile>=0 || inventory.selection)) {
+    closeInfo(); inventory.select(undefined); refresh(); return;
   }
   if (!ready || dialog.open || event.ctrlKey || event.metaKey || (event.target as Element).matches('button,input,select')) return;
   if (event.key==='Escape') { clearDraft(); refresh(); }
@@ -1905,9 +1830,15 @@ worker.onmessage=event=>{
   }
   if (message.type==='directory') { readDirectory(message.buffer); return; }
   if (message.type==='blueprints') { blueprints=readBlueprints(message.buffer); refresh(); return; }
+  if (message.type==='construction-payment') {
+    if (constructionSupply.receive(message.request,message.result)) updateDraft();
+    return;
+  }
   if (message.type==='transport-preview') {
     if (transportPreview && transportPreview.request===message.request) {
-      transportPreview.result=new Int32Array(message.result);
+      const result=new Int32Array(message.result);
+      checkRows('TransportPreview.Materials',PreviewRecord.words,result.length,MaterialRecord.words);
+      transportPreview.result=result;
       const shouldConfirm=confirmTransport===message.request;
       if (shouldConfirm) confirmTransport=0;
       updateDraft();
@@ -1922,7 +1853,7 @@ worker.onmessage=event=>{
     if (message.status<0) {
       failed?.(message.status);
       if ([-20,-21,-23].includes(message.status)) transportPreview=undefined;
-      if ([-15,-22].includes(message.status)) selectedItem=undefined;
+      if ([-15,-22].includes(message.status)) inventory.select(undefined);
       const error=ERRORS[message.status] ?? '操作失败';
       if (blueprintDialog.open) blueprintError(error);
       else say(error,true);
@@ -2013,8 +1944,8 @@ worker.onmessage=event=>{
     return;
   }
   if (message.type==='restored') {
-    inventoryPages.clear();
-    clearDraft(); closeInfo(); selectedItem=undefined; dropDraft=undefined; groundTile=-1;
+    inventory.reset();
+    clearDraft(); closeInfo(); dropDraft=undefined; groundTile=-1;
     mode='view'; focus=-1; selected=-1; traced=[]; inspectingTile=false; manualWork=false; recenter=true;
     resetDrawers();
     buildTab='catalog';
@@ -2075,7 +2006,7 @@ function requestView(cam:Renderer['camera']) {
   const [left,top]=cam.toWorld(0,0), [right,bottom]=cam.toWorld(cam.width,cam.height);
   const lower=(edge:number)=>Math.max(0,Math.floor((edge-viewPadding)/8)*8);
   const upper=(edge:number,limit:number)=>Math.min(limit,Math.ceil((edge+viewPadding)/8)*8);
-  const scope=[lower(left),lower(top),upper(right,W),upper(bottom,H),selected,infoTile,groundTile,selectedItem?.tile ?? -1];
+  const scope=[lower(left),lower(top),upper(right,W),upper(bottom,H),selected,infoTile,groundTile,inventory.selection?.tile ?? -1];
   if (scope.some((word,i)=>word!==lastView[i])) {
     lastView=scope;
     worker.postMessage({type:'view',scope});

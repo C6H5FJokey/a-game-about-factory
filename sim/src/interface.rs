@@ -23,18 +23,22 @@ impl World {
             let grade = miner_grade(cell.kind);
             let ore = cell.mining_ore;
             let p = cell.power;
-            out.extend([
-                tile as i32,
-                cell.identity,
-                grade.into(),
-                ore.into(),
-                p.demand.into(),
-                p.used.into(),
-                p.generated.into(),
-                p.charged.into(),
-                p.discharged.into(),
-            ]);
-            self.write_slots(tile, out);
+            let start = out.len();
+            wire::Device {
+                tile: tile as i32,
+                identity: cell.identity,
+                grade: grade.into(),
+                ore: ore.into(),
+                demand: p.demand.into(),
+                used: p.used.into(),
+                generated: p.generated.into(),
+                charged: p.charged.into(),
+                discharged: p.discharged.into(),
+                slots: 0,
+            }
+            .append(out);
+            let slots = self.append_slots(tile, out);
+            out[start + wire::Device::SLOTS] = slots;
         }
     }
 
@@ -124,42 +128,47 @@ pub extern "C" fn directory() -> usize {
                 }
                 _ => drill_ore(kind).map_or(0, |ore| 1 << ore),
             };
-            out.extend([
-                kind.into(),
+            wire::Design {
+                kind: kind.into(),
                 minimum,
-                miner_grade(kind).into(),
-                ore_mask,
-                demand.into(),
-                generation.into(),
-                if batteries { BATTERY_POWER.into() } else { 0 },
-                if batteries {
+                grade: miner_grade(kind).into(),
+                ores: ore_mask,
+                demand: demand.into(),
+                generation: generation.into(),
+                battery_power: if batteries { BATTERY_POWER.into() } else { 0 },
+                battery_capacity: if batteries {
                     BATTERY_CAPACITY as i32
                 } else {
                     0
                 },
-                recipe.as_ref().map_or(0, |r| r.output.into()),
-                recipe.as_ref().map_or(0, |r| r.amount.into()),
-                recipe.as_ref().map_or(0, |r| r.ticks as i32),
-                if kind == CABLE {
+                output: recipe.as_ref().map_or(0, |r| r.output.into()),
+                amount: recipe.as_ref().map_or(0, |r| r.amount.into()),
+                ticks: recipe.as_ref().map_or(0, |r| r.ticks as i32),
+                span: if kind == CABLE {
                     world.cable_span() as i32
                 } else {
                     1
                 },
-                materials.len() as i32,
-            ]);
-            for &(item, count) in materials {
-                out.extend([item.into(), count as i32]);
+                materials: materials.len() as i32,
             }
-            out.extend([
-                match kind {
+            .append(out);
+            for &(item, count) in materials {
+                wire::Material {
+                    item: item.into(),
+                    count: count as i32,
+                }
+                .append(out);
+            }
+            wire::DesignBelt {
+                tier: match kind {
                     BELT => 1,
                     FAST_BELT => 2,
                     EXPRESS_BELT => 3,
                     ULTRA_BELT => 4,
                     _ => 0,
                 },
-                belt_lanes(kind) as i32,
-                if is_belt(kind) {
+                lanes: belt_lanes(kind) as i32,
+                interval: if is_belt(kind) {
                     if world.legacy_recipes {
                         belt_interval(kind) as i32
                     } else {
@@ -168,8 +177,9 @@ pub extern "C" fn directory() -> usize {
                 } else {
                     0
                 },
-                is_belt(kind) as i32,
-            ]);
+                lane_capacity: is_belt(kind) as i32,
+            }
+            .append(out);
             for lane in 0..2 {
                 let inputs = (0..4)
                     .filter(|&flow| belt_input(kind, 0, flow) == Some(lane))
@@ -182,7 +192,11 @@ pub extern "C" fn directory() -> usize {
                 } else {
                     0
                 };
-                out.extend([inputs, outputs]);
+                wire::Port {
+                    input: inputs,
+                    output: outputs,
+                }
+                .append(out);
             }
         }
         out.len()

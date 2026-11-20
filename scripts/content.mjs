@@ -11,7 +11,7 @@ const registryPath = resolve(root, 'data/registry.json');
 const protocolPath = resolve(root, 'data/protocol.json');
 const identifier = /^[a-z][a-z0-9-]{0,47}$/;
 const defaultLanguage = 'zh-CN';
-const fields = ['items', 'machines', 'recipes', 'locales'];
+const fields = ['items', 'machines', 'recipes', 'locales', 'development'];
 const keyPattern = /^[a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9_-]+)+$/;
 const problems = (at, message) => { throw new Error(`${at}: ${message}`); };
 const check = (condition, at, message) => { if (!condition) problems(at, message); };
@@ -75,12 +75,13 @@ export function loadContent(configPath = process.env.DAYBREAK_CONTENT_CONFIG || 
   }
   const registry = read(registryPath);
   const protocol = object(read(protocolPath), 'data/protocol.json');
-  for (const name of ['world', 'terminalWorld']) {
+  for (const name of ['world', 'terminalWorld', 'denseWorld']) {
     const path = 'protocol.' + name;
     const geometry = object(protocol[name], path);
     integer(geometry.width, 1, 65_534, path + '.width');
     integer(geometry.height, 1, 65_534, path + '.height');
-    check(geometry.width * geometry.height < 65_535, path, 'map tiles must fit the tile index and its sentinel');
+    check(geometry.width * geometry.height <= Math.floor(2_147_483_647 / 2),
+      path, 'tile IDs, two transport lanes per tile and payment sites must fit signed 32-bit words');
   }
   const snapshot = object(protocol.snapshot, 'protocol.snapshot');
   integer(snapshot.headerWords, 1, 2_147_483_647, 'protocol.snapshot.headerWords');
@@ -92,6 +93,15 @@ export function loadContent(configPath = process.env.DAYBREAK_CONTENT_CONFIG || 
     'protocol.view', 'layout and dynamic fields must partition the full cell record');
   check(new Set(view.sections).size === view.sections.length && view.sections.every(name => /^[A-Z][A-Za-z]+$/.test(name)),
     'protocol.view.sections', 'expected unique section names');
+  const records = object(protocol.records, 'protocol.records');
+  for (const [name, fields] of Object.entries(records)) {
+    check(/^[A-Z][A-Za-z]+$/.test(name) && Array.isArray(fields) && fields.length > 0
+      && new Set(fields).size === fields.length && fields.every(field => /^[a-z][A-Za-z]*$/.test(field) && field !== 'words'),
+    'protocol.records.' + name, 'expected a record with unique named fields');
+  }
+  check(records.Cargo?.length === records.Arrival?.length
+    && records.Cargo.includes('location') && records.Cargo.indexOf('location') === records.Arrival.indexOf('origin'),
+  'protocol.records.Transport', 'cargo and arrival rows share a stride and signed location column');
   const opcodes = Object.entries(object(protocol.commands, 'protocol.commands'));
   const codes = new Set();
   check(opcodes.length > 0, 'protocol.commands', 'at least one command is required');
@@ -127,6 +137,8 @@ export function loadContent(configPath = process.env.DAYBREAK_CONTENT_CONFIG || 
   }
   for (const category of Object.keys(files)) check(fields.includes(category), profileAt, `unknown file category "${category}"`);
   for (const category of fields.slice(0, 3)) sources[category] = pathFor(files[category], `${profileAt}.files.${category}`);
+  sources.development = files.development === undefined ? resolve(root, 'data/development.json')
+    : pathFor(files.development, `${profileAt}.files.development`);
 
   const locales = {};
   const localeFiles = { ...object(defaults.locales, `${profileAt}.files.locales`),
@@ -152,6 +164,7 @@ export function loadContent(configPath = process.env.DAYBREAK_CONTENT_CONFIG || 
     'ui.stock', 'ui.full', 'ui.individualStacks', 'ui.unavailable', 'ui.selectTool', 'ui.held', 'ui.input',
     'ui.output', 'ui.module', 'ui.cargo', 'ui.display', 'ui.invalidSave', 'ui.invalidAutoSave',
     'ui.sameContentRequired', 'tasks.make-miner.title',
+    'ui.developmentStationRequired', 'ui.submitDevelopment', 'ui.developmentSubmitted',
     ...Array.from({ length:25 }, (_, i) => `errors.${i+1}`),
   ];
   for (const key of required) {
@@ -357,7 +370,43 @@ export function loadContent(configPath = process.env.DAYBREAK_CONTENT_CONFIG || 
   const runtimeRecipes = recipes.map(recipe => ({
     ...recipe, baseTicks: Math.ceil(recipe.baseTicks * SIM_HZ / CONTENT_HZ),
   }));
-  const signature = digest({ dataset, version, items, machines, recipes: runtimeRecipes, locales, SIM_HZ, CONTENT_HZ, protocol }).readUInt32LE();
+  const developmentAt = location(sources.development);
+  const rawDevelopment = object(read(sources.development), developmentAt);
+  allowedFields(rawDevelopment, ['initial','stages'], developmentAt);
+  function limits(value, at) {
+    const row = object(value, at);
+    allowedFields(row, ['slots','speed','minZoom','maxZoom'], at);
+    const speed = integer(row.speed, 1, 4, `${at}.speed`);
+    check([1,2,4].includes(speed), at, 'expected a supported speed limit');
+    const minZoom = integer(row.minZoom, 1, 64, `${at}.minZoom`);
+    return { slots:integer(row.slots, 1, 256, `${at}.slots`), speed, minZoom,
+      maxZoom:integer(row.maxZoom, minZoom, 256, `${at}.maxZoom`) };
+  }
+  const initial = limits(rawDevelopment.initial, `${developmentAt}.initial`);
+  const developmentStages = list(rawDevelopment.stages, `${developmentAt}.stages`);
+  check(developmentStages.length === 1, developmentAt, 'the current progression layout has one reward tier');
+  const stages = developmentStages.map((value, i) => {
+    const at = `${developmentAt}.stages[${i}]`;
+    const row = object(value, at);
+    allowedFields(row, ['id','minimumStage','requirements','limits','unlocks','nameKey','descriptionKey','rewardKey'], at);
+    check(typeof row.id === 'string' && identifier.test(row.id), at, 'invalid stage ID');
+    const requirements = materials(row.requirements, `${at}.requirements`, 65535, itemRegistry.size);
+    check(requirements.length > 0 && requirements.reduce((slots, {item,amount}) =>
+      slots + Math.ceil(amount/items[item].stackLimit), 0) <= initial.slots, at, 'delivery must fit in the initial backpack');
+    const unlocks = list(row.unlocks, `${at}.unlocks`).map(id => known(id,machineRegistry, `${at}.unlocks`).code);
+    check(unlocks.every(code=>[26,27,28,29,32,34].includes(code)) && new Set(unlocks).size === unlocks.length,
+      at, 'expected distinct advanced buildable devices');
+    check(typeof row.rewardKey === 'string' && Object.hasOwn(fallback,row.rewardKey) &&
+      parameters(fallback[row.rewardKey],row.rewardKey)==='minZoom,slots,speed',
+      at, 'expected reward translation parameters minZoom,slots,speed');
+    const upgraded = limits(row.limits,`${at}.limits`);
+    check(upgraded.slots>=initial.slots && upgraded.speed>=initial.speed &&
+      upgraded.minZoom<=initial.minZoom && upgraded.maxZoom>=initial.maxZoom, at, 'reward limits must preserve initial capabilities');
+    return { id:row.id, minimumStage:integer(row.minimumStage,11,22,`${at}.minimumStage`),
+      requirements, limits:upgraded, unlocks, rewardKey:row.rewardKey, ...text(row,'development',at) };
+  });
+  const development={initial,stages};
+  const signature = digest({ dataset, version, items, machines, recipes: runtimeRecipes, locales, development, SIM_HZ, CONTENT_HZ, protocol }).readUInt32LE();
   const tagFor = hash => {
     const tag = [version, ...Buffer.from(dataset), ...[0, 4, 8, 12].map(at => hash.readInt32LE(at))];
     return [...tag,tag.length+1];
@@ -365,7 +414,7 @@ export function loadContent(configPath = process.env.DAYBREAK_CONTENT_CONFIG || 
   const saveIdentity = marker.toString('hex').slice(0, 32);
   const legacySaveIdentity = legacyMarker.toString('hex').slice(0, 32);
   return { frontend: { dataset, version, signature, saveIdentity, legacySaveIdentity, hz: SIM_HZ, contentHz: CONTENT_HZ,
-    items, machines, recipes: runtimeRecipes, compatibleRecipes, locales },
+    items, machines, recipes: runtimeRecipes, compatibleRecipes, development, locales },
     dependencies: [...dependencies], protocol, activeRecipes, tag:tagFor(marker), legacyTag:tagFor(legacyMarker) };
 }
 
@@ -375,11 +424,32 @@ function pairs(rows, size) {
   return `[${values.join(', ')}]`;
 }
 
+function emitRustRecords(records) {
+  const snake = name => name.replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase();
+  return Object.entries(records).map(([name, fields]) => {
+    const names = fields.map(snake);
+    return `    pub struct ${name} {
+${names.map(field => `        pub ${field}: i32,`).join('\n')}
+    }
+    impl ${name} {
+        pub const WORDS: usize = ${names.length};
+${names.map((field, index) => `        pub const ${field.toUpperCase()}: usize = ${index};`).join('\n')}
+        #[inline]
+        pub fn append(self, out: &mut Vec<i32>) {
+            out.extend([${names.map(field => 'self.' + field).join(', ')}]);
+        }
+    }`;
+  }).join('\n');
+}
+
 export function emitRust(content) {
-  const { machines, items, recipes, signature } = content.frontend;
-  const { world, terminalWorld, snapshot, view, commands } = content.protocol;
+  const { machines, items, recipes, signature, development } = content.frontend;
+  const { world, terminalWorld, denseWorld, snapshot, view, commands } = content.protocol;
   const stackRow = key => `[0, ${items.slice(1).map(item => item[key]).join(', ')}]`;
   const list = key => `[${machines.map(row => row[key]).join(', ')}]`;
+  const stage = development.stages[0];
+  const limits = ({slots,speed,minZoom,maxZoom}) =>
+    `crate::progression::Limits { slots: ${slots}, speed: ${speed}, min_zoom: ${minZoom}, max_zoom: ${maxZoom} }`;
   return `// Generated by scripts/content.mjs.
 pub const HZ: u32 = ${SIM_HZ};
 pub const CONTENT_HZ: u32 = ${CONTENT_HZ};
@@ -389,12 +459,20 @@ pub const BUILD_SIGNATURE: u32 = ${signature};
 pub const WORLD_WIDTH: usize = ${world.width};
 #[cfg(not(feature = "terminal-profile"))]
 pub const WORLD_HEIGHT: usize = ${world.height};
-#[cfg(feature = "terminal-profile")]
+#[cfg(all(feature = "terminal-profile", not(feature = "dense-profile")))]
 pub const TERMINAL_WIDTH: usize = ${terminalWorld.width};
-#[cfg(feature = "terminal-profile")]
+#[cfg(all(feature = "terminal-profile", not(feature = "dense-profile")))]
 pub const TERMINAL_HEIGHT: usize = ${terminalWorld.height};
+#[cfg(feature = "dense-profile")]
+pub const TERMINAL_WIDTH: usize = ${denseWorld.width};
+#[cfg(feature = "dense-profile")]
+pub const TERMINAL_HEIGHT: usize = ${denseWorld.height};
 pub const SNAPSHOT_HEADER_WORDS: usize = ${snapshot.headerWords};
 pub const SNAPSHOT_CELL_WORDS: usize = ${snapshot.cellWords};
+#[allow(dead_code)]
+pub mod wire {
+${emitRustRecords(content.protocol.records)}
+}
 pub mod view {
     pub const BOUNDS_WORDS: usize = ${view.boundsWords};
     pub const WATCHED_TILES: usize = ${view.watchedTiles};
@@ -410,6 +488,12 @@ ${Object.entries(commands).map(([name, code]) =>
 }
 pub const SAVE_DATA_TAG: &[i32] = &[${content.tag.join(', ')}];
 pub const LEGACY_SAVE_DATA_TAG: &[i32] = &[${content.legacyTag.join(', ')}];
+pub const DEVELOPMENT_LIMITS: [crate::progression::Limits; 2] = [${limits(development.initial)}, ${limits(stage.limits)}];
+pub const DEVELOPMENT_STAGE: crate::progression::DevelopmentStage = crate::progression::DevelopmentStage {
+    minimum_stage: ${stage.minimumStage},
+    requirements: &${pairs(stage.requirements, 0)},
+    unlocks: &[${stage.unlocks.join(', ')}],
+};
 pub const STACK_LIMITS: [[u32; ITEMS]; 2] = [${stackRow('stackLimit')}, ${stackRow('tierOneStackLimit')}];
 pub const BUILD_MATERIALS: [&[(u8, u32)]; MAX_KIND as usize + 1] = [
 ${machines.map(row => `    &${pairs(row.materials, 0)},`).join('\n')}
@@ -503,15 +587,19 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
       write(resolve(target), emitRust(content));
       for (const dependency of content.dependencies) console.log(`cargo:rerun-if-changed=${dependency}`);
     } else if (mode === '--frontend') {
-      const { world, terminalWorld, snapshot, view, commands } = content.protocol;
+      const { world, terminalWorld, denseWorld, snapshot, view, commands } = content.protocol;
       write(resolve(root, 'src/generated-content.ts'), `// Generated by scripts/content.mjs.
 export const SIM_HZ = ${SIM_HZ};
 export const WORLD_WIDTH = ${world.width}, WORLD_HEIGHT = ${world.height};
 export const TERMINAL_WIDTH = ${terminalWorld.width}, TERMINAL_HEIGHT = ${terminalWorld.height};
+export const DENSE_WIDTH = ${denseWorld.width}, DENSE_HEIGHT = ${denseWorld.height};
 export const SNAPSHOT_HEADER_WORDS = ${snapshot.headerWords}, SNAPSHOT_CELL_WORDS = ${snapshot.cellWords};
 export const VIEW_BOUNDS_WORDS = ${view.boundsWords}, VIEW_WATCHED_TILES = ${view.watchedTiles}, VIEW_LAYOUT_HEADER_WORDS = ${view.layoutHeaderWords};
 export const VIEW_LAYOUT_FIELDS = ${JSON.stringify(view.layoutFields)}, VIEW_DYNAMIC_FIELDS = ${JSON.stringify(view.dynamicFields)};
 export const VIEW_SECTION_COUNT = ${view.sections.length};
+export const VIEW_SECTION_NAMES = ${JSON.stringify(view.sections)} as const;
+${Object.entries(content.protocol.records).map(([name, fields]) =>
+  `export const ${name}Record = ${JSON.stringify(Object.fromEntries([['words', fields.length],...fields.map((field,i)=>[field,i])]))} as const;`).join('\n')}
 export const enum ViewSection {
 ${view.sections.map(name => `  ${name},`).join('\n')}
 }
